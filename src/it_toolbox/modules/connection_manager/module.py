@@ -15,3 +15,6 @@ class ConnectionManagerModule(ToolModule):
         if self._widget is None:
             self._widget = ConnectionManagerView()
         return self._widget
+
+    def create_sidebar_widget(self) -> QWidget | None:
+        return self.create_widget().sidebar_tree

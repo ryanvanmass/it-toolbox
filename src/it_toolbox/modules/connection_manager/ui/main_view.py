@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QTabBar,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -87,11 +86,6 @@ class ConnectionManagerView(QWidget):
         self._tabs.setTabsClosable(True)
         self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tabs.currentChanged.connect(self._on_session_tab_changed)
-        # GCP browsing lives as the first, permanent tab alongside session
-        # tabs rather than a separate always-visible panel — it's
-        # navigation, not a session, so it isn't closable.
-        self._tabs.addTab(self._tree, "GCP")
-        self._tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
@@ -116,6 +110,14 @@ class ConnectionManagerView(QWidget):
             on_result=self._on_startup_account_checked,
             on_error=self._on_auth_error,
         )
+
+    @property
+    def sidebar_tree(self) -> QTreeWidget:
+        """The GCP project/instance browser, hosted in the app sidebar
+        (nested under this module's entry) rather than in this view's own
+        layout — see ConnectionManagerModule.create_sidebar_widget().
+        """
+        return self._tree
 
     # -- Sign in / out -----------------------------------------------------
 

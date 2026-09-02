@@ -21,3 +21,10 @@ class ToolModule(ABC):
     @abstractmethod
     def create_widget(self) -> QWidget:
         """Build (or return a cached) widget for this module's main view."""
+
+    def create_sidebar_widget(self) -> QWidget | None:
+        """Optional extra navigation content shown nested under this
+        module's entry in the sidebar (e.g. a resource browser tree).
+        Return None (the default) if the module has none.
+        """
+        return None
