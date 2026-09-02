@@ -1,7 +1,4 @@
-import logging
-import platform
-
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -10,7 +7,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -27,16 +23,11 @@ from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import Acti
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
-from it_toolbox.widgets.terminal_widget import TerminalWidget
-
-logger = logging.getLogger(__name__)
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 INSTANCES_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
 INSTANCE_ROLE = Qt.ItemDataRole.UserRole + 2
 IS_GCP_ROOT_ROLE = Qt.ItemDataRole.UserRole + 3
-
-_IS_WINDOWS = platform.system() == "Windows"
 
 
 class ConnectionManagerView(QWidget):
@@ -44,8 +35,7 @@ class ConnectionManagerView(QWidget):
         super().__init__(parent)
 
         self._account: str | None = None
-        self._active_sessions: dict[int, tuple[str, BackgroundTunnel]] = {}
-        self._session_tab_widgets: dict[int, QWidget] = {}
+        self._active_sessions: dict[int, BackgroundTunnel] = {}
         self._next_session_id = 1
         self._all_projects: list[GcpProject] = []
 
@@ -68,14 +58,17 @@ class ConnectionManagerView(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
 
-        self._tabs = QTabWidget()
-        self._tabs.setTabsClosable(True)
-        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        self._tabs.currentChanged.connect(self._on_session_tab_changed)
+        placeholder = QLabel(
+            "Connections open in your system's RDP/SSH client.\n\n"
+            "Right-click a VM in the sidebar to connect — use Options → "
+            "View Active Sessions to see or disconnect open ones."
+        )
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setWordWrap(True)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
-        layout.addWidget(self._tabs, 1)
+        layout.addWidget(placeholder, 1)
 
         app = QApplication.instance()
         if app is not None:
@@ -328,7 +321,7 @@ class ConnectionManagerView(QWidget):
             username=username,
         )
 
-    # -- Connect: tunnel, then embed (or fall back to external) --------------
+    # -- Connect: tunnel, then launch the external RDP/SSH client -------------
 
     def _connect(
         self,
@@ -350,125 +343,38 @@ class ConnectionManagerView(QWidget):
 
         self._status_label.setText(f"Connecting to {display_name} via {kind.upper()}…")
         async_utils.run_in_background(
-            lambda: self._start_tunnel(target),
-            on_result=lambda tunnel: self._on_tunnel_ready(tunnel, display_name, kind, username),
+            lambda: self._connect_and_launch(target, kind, username),
+            on_result=lambda tunnel: self._on_session_started(display_name, kind, tunnel),
             on_error=self._on_session_error,
         )
 
     @staticmethod
-    def _start_tunnel(target: IapTunnelTarget) -> BackgroundTunnel:
+    def _connect_and_launch(
+        target: IapTunnelTarget, kind: str, username: str | None
+    ) -> BackgroundTunnel:
         tunnel = BackgroundTunnel(
             target, get_access_token=lambda: gcp_auth.get_credentials().token
         )
-        tunnel.start()
+        port = tunnel.start()
+        try:
+            if kind == "rdp":
+                session_launcher.launch_rdp("127.0.0.1", port, username)
+            else:
+                session_launcher.launch_ssh("127.0.0.1", port, username)
+        except session_launcher.SessionLaunchError:
+            tunnel.stop()
+            raise
         return tunnel
 
-    def _on_tunnel_ready(
-        self, tunnel: BackgroundTunnel, display_name: str, kind: str, username: str | None
-    ) -> None:
+    def _on_session_started(self, display_name: str, kind: str, tunnel: BackgroundTunnel) -> None:
         self._status_label.setText(f"Signed in as {self._account}")
 
         session_id = self._next_session_id
         self._next_session_id += 1
-        self._active_sessions[session_id] = (kind, tunnel)
-
-        # Widget creation must happen on this (the main) thread — unlike the
-        # tunnel itself, which was fine to start in the background.
-        try:
-            if kind == "ssh":
-                self._embed_ssh(session_id, display_name, tunnel.port, username)
-            elif kind == "rdp" and _IS_WINDOWS:
-                self._embed_rdp(session_id, display_name, tunnel.port, username)
-            else:
-                self._launch_external(kind, tunnel.port, username)
-        except Exception:
-            logger.warning(
-                "Embedding failed for %s, falling back to an external client", display_name,
-                exc_info=True,
-            )
-            if not self._fallback_to_external(session_id, kind, tunnel.port, username):
-                return
+        self._active_sessions[session_id] = tunnel
 
         label = f"{display_name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}"
         self._active_sessions_dialog.add_session(session_id, label)
-
-    def _embed_ssh(self, session_id: int, display_name: str, port: int, username: str | None) -> None:
-        target = f"{username}@127.0.0.1" if username else "127.0.0.1"
-        terminal = TerminalWidget(["ssh", "-p", str(port), target])
-        terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
-        self._session_tab_widgets[session_id] = terminal
-        index = self._tabs.addTab(terminal, display_name)
-        self._tabs.setCurrentIndex(index)
-        terminal.setFocus()
-
-    def _embed_rdp(self, session_id: int, display_name: str, port: int, username: str | None) -> None:
-        from it_toolbox.widgets.rdp_widget import RdpWidget  # Windows-only import
-
-        rdp = RdpWidget("127.0.0.1", port, username)
-        rdp.disconnected.connect(lambda: self._on_disconnect_requested(session_id))
-        rdp.connect_failed.connect(
-            lambda message: self._on_rdp_connect_failed(
-                session_id, display_name, port, username, message
-            )
-        )
-        self._session_tab_widgets[session_id] = rdp
-        index = self._tabs.addTab(rdp, display_name)
-        self._tabs.setCurrentIndex(index)
-        rdp.setFocus()
-        # Connect() needs the control to have a real native window handle,
-        # which it won't until after this widget has actually been shown
-        # (confirmed live: calling it synchronously here, before addTab()
-        # above takes effect, reliably fails with E_INVALIDARG) — defer to
-        # the next event loop iteration instead.
-        QTimer.singleShot(0, rdp.connect_session)
-
-    def _on_rdp_connect_failed(
-        self, session_id: int, display_name: str, port: int, username: str | None, message: str
-    ) -> None:
-        logger.warning("Embedded RDP connect failed for %s: %s", display_name, message)
-        if self._fallback_to_external(session_id, "rdp", port, username):
-            label = f"{display_name} (RDP) — 127.0.0.1:{port}"
-            self._active_sessions_dialog.add_session(session_id, label)
-
-    def _fallback_to_external(
-        self, session_id: int, kind: str, port: int, username: str | None
-    ) -> bool:
-        """Tear down any embedded widget for `session_id` and launch an
-        external client instead. Returns False if the session had to be
-        abandoned entirely (the external launch failed too).
-        """
-        widget = self._session_tab_widgets.pop(session_id, None)
-        if widget is not None:
-            index = self._tabs.indexOf(widget)
-            if index != -1:
-                self._tabs.removeTab(index)
-            close_session = getattr(widget, "close_session", None)
-            if close_session is not None:
-                close_session()
-            widget.deleteLater()
-
-        try:
-            self._launch_external(kind, port, username)
-        except session_launcher.SessionLaunchError as exc:
-            entry = self._active_sessions.pop(session_id, None)
-            if entry is not None:
-                _, tunnel = entry
-                tunnel.stop()
-            QMessageBox.warning(self, "Connection failed", str(exc))
-            return False
-        return True
-
-    def _on_session_tab_changed(self, index: int) -> None:
-        widget = self._tabs.widget(index)
-        if widget is not None:
-            widget.setFocus()
-
-    @staticmethod
-    def _launch_external(kind: str, port: int, username: str | None) -> None:
-        if kind == "rdp":
-            session_launcher.launch_rdp("127.0.0.1", port, username)
-        else:
-            session_launcher.launch_ssh("127.0.0.1", port, username)
 
     def _on_session_error(self, error: Exception) -> None:
         self._status_label.setText(f"Signed in as {self._account}")
@@ -476,39 +382,13 @@ class ConnectionManagerView(QWidget):
 
     # -- Disconnect ------------------------------------------------------
 
-    def _on_tab_close_requested(self, index: int) -> None:
-        widget = self._tabs.widget(index)
-        session_id = next(
-            (sid for sid, w in self._session_tab_widgets.items() if w is widget), None
-        )
-        if session_id is not None:
-            self._on_disconnect_requested(session_id)
-
     def _on_disconnect_requested(self, session_id: int) -> None:
         self._active_sessions_dialog.remove_session(session_id)
-
-        widget = self._session_tab_widgets.pop(session_id, None)
-        if widget is not None:
-            index = self._tabs.indexOf(widget)
-            if index != -1:
-                self._tabs.removeTab(index)
-            close_session = getattr(widget, "close_session", None)
-            if close_session is not None:
-                close_session()
-            widget.deleteLater()
-
-        entry = self._active_sessions.pop(session_id, None)
-        if entry is not None:
-            _, tunnel = entry
+        tunnel = self._active_sessions.pop(session_id, None)
+        if tunnel is not None:
             async_utils.run_in_background(tunnel.stop)
 
     def _stop_all_sessions(self) -> None:
-        for widget in self._session_tab_widgets.values():
-            close_session = getattr(widget, "close_session", None)
-            if close_session is not None:
-                close_session()
-        self._session_tab_widgets.clear()
-
-        for _, tunnel in self._active_sessions.values():
+        for tunnel in self._active_sessions.values():
             tunnel.stop(timeout=2)
         self._active_sessions.clear()
