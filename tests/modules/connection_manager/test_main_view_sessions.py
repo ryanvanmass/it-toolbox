@@ -47,6 +47,24 @@ def test_ssh_connect_embeds_terminal_and_registers_session(qtbot, monkeypatch):
     assert len(view._session_tab_widgets) == 1
 
 
+def test_ssh_connect_gives_the_terminal_keyboard_focus(qtbot, monkeypatch):
+    # Regression test: keyPressEvent() only ever fires for the widget that
+    # actually has Qt focus. A prior version created the terminal tab but
+    # never called setFocus() on it, so real keystrokes silently went
+    # nowhere — invisible in a test that calls keyPressEvent() directly
+    # instead of exercising real focus, which is exactly how this was
+    # missed originally.
+    view = _make_view(qtbot, monkeypatch)
+    view.show()
+    qtbot.waitExposed(view)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
+
+    terminal = view._session_tabs.widget(0)
+    qtbot.waitUntil(lambda: terminal.hasFocus(), timeout=2000)
+
+
 def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
     tunnel = _FakeTunnel()

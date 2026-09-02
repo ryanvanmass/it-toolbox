@@ -86,6 +86,7 @@ class ConnectionManagerView(QWidget):
         self._session_tabs = QTabWidget()
         self._session_tabs.setTabsClosable(True)
         self._session_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self._session_tabs.currentChanged.connect(self._on_session_tab_changed)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._tree)
@@ -395,6 +396,7 @@ class ConnectionManagerView(QWidget):
         self._session_tab_widgets[session_id] = terminal
         index = self._session_tabs.addTab(terminal, display_name)
         self._session_tabs.setCurrentIndex(index)
+        terminal.setFocus()
 
     def _embed_rdp(self, session_id: int, display_name: str, port: int, username: str | None) -> None:
         from it_toolbox.widgets.rdp_widget import RdpWidget  # Windows-only import
@@ -404,6 +406,12 @@ class ConnectionManagerView(QWidget):
         self._session_tab_widgets[session_id] = rdp
         index = self._session_tabs.addTab(rdp, display_name)
         self._session_tabs.setCurrentIndex(index)
+        rdp.setFocus()
+
+    def _on_session_tab_changed(self, index: int) -> None:
+        widget = self._session_tabs.widget(index)
+        if widget is not None:
+            widget.setFocus()
 
     @staticmethod
     def _launch_external(kind: str, port: int, username: str | None) -> None:
