@@ -13,12 +13,15 @@ widget has never been shown, so the ActiveX control has no real native
 window handle yet, and Connect() needs one. connect_session() must be
 called only after the widget is on screen (main_view defers it with
 QTimer.singleShot(0, ...) right after addTab()). After that fix, Connect()
-succeeded but the session took over full-screen instead of rendering in
-the widget — the control defaults to negotiating a full-screen session
-unless FullScreen is explicitly set False, a well-documented gotcha of
-embedding it. Still unconfirmed: whether OnDisconnected actually fires
-under this exact attribute name — if disconnecting doesn't clean up the
-session, that's the first thing to check.
+succeeded but rendered "full screen" — actually just DesktopWidth x
+DesktopHeight (1024x768) unconstrained by this widget's actual size, with
+nothing telling the control to fit it. Explicitly setting FullScreen=False
+made Connect() itself start failing with E_INVALIDARG again (confirmed
+live) — reverted. AdvancedSettings2.SmartSizing=True is the real
+documented mechanism for scaling the session to the container's size;
+untested as of this comment. Still unconfirmed: whether OnDisconnected
+actually fires under this exact attribute name — if disconnecting doesn't
+clean up the session, that's the first thing to check.
 """
 
 import sys
@@ -57,17 +60,17 @@ class RdpWidget(QAxWidget):
         self.setProperty("DesktopWidth", 1024)
         self.setProperty("DesktopHeight", 768)
         self.setProperty("ColorDepth", 32)
-        # Without this, the control negotiates (and takes over) a
-        # full-screen session instead of rendering embedded in this widget
-        # — a well-documented gotcha, not optional for embedding.
-        self.setProperty("FullScreen", False)
 
         # RDPPort lives under the AdvancedSettings2 sub-object rather than
         # as a top-level property — needed since we're always connecting to
-        # a local IAP tunnel port, never the default 3389.
+        # a local IAP tunnel port, never the default 3389. SmartSizing makes
+        # the control scale the session to fit this widget's actual size
+        # instead of rendering at a fixed DesktopWidth/DesktopHeight (which,
+        # unconstrained, is what was showing as "full screen").
         advanced_settings = self.querySubObject("AdvancedSettings2")
         if advanced_settings is not None:
             advanced_settings.setProperty("RDPPort", port)
+            advanced_settings.setProperty("SmartSizing", True)
 
         # PySide6 exposes COM events as Qt signals named after the event.
         # This attribute may not exist under this exact name/casing —
