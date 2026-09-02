@@ -1,4 +1,4 @@
-from it_toolbox.modules.connection_manager.models import GcpProject
+from it_toolbox.modules.connection_manager.models import GcpProject, GcsBucket, Instance
 from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManagerView
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
@@ -36,7 +36,89 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
     assert gcp_category.text(0) == "GCP"
     assert gcp_category.isExpanded()
     assert gcp_category.childCount() == 1
-    assert gcp_category.child(0).text(0) == "Project One"
+    project_item = gcp_category.child(0)
+    assert project_item.text(0) == "Project One"
+
+
+def test_project_has_vms_and_buckets_categories(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        CATEGORY_BUCKETS,
+        CATEGORY_ROLE,
+        CATEGORY_VMS,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    project_item = view._tree.topLevelItem(0).child(0)
+    assert project_item.childCount() == 2
+    assert project_item.child(0).text(0) == "VMs"
+    assert project_item.child(0).data(0, CATEGORY_ROLE) == CATEGORY_VMS
+    assert project_item.child(1).text(0) == "Buckets"
+    assert project_item.child(1).data(0, CATEGORY_ROLE) == CATEGORY_BUCKETS
+
+
+def test_expanding_buckets_category_populates_bucket_items(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import BUCKET_ROLE
+
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    buckets_item = view._tree.topLevelItem(0).child(0).child(1)
+
+    bucket = GcsBucket(name="my-bucket", project_id="p1")
+    view._populate_buckets(buckets_item, [bucket])
+
+    assert buckets_item.childCount() == 1
+    assert buckets_item.child(0).text(0) == "my-bucket"
+    assert buckets_item.child(0).data(0, BUCKET_ROLE) == bucket
+
+
+def test_expanding_vms_category_populates_instance_items(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    vms_item = view._tree.topLevelItem(0).child(0).child(0)
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view._populate_instances(vms_item, [instance])
+
+    assert vms_item.childCount() == 1
+    assert vms_item.child(0).text(0) == "vm-1"
+
+
+def test_double_clicking_a_bucket_opens_a_browser_tab(qtbot, monkeypatch):
+    import it_toolbox.widgets.bucket_browser_widget as browser_module
+
+    monkeypatch.setattr(
+        browser_module.gcp_client, "list_objects", lambda creds, bucket, prefix: []
+    )
+    view = _make_view(qtbot, monkeypatch)
+    bucket = GcsBucket(name="my-bucket", project_id="p1")
+
+    view._open_bucket_browser(bucket)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "my-bucket"
+
+
+def test_closing_a_bucket_browser_tab_just_removes_it(qtbot, monkeypatch):
+    import it_toolbox.widgets.bucket_browser_widget as browser_module
+
+    monkeypatch.setattr(
+        browser_module.gcp_client, "list_objects", lambda creds, bucket, prefix: []
+    )
+    view = _make_view(qtbot, monkeypatch)
+    bucket = GcsBucket(name="my-bucket", project_id="p1")
+    view._open_bucket_browser(bucket)
+
+    view._on_tab_close_requested(0)
+
+    assert view._tabs.count() == 0
+    assert view._active_sessions == {}  # not tracked as a session
 
 
 def test_gcp_root_context_menu_offers_select_projects_and_sign_out(qtbot, monkeypatch):

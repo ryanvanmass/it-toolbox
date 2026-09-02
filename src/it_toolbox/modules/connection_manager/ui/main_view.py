@@ -19,17 +19,29 @@ from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.tunnel_session import BackgroundTunnel
 from it_toolbox.modules.connection_manager import gcp_client
-from it_toolbox.modules.connection_manager.models import RDP_PORT, SSH_PORT, GcpProject, Instance
+from it_toolbox.modules.connection_manager.models import (
+    RDP_PORT,
+    SSH_PORT,
+    GcpProject,
+    GcsBucket,
+    Instance,
+)
 from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
+from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
-INSTANCES_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
+CHILDREN_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
 INSTANCE_ROLE = Qt.ItemDataRole.UserRole + 2
 IS_GCP_ROOT_ROLE = Qt.ItemDataRole.UserRole + 3
+CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 4
+BUCKET_ROLE = Qt.ItemDataRole.UserRole + 5
+
+CATEGORY_VMS = "vms"
+CATEGORY_BUCKETS = "buckets"
 
 
 class ConnectionManagerView(QWidget):
@@ -60,6 +72,7 @@ class ConnectionManagerView(QWidget):
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self._tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
 
         self._tabs = QTabWidget()
         self._tabs.setTabsClosable(True)
@@ -184,9 +197,15 @@ class ConnectionManagerView(QWidget):
         for project in visible:
             item = QTreeWidgetItem([project.display_name or project.project_id])
             item.setData(0, PROJECT_ID_ROLE, project.project_id)
-            item.setData(0, INSTANCES_LOADED_ROLE, False)
-            item.addChild(QTreeWidgetItem(["Loading…"]))
             gcp_category.addChild(item)
+
+            for category, label in ((CATEGORY_VMS, "VMs"), (CATEGORY_BUCKETS, "Buckets")):
+                category_item = QTreeWidgetItem([label])
+                category_item.setData(0, PROJECT_ID_ROLE, project.project_id)
+                category_item.setData(0, CATEGORY_ROLE, category)
+                category_item.setData(0, CHILDREN_LOADED_ROLE, False)
+                category_item.addChild(QTreeWidgetItem(["Loading…"]))
+                item.addChild(category_item)
         gcp_category.setExpanded(True)
 
     def _on_select_projects_clicked(self) -> None:
@@ -234,31 +253,49 @@ class ConnectionManagerView(QWidget):
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         project_id = item.data(0, PROJECT_ID_ROLE)
-        already_loaded = item.data(0, INSTANCES_LOADED_ROLE)
-        if project_id is None or already_loaded or self._account is None:
+        category = item.data(0, CATEGORY_ROLE)
+        already_loaded = item.data(0, CHILDREN_LOADED_ROLE)
+        if project_id is None or category is None or already_loaded or self._account is None:
             return
 
-        item.setData(0, INSTANCES_LOADED_ROLE, True)
-        async_utils.run_in_background(
-            lambda: gcp_client.list_instances(gcp_auth.get_credentials(), project_id),
-            on_result=lambda instances: self._populate_instances(item, instances),
-            on_error=lambda error: self._populate_instances_error(item, error),
-        )
+        item.setData(0, CHILDREN_LOADED_ROLE, True)
+        if category == CATEGORY_VMS:
+            async_utils.run_in_background(
+                lambda: gcp_client.list_instances(gcp_auth.get_credentials(), project_id),
+                on_result=lambda instances: self._populate_instances(item, instances),
+                on_error=lambda error: self._populate_category_error(item, error),
+            )
+        elif category == CATEGORY_BUCKETS:
+            async_utils.run_in_background(
+                lambda: gcp_client.list_buckets(gcp_auth.get_credentials(), project_id),
+                on_result=lambda buckets: self._populate_buckets(item, buckets),
+                on_error=lambda error: self._populate_category_error(item, error),
+            )
 
-    def _populate_instances(self, project_item: QTreeWidgetItem, instances: list[Instance]) -> None:
-        project_item.takeChildren()
+    def _populate_instances(self, category_item: QTreeWidgetItem, instances: list[Instance]) -> None:
+        category_item.takeChildren()
         if not instances:
-            project_item.addChild(QTreeWidgetItem(["(no instances)"]))
+            category_item.addChild(QTreeWidgetItem(["(no instances)"]))
             return
         for instance in instances:
             item = QTreeWidgetItem([instance.name])
             item.setData(0, INSTANCE_ROLE, instance)
             item.setToolTip(0, f"Status: {instance.status}")
-            project_item.addChild(item)
+            category_item.addChild(item)
 
-    def _populate_instances_error(self, project_item: QTreeWidgetItem, error: Exception) -> None:
-        project_item.takeChildren()
-        project_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
+    def _populate_buckets(self, category_item: QTreeWidgetItem, buckets: list[GcsBucket]) -> None:
+        category_item.takeChildren()
+        if not buckets:
+            category_item.addChild(QTreeWidgetItem(["(no buckets)"]))
+            return
+        for bucket in buckets:
+            item = QTreeWidgetItem([bucket.name])
+            item.setData(0, BUCKET_ROLE, bucket)
+            category_item.addChild(item)
+
+    def _populate_category_error(self, category_item: QTreeWidgetItem, error: Exception) -> None:
+        category_item.takeChildren()
+        category_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
 
     def _on_load_error(self, error: Exception) -> None:
         self._status_label.setText(f"Signed in as {self._account}")
@@ -300,6 +337,16 @@ class ConnectionManagerView(QWidget):
         menu = self._build_gcp_root_menu()
         if menu is not None:
             menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _on_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        bucket = item.data(0, BUCKET_ROLE)
+        if bucket is not None:
+            self._open_bucket_browser(bucket)
+
+    def _open_bucket_browser(self, bucket: GcsBucket) -> None:
+        browser = BucketBrowserWidget(bucket, get_credentials=gcp_auth.get_credentials)
+        index = self._tabs.addTab(browser, bucket.name)
+        self._tabs.setCurrentIndex(index)
 
     def _start_session_from_instance(self, instance: Instance, kind: str) -> None:
         username = settings.load_default_username()
@@ -406,6 +453,11 @@ class ConnectionManagerView(QWidget):
         )
         if session_id is not None:
             self._on_disconnect_requested(session_id)
+        else:
+            # Not a tracked session (e.g. a bucket browser tab) — just a
+            # plain tab with nothing to tear down.
+            self._tabs.removeTab(index)
+            widget.deleteLater()
 
     def _on_disconnect_requested(self, session_id: int) -> None:
         self._active_sessions_dialog.remove_session(session_id)

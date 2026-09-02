@@ -9,16 +9,22 @@ core, not a bug in this app's own code). Plain requests-based REST calls
 have simple, reliable timeouts and no native call threading of their own.
 """
 
+from urllib.parse import quote
+
 import requests
 from google.oauth2.credentials import Credentials
 
-from it_toolbox.modules.connection_manager.models import GcpProject, Instance
+from it_toolbox.modules.connection_manager.models import GcpProject, GcsBucket, GcsEntry, Instance
 
 # (connect timeout, read timeout) — a real, hard requests-enforced deadline.
 REQUEST_TIMEOUT_SEC = (10, 30)
+# Downloads can legitimately take a while; only the connect phase is bounded
+# tightly, the read timeout is generous rather than aborting a real transfer.
+DOWNLOAD_TIMEOUT_SEC = (10, 300)
 
 RESOURCE_MANAGER_BASE = "https://cloudresourcemanager.googleapis.com/v3"
 COMPUTE_BASE = "https://compute.googleapis.com/compute/v1"
+STORAGE_BASE = "https://storage.googleapis.com/storage/v1"
 
 
 class GcpApiError(Exception):
@@ -92,3 +98,86 @@ def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
             break
 
     return sorted(instances, key=lambda i: i.name.lower())
+
+
+def list_buckets(credentials: Credentials, project_id: str) -> list[GcsBucket]:
+    buckets: list[GcsBucket] = []
+    page_token = None
+    while True:
+        params = {"project": project_id}
+        if page_token:
+            params["pageToken"] = page_token
+        data = _get(
+            f"{STORAGE_BASE}/b",
+            credentials.token,
+            params=params,
+            extra_headers={"X-Goog-User-Project": project_id},
+        )
+        for b in data.get("items", []):
+            buckets.append(GcsBucket(name=b["name"], project_id=project_id))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    return sorted(buckets, key=lambda b: b.name.lower())
+
+
+def list_objects(credentials: Credentials, bucket: GcsBucket, prefix: str = "") -> list[GcsEntry]:
+    """One "directory level" of a bucket — folders (delimiter-based prefix
+    grouping; GCS has no real directories) followed by objects, both sorted
+    by name. `prefix` is the current folder path, e.g. "photos/2024/".
+    """
+    folders: list[GcsEntry] = []
+    objects: list[GcsEntry] = []
+    page_token = None
+    while True:
+        params = {"delimiter": "/", "userProject": bucket.project_id}
+        if prefix:
+            params["prefix"] = prefix
+        if page_token:
+            params["pageToken"] = page_token
+        data = _get(
+            f"{STORAGE_BASE}/b/{quote(bucket.name, safe='')}/o",
+            credentials.token,
+            params=params,
+            extra_headers={"X-Goog-User-Project": bucket.project_id},
+        )
+        for folder_prefix in data.get("prefixes", []):
+            name = folder_prefix[len(prefix) :].rstrip("/")
+            folders.append(GcsEntry(name=name, full_path=folder_prefix, is_folder=True))
+        for obj in data.get("items", []):
+            full_path = obj["name"]
+            if full_path == prefix:
+                continue  # an explicit zero-byte "folder marker" object, not a real file
+            objects.append(
+                GcsEntry(
+                    name=full_path[len(prefix) :],
+                    full_path=full_path,
+                    is_folder=False,
+                    size=int(obj.get("size", 0)),
+                    updated=obj.get("updated", ""),
+                )
+            )
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    folders.sort(key=lambda e: e.name.lower())
+    objects.sort(key=lambda e: e.name.lower())
+    return folders + objects
+
+
+def download_object(
+    credentials: Credentials, bucket: GcsBucket, object_path: str, dest_path: str
+) -> None:
+    url = f"{STORAGE_BASE}/b/{quote(bucket.name, safe='')}/o/{quote(object_path, safe='')}"
+    headers = {"Authorization": f"Bearer {credentials.token}"}
+    params = {"alt": "media", "userProject": bucket.project_id}
+    with requests.get(
+        url, headers=headers, params=params, timeout=DOWNLOAD_TIMEOUT_SEC, stream=True
+    ) as response:
+        if response.status_code >= 400:
+            raise GcpApiError(f"{response.status_code} {url}: {response.text[:500]}")
+        with open(dest_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                f.write(chunk)
