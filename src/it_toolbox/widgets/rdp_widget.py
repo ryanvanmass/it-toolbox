@@ -4,30 +4,31 @@ Windows-only — QtAxContainer (Qt's ActiveX container support) doesn't exist
 on other platforms, and ships with Windows itself (MSTSCAX.DLL, the same
 control behind mstsc.exe), so nothing extra to install.
 
-Live-tested against a real IAP tunnel, several rounds:
-- setControl/Server/AdvancedSettings2.RDPPort/Connect()/QAxBase's
-  `exception` signal all confirmed working.
-- Connect() reliably failed with E_INVALIDARG (0x80070057) when called
-  synchronously from __init__, before the widget had ever been shown (no
-  real native window handle yet) — fixed by deferring it to
-  connect_session(), called only after the widget is on screen (main_view
-  does this with QTimer.singleShot(0, ...) right after addTab()).
-- With that fixed, Connect() succeeded but rendered at a fixed 1024x768
-  regardless of this widget's actual size, which looked like "full
-  screen" — not an actual full-screen negotiation.
-- Explicitly setting FullScreen=False, AND separately
-  AdvancedSettings2.SmartSizing=True, each independently broke Connect()
-  again with the exact same E_INVALIDARG — confirmed live, both reverted.
-  Whatever the real constraint is, it isn't obviously either of those.
-- Current approach: don't fight the control's property quirks further —
-  set DesktopWidth/DesktopHeight to this widget's actual pixel size,
-  queried in connect_session() (by which point it's been laid out), so it
-  should render at roughly the right size without needing a scaling
-  property at all. Untested as of this comment.
+STATUS (as tested live against one real Windows machine): embedding does
+not currently work on that machine, and the cause turns out to be outside
+this code. setControl/Server/AdvancedSettings2.RDPPort and QAxBase's
+`exception` signal all work correctly — every property set was confirmed
+via readback with zero exceptions. Connect() itself reliably fails with
+E_INVALIDARG (0x80070057). Ruled out along the way: calling Connect()
+before the widget was ever shown (fixed by deferring to connect_session(),
+called after addTab() via QTimer.singleShot(0, ...) — necessary but not
+sufficient); FullScreen=False and AdvancedSettings2.SmartSizing=True each
+independently made it *worse* (same error, confirmed by isolation) and
+were reverted. A standalone diagnostic (scripts/rdp_activex_diagnostic.py)
+showed the real signal: none of the modern MsRdpClient5 through
+MsRdpClient11NotSafeForScripting ProgIDs are registered on that machine —
+only the legacy "safe for scripting" MsTscAx.MsTscAx — and Connect()'s
+exception detail read "Class not registered", which persisted even after
+`regsvr32 mstscax.dll`. That points at an incomplete/nonstandard RDP
+client component installation on that specific machine, not a bug here.
 
-Still unconfirmed: whether OnDisconnected actually fires under this exact
-attribute name — if disconnecting doesn't clean up the session, that's the
-first thing to check.
+This code is left in place because the approach (and the fallback below)
+is still sound — it may well work on a machine with a complete RDP client
+install. If it fails, connect_failed lets the caller fall back to
+launching mstsc.exe externally (main_view.py does this), so the failure
+mode is a working external session, not a broken one. Still unconfirmed
+even on a machine where Connect() succeeds: whether OnDisconnected
+actually fires under this exact attribute name.
 """
 
 import sys
