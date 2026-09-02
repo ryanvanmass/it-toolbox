@@ -12,9 +12,13 @@ which was the first (wrong) theory. The actual cause: at that point the
 widget has never been shown, so the ActiveX control has no real native
 window handle yet, and Connect() needs one. connect_session() must be
 called only after the widget is on screen (main_view defers it with
-QTimer.singleShot(0, ...) right after addTab()). Still unconfirmed: whether
-OnDisconnected actually fires under this exact attribute name — if
-disconnecting doesn't clean up the session, that's the first thing to check.
+QTimer.singleShot(0, ...) right after addTab()). After that fix, Connect()
+succeeded but the session took over full-screen instead of rendering in
+the widget — the control defaults to negotiating a full-screen session
+unless FullScreen is explicitly set False, a well-documented gotcha of
+embedding it. Still unconfirmed: whether OnDisconnected actually fires
+under this exact attribute name — if disconnecting doesn't clean up the
+session, that's the first thing to check.
 """
 
 import sys
@@ -53,6 +57,10 @@ class RdpWidget(QAxWidget):
         self.setProperty("DesktopWidth", 1024)
         self.setProperty("DesktopHeight", 768)
         self.setProperty("ColorDepth", 32)
+        # Without this, the control negotiates (and takes over) a
+        # full-screen session instead of rendering embedded in this widget
+        # — a well-documented gotcha, not optional for embedding.
+        self.setProperty("FullScreen", False)
 
         # RDPPort lives under the AdvancedSettings2 sub-object rather than
         # as a top-level property — needed since we're always connecting to
