@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QSplitter,
+    QTabBar,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -83,21 +83,19 @@ class ConnectionManagerView(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
 
-        self._session_tabs = QTabWidget()
-        self._session_tabs.setTabsClosable(True)
-        self._session_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        self._session_tabs.currentChanged.connect(self._on_session_tab_changed)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._tree)
-        splitter.addWidget(self._session_tabs)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([280, 720])
+        self._tabs = QTabWidget()
+        self._tabs.setTabsClosable(True)
+        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self._tabs.currentChanged.connect(self._on_session_tab_changed)
+        # GCP browsing lives as the first, permanent tab alongside session
+        # tabs rather than a separate always-visible panel — it's
+        # navigation, not a session, so it isn't closable.
+        self._tabs.addTab(self._tree, "GCP")
+        self._tabs.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self._tabs, 1)
 
         app = QApplication.instance()
         if app is not None:
@@ -390,8 +388,8 @@ class ConnectionManagerView(QWidget):
         terminal = TerminalWidget(["ssh", "-p", str(port), target])
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
-        index = self._session_tabs.addTab(terminal, display_name)
-        self._session_tabs.setCurrentIndex(index)
+        index = self._tabs.addTab(terminal, display_name)
+        self._tabs.setCurrentIndex(index)
         terminal.setFocus()
 
     def _embed_rdp(self, session_id: int, display_name: str, port: int, username: str | None) -> None:
@@ -405,8 +403,8 @@ class ConnectionManagerView(QWidget):
             )
         )
         self._session_tab_widgets[session_id] = rdp
-        index = self._session_tabs.addTab(rdp, display_name)
-        self._session_tabs.setCurrentIndex(index)
+        index = self._tabs.addTab(rdp, display_name)
+        self._tabs.setCurrentIndex(index)
         rdp.setFocus()
         # Connect() needs the control to have a real native window handle,
         # which it won't until after this widget has actually been shown
@@ -432,9 +430,9 @@ class ConnectionManagerView(QWidget):
         """
         widget = self._session_tab_widgets.pop(session_id, None)
         if widget is not None:
-            index = self._session_tabs.indexOf(widget)
+            index = self._tabs.indexOf(widget)
             if index != -1:
-                self._session_tabs.removeTab(index)
+                self._tabs.removeTab(index)
             close_session = getattr(widget, "close_session", None)
             if close_session is not None:
                 close_session()
@@ -452,7 +450,7 @@ class ConnectionManagerView(QWidget):
         return True
 
     def _on_session_tab_changed(self, index: int) -> None:
-        widget = self._session_tabs.widget(index)
+        widget = self._tabs.widget(index)
         if widget is not None:
             widget.setFocus()
 
@@ -470,7 +468,7 @@ class ConnectionManagerView(QWidget):
     # -- Disconnect ------------------------------------------------------
 
     def _on_tab_close_requested(self, index: int) -> None:
-        widget = self._session_tabs.widget(index)
+        widget = self._tabs.widget(index)
         session_id = next(
             (sid for sid, w in self._session_tab_widgets.items() if w is widget), None
         )
@@ -482,9 +480,9 @@ class ConnectionManagerView(QWidget):
 
         widget = self._session_tab_widgets.pop(session_id, None)
         if widget is not None:
-            index = self._session_tabs.indexOf(widget)
+            index = self._tabs.indexOf(widget)
             if index != -1:
-                self._session_tabs.removeTab(index)
+                self._tabs.removeTab(index)
             close_session = getattr(widget, "close_session", None)
             if close_session is not None:
                 close_session()

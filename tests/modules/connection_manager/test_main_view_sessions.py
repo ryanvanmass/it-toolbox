@@ -1,3 +1,5 @@
+from PySide6.QtWidgets import QTabBar
+
 from it_toolbox.modules.connection_manager.models import GcpProject
 from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManagerView
 from it_toolbox.widgets.terminal_widget import TerminalWidget
@@ -36,14 +38,25 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
     assert gcp_category.child(0).text(0) == "Project One"
 
 
+def test_gcp_browser_is_a_permanent_non_closable_tab(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "GCP"
+    assert view._tabs.widget(0) is view._tree
+    assert view._tabs.tabBar().tabButton(0, QTabBar.ButtonPosition.RightSide) is None
+
+
 def test_ssh_connect_embeds_terminal_and_registers_session(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
     tunnel = _FakeTunnel()
 
     view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
 
-    assert view._session_tabs.count() == 1
-    assert view._session_tabs.tabText(0) == "test-vm"
+    # Index 0 is the permanent GCP browser tab; the new session tab is
+    # appended after it.
+    assert view._tabs.count() == 2
+    assert view._tabs.tabText(1) == "test-vm"
     assert len(view._active_sessions) == 1
     assert len(view._session_tab_widgets) == 1
 
@@ -70,7 +83,7 @@ def test_ssh_connect_gives_the_terminal_keyboard_focus(qtbot, monkeypatch):
 
     view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
 
-    terminal = view._session_tabs.widget(0)
+    terminal = view._tabs.widget(1)  # index 0 is the permanent GCP tab
     qtbot.waitUntil(lambda: terminal.hasFocus(), timeout=2000)
     terminal.close_session()
 
@@ -80,9 +93,9 @@ def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
     tunnel = _FakeTunnel()
     view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
 
-    view._on_tab_close_requested(0)
+    view._on_tab_close_requested(1)  # index 0 is the permanent GCP tab
 
-    assert view._session_tabs.count() == 0
+    assert view._tabs.count() == 1  # just the GCP tab remains
     assert view._active_sessions == {}
     assert view._session_tab_widgets == {}
     qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
@@ -101,5 +114,5 @@ def test_rdp_connect_on_non_windows_falls_back_to_external(qtbot, monkeypatch):
     view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice")
 
     assert launched == {"host": "127.0.0.1", "port": 2222, "username": "alice"}
-    assert view._session_tabs.count() == 0  # no embedded tab for external sessions
+    assert view._tabs.count() == 1  # just the GCP tab; no embedded tab for external sessions
     assert len(view._active_sessions) == 1
