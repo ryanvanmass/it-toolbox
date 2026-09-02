@@ -81,7 +81,13 @@ class TerminalWidget(QPlainTextEdit):
         def run() -> None:
             while True:
                 data = self._pty.read()
-                self._output_ready.emit(data)
+                # The widget can be deleted (tab closed) while this blocking
+                # read() was still in flight — same cross-thread QObject
+                # lifetime hazard as core/async_utils.py, guarded the same way.
+                try:
+                    self._output_ready.emit(data)
+                except RuntimeError:
+                    return
                 if not data:
                     return
 
