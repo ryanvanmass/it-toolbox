@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "it-toolbox"
+version = "0.1.0"
+description = "Cross-platform IT tooling desktop app — starting with a GCP IAP connection manager for RDP/SSH."
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6",
+    "google-auth",
+    "google-auth-oauthlib",
+    "google-cloud-compute",
+    "google-cloud-resource-manager",
+    "websockets",
+    "keyring",
+    "platformdirs",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-qt",
+]
+
+[project.scripts]
+it-toolbox = "it_toolbox.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
