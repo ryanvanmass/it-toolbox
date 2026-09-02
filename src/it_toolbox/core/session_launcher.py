@@ -9,6 +9,8 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import threading
+from pathlib import Path
 
 RDP_INSTALL_HINT = (
     "FreeRDP not found. Install it (e.g. 'sudo apt install freerdp3-x11', or your "
@@ -58,10 +60,12 @@ def _launch_rdp_windows(host: str, port: int, username: str | None) -> None:
     with open(fd, "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    # Not deleting the temp file here — mstsc reads it asynchronously after
-    # this returns. It's small and lands in the OS temp dir, so it's left
-    # for normal temp-directory cleanup rather than tracked and removed.
     subprocess.Popen(["mstsc.exe", path])
+
+    # mstsc reads the file at startup (well under a second in practice), so
+    # deleting it immediately risks a race — instead delete it shortly after
+    # on a timer rather than leaving it behind indefinitely.
+    threading.Timer(15.0, lambda: Path(path).unlink(missing_ok=True)).start()
 
 
 def _launch_rdp_linux(host: str, port: int, username: str | None) -> None:
