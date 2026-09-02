@@ -25,6 +25,10 @@ WS_URL_PATH_ROOT = "/v4"
 CONNECT_ENDPOINT = "connect"
 RECONNECT_ENDPOINT = "reconnect"
 SUBPROTOCOL_NAME = "relay.tunnel.cloudproxy.app"
+# The relay validates the WebSocket handshake's Origin header and rejects
+# anything else (close code 4021 "invalid origin") — this exact value is
+# what gcloud's own client sends.
+WS_ORIGIN = "bot:iap-tunneler"
 
 MAX_DATA_FRAME_SIZE = 16384
 
@@ -216,6 +220,7 @@ class IapTunnelConnection:
                         url,
                         additional_headers=headers,
                         subprotocols=[SUBPROTOCOL_NAME],
+                        origin=WS_ORIGIN,
                     ),
                     timeout=CONNECT_OPEN_TIMEOUT_SEC,
                 )
