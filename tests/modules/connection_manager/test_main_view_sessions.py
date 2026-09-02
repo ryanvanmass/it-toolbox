@@ -36,6 +36,33 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
     assert gcp_category.child(0).text(0) == "Project One"
 
 
+def test_gcp_root_context_menu_offers_select_projects_and_sign_out(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+
+    menu = view._build_gcp_root_menu()
+
+    assert [action.text() for action in menu.actions()] == ["Select Projects…", "Sign out"]
+
+
+def test_gcp_root_context_menu_is_none_when_not_signed_in(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._account = None
+
+    assert view._build_gcp_root_menu() is None
+
+
+def test_gcp_root_item_is_marked_with_is_gcp_root_role(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import IS_GCP_ROOT_ROLE
+
+    view = _make_view(qtbot, monkeypatch)
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    root = view._tree.topLevelItem(0)
+    assert root.data(0, IS_GCP_ROOT_ROLE) is True
+
+
 def test_gcp_tree_is_exposed_as_sidebar_tree_not_a_tab(qtbot, monkeypatch):
     # The GCP browser lives in the app sidebar (nested under the module's
     # entry), not as tab content — the tab area is session-only.

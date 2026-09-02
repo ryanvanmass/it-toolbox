@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 
 class ToolModule(ABC):
@@ -26,5 +26,11 @@ class ToolModule(ABC):
         """Optional extra navigation content shown nested under this
         module's entry in the sidebar (e.g. a resource browser tree).
         Return None (the default) if the module has none.
+        """
+        return None
+
+    def build_context_menu(self, parent: QWidget) -> QMenu | None:
+        """Optional context menu shown when right-clicking this module's
+        entry in the sidebar. Return None (the default) for no menu.
         """
         return None

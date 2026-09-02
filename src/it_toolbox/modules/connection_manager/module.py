@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManagerView
@@ -18,3 +18,6 @@ class ConnectionManagerModule(ToolModule):
 
     def create_sidebar_widget(self) -> QWidget | None:
         return self.create_widget().sidebar_tree
+
+    def build_context_menu(self, parent: QWidget) -> QMenu | None:
+        return self.create_widget().build_context_menu(parent)
