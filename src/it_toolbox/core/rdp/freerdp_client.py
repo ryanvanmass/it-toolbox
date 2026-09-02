@@ -24,6 +24,9 @@ import ctypes
 import platform
 
 from it_toolbox.core.rdp._freerdp3_bindings import (
+    struct_rdp_client_context as RdpClientContext,
+)
+from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_rdp_client_entry_points_v1 as RdpClientEntryPointsV1,
 )
 from it_toolbox.core.rdp._freerdp3_bindings import (
@@ -136,7 +139,13 @@ def connect_and_disconnect(
     entry_points = RdpClientEntryPointsV1()
     entry_points.Size = ctypes.sizeof(RdpClientEntryPointsV1)
     entry_points.Version = RDP_CLIENT_INTERFACE_VERSION
-    entry_points.ContextSize = 0  # 0 == "just the base rdpContext, no extension"
+    # Must be sized for the full rdpClientContext, not just the base
+    # rdpContext embedded at its front — libfreerdp's virtual-channel
+    # plumbing (rdpsnd/drdynvc/ainput etc.) writes into rdpClientContext
+    # fields during connect, so an undersized buffer here is a heap
+    # overflow: reproduced as "double free or corruption (!prev)" against
+    # a real server before this was corrected.
+    entry_points.ContextSize = ctypes.sizeof(RdpClientContext)
     entry_points.ClientNew = _client_new_cb
     entry_points.ClientFree = _client_free_cb
 
