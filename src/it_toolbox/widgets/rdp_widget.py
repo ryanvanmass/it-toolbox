@@ -4,24 +4,30 @@ Windows-only — QtAxContainer (Qt's ActiveX container support) doesn't exist
 on other platforms, and ships with Windows itself (MSTSCAX.DLL, the same
 control behind mstsc.exe), so nothing extra to install.
 
-Live-tested against a real IAP tunnel: setControl/Server/AdvancedSettings2.
-RDPPort/Connect()/QAxBase's `exception` signal all confirmed working.
-Connect() reliably failed with E_INVALIDARG (0x80070057) when called
-synchronously from __init__ — even after setting DesktopWidth/DesktopHeight,
-which was the first (wrong) theory. The actual cause: at that point the
-widget has never been shown, so the ActiveX control has no real native
-window handle yet, and Connect() needs one. connect_session() must be
-called only after the widget is on screen (main_view defers it with
-QTimer.singleShot(0, ...) right after addTab()). After that fix, Connect()
-succeeded but rendered "full screen" — actually just DesktopWidth x
-DesktopHeight (1024x768) unconstrained by this widget's actual size, with
-nothing telling the control to fit it. Explicitly setting FullScreen=False
-made Connect() itself start failing with E_INVALIDARG again (confirmed
-live) — reverted. AdvancedSettings2.SmartSizing=True is the real
-documented mechanism for scaling the session to the container's size;
-untested as of this comment. Still unconfirmed: whether OnDisconnected
-actually fires under this exact attribute name — if disconnecting doesn't
-clean up the session, that's the first thing to check.
+Live-tested against a real IAP tunnel, several rounds:
+- setControl/Server/AdvancedSettings2.RDPPort/Connect()/QAxBase's
+  `exception` signal all confirmed working.
+- Connect() reliably failed with E_INVALIDARG (0x80070057) when called
+  synchronously from __init__, before the widget had ever been shown (no
+  real native window handle yet) — fixed by deferring it to
+  connect_session(), called only after the widget is on screen (main_view
+  does this with QTimer.singleShot(0, ...) right after addTab()).
+- With that fixed, Connect() succeeded but rendered at a fixed 1024x768
+  regardless of this widget's actual size, which looked like "full
+  screen" — not an actual full-screen negotiation.
+- Explicitly setting FullScreen=False, AND separately
+  AdvancedSettings2.SmartSizing=True, each independently broke Connect()
+  again with the exact same E_INVALIDARG — confirmed live, both reverted.
+  Whatever the real constraint is, it isn't obviously either of those.
+- Current approach: don't fight the control's property quirks further —
+  set DesktopWidth/DesktopHeight to this widget's actual pixel size,
+  queried in connect_session() (by which point it's been laid out), so it
+  should render at roughly the right size without needing a scaling
+  property at all. Untested as of this comment.
+
+Still unconfirmed: whether OnDisconnected actually fires under this exact
+attribute name — if disconnecting doesn't clean up the session, that's the
+first thing to check.
 """
 
 import sys
@@ -57,20 +63,13 @@ class RdpWidget(QAxWidget):
         self.setProperty("Server", host)
         if username:
             self.setProperty("UserName", username)
-        self.setProperty("DesktopWidth", 1024)
-        self.setProperty("DesktopHeight", 768)
-        self.setProperty("ColorDepth", 32)
 
         # RDPPort lives under the AdvancedSettings2 sub-object rather than
         # as a top-level property — needed since we're always connecting to
-        # a local IAP tunnel port, never the default 3389. SmartSizing makes
-        # the control scale the session to fit this widget's actual size
-        # instead of rendering at a fixed DesktopWidth/DesktopHeight (which,
-        # unconstrained, is what was showing as "full screen").
+        # a local IAP tunnel port, never the default 3389.
         advanced_settings = self.querySubObject("AdvancedSettings2")
         if advanced_settings is not None:
             advanced_settings.setProperty("RDPPort", port)
-            advanced_settings.setProperty("SmartSizing", True)
 
         # PySide6 exposes COM events as Qt signals named after the event.
         # This attribute may not exist under this exact name/casing —
@@ -89,6 +88,14 @@ class RdpWidget(QAxWidget):
         caller (main_view) needs to react to a failure that can only be
         known well after construction.
         """
+        # Queried here rather than __init__ so this is the widget's real,
+        # laid-out size rather than whatever it defaulted to before being
+        # shown — set as close to Connect() as possible in case a resize
+        # happens between construction and this call.
+        self.setProperty("DesktopWidth", max(self.width(), 640))
+        self.setProperty("DesktopHeight", max(self.height(), 480))
+        self.setProperty("ColorDepth", 32)
+
         self._last_com_exception = None
         self.dynamicCall("Connect()")
         if self._last_com_exception:
