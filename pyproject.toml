@@ -10,11 +10,9 @@ requires-python = ">=3.11"
 dependencies = [
     "PySide6",
     "google-auth",
-    "google-auth-oauthlib",
     "google-cloud-compute",
     "google-cloud-resource-manager",
     "websockets",
-    "keyring",
     "platformdirs",
 ]
 

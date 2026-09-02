@@ -4,9 +4,9 @@ from it_toolbox.app import MainWindow
 def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     # Keep this test hermetic — it's exercising sidebar wiring, not auth, so
     # it shouldn't depend on (or spawn a background check against) whatever
-    # OAuth config happens to exist on the machine running the test.
+    # gcloud state exists on the machine running the test.
     monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.gcp_oauth.is_configured",
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
     )
 
