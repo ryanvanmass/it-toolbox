@@ -27,6 +27,7 @@ from it_toolbox.modules.connection_manager.models import (
     GcpProject,
     Instance,
 )
+from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
 from it_toolbox.modules.connection_manager.ui.connection_dialog import ConnectionDialog
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
@@ -35,7 +36,6 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 INSTANCES_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
 INSTANCE_ROLE = Qt.ItemDataRole.UserRole + 2
-SESSION_ID_ROLE = Qt.ItemDataRole.UserRole
 CONNECTION_ROLE = Qt.ItemDataRole.UserRole
 
 
@@ -48,20 +48,31 @@ class ConnectionManagerView(QWidget):
         self._next_session_id = 1
         self._all_projects: list[GcpProject] = []
 
+        self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
+        self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
+
         self._status_label = QLabel("Not signed in")
         self._select_projects_button = QPushButton("Select Projects…")
         self._select_projects_button.setEnabled(False)
         self._select_projects_button.clicked.connect(self._on_select_projects_clicked)
-        self._default_username_button = QPushButton()
-        self._default_username_button.clicked.connect(self._on_set_default_username_clicked)
-        self._refresh_default_username_button()
+
+        self._options_button = QPushButton("Options ▾")
+        options_menu = QMenu(self._options_button)
+        self._set_username_action = options_menu.addAction("")
+        self._set_username_action.triggered.connect(self._on_set_default_username_clicked)
+        self._refresh_set_username_action_label()
+        options_menu.aboutToShow.connect(self._refresh_set_username_action_label)
+        view_sessions_action = options_menu.addAction("View Active Sessions…")
+        view_sessions_action.triggered.connect(self._on_view_active_sessions_clicked)
+        self._options_button.setMenu(options_menu)
+
         self._sign_in_button = QPushButton("Sign in with gcloud")
         self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._status_label)
         top_bar.addStretch()
-        top_bar.addWidget(self._default_username_button)
+        top_bar.addWidget(self._options_button)
         top_bar.addWidget(self._select_projects_button)
         top_bar.addWidget(self._sign_in_button)
 
@@ -94,24 +105,10 @@ class ConnectionManagerView(QWidget):
         connections_bar.addWidget(self._edit_connection_button)
         connections_bar.addWidget(self._delete_connection_button)
 
-        self._sessions_list = QListWidget()
-        self._disconnect_button = QPushButton("Disconnect")
-        self._disconnect_button.setEnabled(False)
-        self._disconnect_button.clicked.connect(self._on_disconnect_clicked)
-        self._sessions_list.itemSelectionChanged.connect(
-            lambda: self._disconnect_button.setEnabled(bool(self._sessions_list.selectedItems()))
-        )
-
-        sessions_bar = QHBoxLayout()
-        sessions_bar.addWidget(QLabel("Active sessions:"))
-        sessions_bar.addWidget(self._sessions_list, 1)
-        sessions_bar.addWidget(self._disconnect_button)
-
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
         layout.addWidget(self._tree)
         layout.addLayout(connections_bar)
-        layout.addLayout(sessions_bar)
 
         app = QApplication.instance()
         if app is not None:
@@ -236,11 +233,11 @@ class ConnectionManagerView(QWidget):
         settings.save_selected_project_ids(selected_ids)
         self._apply_project_selection(selected_ids)
 
-    # -- Default username -----------------------------------------------------
+    # -- Options menu: default username / active sessions -----------------------
 
-    def _refresh_default_username_button(self) -> None:
+    def _refresh_set_username_action_label(self) -> None:
         username = settings.load_default_username()
-        self._default_username_button.setText(
+        self._set_username_action.setText(
             f"Default Username: {username}" if username else "Set Default Username…"
         )
 
@@ -256,7 +253,12 @@ class ConnectionManagerView(QWidget):
         if not ok:
             return
         settings.save_default_username(username.strip() or None)
-        self._refresh_default_username_button()
+        self._refresh_set_username_action_label()
+
+    def _on_view_active_sessions_clicked(self) -> None:
+        self._active_sessions_dialog.show()
+        self._active_sessions_dialog.raise_()
+        self._active_sessions_dialog.activateWindow()
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         project_id = item.data(0, PROJECT_ID_ROLE)
@@ -458,21 +460,15 @@ class ConnectionManagerView(QWidget):
         self._next_session_id += 1
         self._active_sessions[session_id] = (kind, tunnel)
 
-        item = QListWidgetItem(f"{display_name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}")
-        item.setData(SESSION_ID_ROLE, session_id)
-        self._sessions_list.addItem(item)
+        label = f"{display_name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}"
+        self._active_sessions_dialog.add_session(session_id, label)
 
     def _on_session_error(self, error: Exception) -> None:
         self._status_label.setText(f"Signed in as {self._account}")
         QMessageBox.warning(self, "Connection failed", str(error))
 
-    def _on_disconnect_clicked(self) -> None:
-        items = self._sessions_list.selectedItems()
-        if not items:
-            return
-        item = items[0]
-        session_id = item.data(SESSION_ID_ROLE)
-        self._sessions_list.takeItem(self._sessions_list.row(item))
+    def _on_disconnect_requested(self, session_id: int) -> None:
+        self._active_sessions_dialog.remove_session(session_id)
 
         entry = self._active_sessions.pop(session_id, None)
         if entry is not None:
