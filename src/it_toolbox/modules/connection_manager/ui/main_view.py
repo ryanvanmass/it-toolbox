@@ -15,12 +15,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, session_launcher
+from it_toolbox.core import async_utils, session_launcher, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.tunnel_session import BackgroundTunnel
 from it_toolbox.modules.connection_manager import gcp_client
 from it_toolbox.modules.connection_manager.models import GcpProject, Instance
+from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
+    ProjectSelectionDialog,
+)
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 INSTANCES_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -38,14 +41,19 @@ class ConnectionManagerView(QWidget):
         self._account: str | None = None
         self._active_sessions: dict[int, tuple[Instance, str, BackgroundTunnel]] = {}
         self._next_session_id = 1
+        self._all_projects: list[GcpProject] = []
 
         self._status_label = QLabel("Not signed in")
+        self._select_projects_button = QPushButton("Select Projects…")
+        self._select_projects_button.setEnabled(False)
+        self._select_projects_button.clicked.connect(self._on_select_projects_clicked)
         self._sign_in_button = QPushButton("Sign in with gcloud")
         self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._status_label)
         top_bar.addStretch()
+        top_bar.addWidget(self._select_projects_button)
         top_bar.addWidget(self._sign_in_button)
 
         self._tree = QTreeWidget()
@@ -132,10 +140,12 @@ class ConnectionManagerView(QWidget):
 
     def _set_signed_out(self) -> None:
         self._account = None
+        self._all_projects = []
         self._tree.clear()
         self._status_label.setText("Not signed in")
         self._sign_in_button.setEnabled(True)
         self._sign_in_button.setText("Sign in with gcloud")
+        self._select_projects_button.setEnabled(False)
 
     def _on_auth_error(self, error: Exception) -> None:
         self._sign_in_button.setEnabled(True)
@@ -145,15 +155,51 @@ class ConnectionManagerView(QWidget):
     # -- Project / instance tree --------------------------------------------
 
     def _populate_projects(self, projects: list[GcpProject]) -> None:
-        self._tree.clear()
-        self._status_label.setText(f"Signed in as {self._account} — {len(projects)} project(s)")
+        self._all_projects = projects
+        self._select_projects_button.setEnabled(True)
 
-        for project in projects:
+        selected_ids = settings.load_selected_project_ids()
+        if selected_ids is None:
+            # First time signing in (or never configured) — with accounts
+            # that can have hundreds of projects, showing everything by
+            # default is both unusable and means one slow/unresponsive
+            # project can eat a request timeout on every session start.
+            self._status_label.setText(
+                f"Signed in as {self._account} — {len(projects)} project(s) found, "
+                "pick which to show…"
+            )
+            dialog = ProjectSelectionDialog(projects, selected_ids=set(), parent=self)
+            if dialog.exec() == ProjectSelectionDialog.DialogCode.Accepted:
+                selected_ids = dialog.selected_project_ids()
+                settings.save_selected_project_ids(selected_ids)
+            else:
+                selected_ids = set()
+
+        self._apply_project_selection(selected_ids)
+
+    def _apply_project_selection(self, selected_ids: set[str]) -> None:
+        visible = [p for p in self._all_projects if p.project_id in selected_ids]
+        self._status_label.setText(
+            f"Signed in as {self._account} — showing {len(visible)} of "
+            f"{len(self._all_projects)} project(s)"
+        )
+
+        self._tree.clear()
+        for project in visible:
             item = QTreeWidgetItem([project.display_name or project.project_id])
             item.setData(0, PROJECT_ID_ROLE, project.project_id)
             item.setData(0, INSTANCES_LOADED_ROLE, False)
             item.addChild(QTreeWidgetItem(["Loading…"]))
             self._tree.addTopLevelItem(item)
+
+    def _on_select_projects_clicked(self) -> None:
+        current_ids = settings.load_selected_project_ids() or set()
+        dialog = ProjectSelectionDialog(self._all_projects, selected_ids=current_ids, parent=self)
+        if dialog.exec() != ProjectSelectionDialog.DialogCode.Accepted:
+            return
+        selected_ids = dialog.selected_project_ids()
+        settings.save_selected_project_ids(selected_ids)
+        self._apply_project_selection(selected_ids)
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         project_id = item.data(0, PROJECT_ID_ROLE)
