@@ -14,7 +14,11 @@ def list_projects(credentials: Credentials) -> list[GcpProject]:
 
 
 def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
-    client = compute_v1.InstancesClient(credentials=credentials)
+    # Attribute quota/billing to the project actually being queried, not
+    # whatever project the OAuth client happens to live in — that project
+    # already runs Compute Engine (and so already has billing enabled),
+    # while the OAuth-client project may have neither and shouldn't need to.
+    client = compute_v1.InstancesClient(credentials=credentials.with_quota_project(project_id))
     request = compute_v1.AggregatedListInstancesRequest(project=project_id)
 
     instances: list[Instance] = []
