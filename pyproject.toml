@@ -13,6 +13,9 @@ dependencies = [
     "requests",
     "websockets",
     "platformdirs",
+    "pyte",
+    "ptyprocess; sys_platform != 'win32'",
+    "pywinpty; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

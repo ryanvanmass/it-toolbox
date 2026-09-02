@@ -1,9 +1,6 @@
-import pytest
-
-from it_toolbox.core.iap_tunnel import IapTunnelTarget
-from it_toolbox.core.session_launcher import SessionLaunchError
 from it_toolbox.modules.connection_manager.models import GcpProject
 from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManagerView
+from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 
 class _FakeTunnel:
@@ -69,30 +66,82 @@ def test_gcp_root_item_is_marked_with_is_gcp_root_role(qtbot, monkeypatch):
     assert root.data(0, IS_GCP_ROOT_ROLE) is True
 
 
-def test_connect_and_launch_starts_tunnel_then_launches_external_client(qtbot, monkeypatch):
+def test_ssh_connect_embeds_terminal_and_registers_session(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "test-vm"
+    assert len(view._active_sessions) == 1
+    assert len(view._session_tab_widgets) == 1
+
+
+def test_ssh_connect_gives_the_terminal_keyboard_focus(qtbot, monkeypatch):
+    # Regression test: keyPressEvent() only ever fires for the widget that
+    # actually has Qt focus. A prior version created the terminal tab but
+    # never called setFocus() on it, so real keystrokes silently went
+    # nowhere — invisible in a test that calls keyPressEvent() directly
+    # instead of exercising real focus, which is exactly how this was
+    # missed originally.
+    view = _make_view(qtbot, monkeypatch)
+    view.show()
+    qtbot.waitExposed(view)
+    tunnel = _FakeTunnel()
+
+    # A real `ssh` against a closed port fails almost instantly, tearing
+    # the tab back down while this test is still polling it — a long-lived
+    # shell exercises the same focus-wiring path deterministically instead.
     monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.BackgroundTunnel",
-        lambda target, get_access_token: _FakeTunnel(),
+        "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
+        lambda argv: TerminalWidget(["/bin/sh"]),
     )
+
+    view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
+
+    terminal = view._tabs.widget(0)
+    qtbot.waitUntil(lambda: terminal.hasFocus(), timeout=2000)
+    terminal.close_session()
+
+
+def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+    view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
+
+    view._on_tab_close_requested(0)
+
+    assert view._tabs.count() == 0
+    assert view._active_sessions == {}
+    assert view._session_tab_widgets == {}
+    qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
+
+
+def test_rdp_connect_launches_external_client_not_a_tab(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
     launched = {}
     monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.session_launcher.launch_ssh",
+        "it_toolbox.modules.connection_manager.ui.main_view.session_launcher.launch_rdp",
         lambda host, port, username: launched.update(host=host, port=port, username=username),
     )
 
-    target = IapTunnelTarget(project="p", zone="z", instance="i", port=22)
-    tunnel = ConnectionManagerView._connect_and_launch(target, "ssh", "alice")
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice")
 
     assert launched == {"host": "127.0.0.1", "port": 2222, "username": "alice"}
-    assert tunnel.port == 2222
-    assert not tunnel.stopped
+    assert view._tabs.count() == 0  # RDP never embeds
+    assert len(view._active_sessions) == 1
 
 
-def test_connect_and_launch_stops_tunnel_if_external_launch_fails(qtbot, monkeypatch):
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.BackgroundTunnel",
-        lambda target, get_access_token: _FakeTunnel(),
-    )
+def test_rdp_connect_failure_stops_tunnel_and_does_not_register_session(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from it_toolbox.core.session_launcher import SessionLaunchError
+
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
 
     def _raise(host, port, username):
         raise SessionLaunchError("no RDP client found")
@@ -100,33 +149,11 @@ def test_connect_and_launch_stops_tunnel_if_external_launch_fails(qtbot, monkeyp
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.session_launcher.launch_rdp", _raise
     )
+    # QMessageBox.warning() is modal and would otherwise block this test
+    # forever waiting for a click that will never come.
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
 
-    target = IapTunnelTarget(project="p", zone="z", instance="i", port=3389)
-    with pytest.raises(SessionLaunchError):
-        ConnectionManagerView._connect_and_launch(target, "rdp", None)
-
-
-def test_session_started_registers_and_shows_in_active_sessions_dialog(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch)
-    tunnel = _FakeTunnel()
-
-    view._on_session_started("test-vm", "ssh", tunnel)
-
-    assert len(view._active_sessions) == 1
-    [session_id] = view._active_sessions.keys()
-    assert view._active_sessions[session_id] is tunnel
-    assert view._active_sessions_dialog._list.count() == 1
-    assert "test-vm" in view._active_sessions_dialog._list.item(0).text()
-
-
-def test_disconnect_stops_tunnel_and_removes_from_dialog(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch)
-    tunnel = _FakeTunnel()
-    view._on_session_started("test-vm", "ssh", tunnel)
-    [session_id] = view._active_sessions.keys()
-
-    view._on_disconnect_requested(session_id)
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", None)
 
     assert view._active_sessions == {}
-    assert view._active_sessions_dialog._list.count() == 0
-    qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
+    assert tunnel.stopped
