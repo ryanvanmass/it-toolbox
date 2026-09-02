@@ -98,12 +98,16 @@ class TerminalWidget(QPlainTextEdit):
         self._render()
 
     def _render(self) -> None:
-        self.setPlainText("\n".join(line.rstrip() for line in self._screen.display))
+        # pyte's rows are already padded to exactly `cols` characters wide —
+        # rstrip()-ing them here would shorten lines and misalign the
+        # cursor's column index against the (now-shorter) rendered text.
+        self.setPlainText("\n".join(self._screen.display))
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         cursor.movePosition(QTextCursor.MoveOperation.Down, n=self._screen.cursor.y)
         cursor.movePosition(QTextCursor.MoveOperation.Right, n=self._screen.cursor.x)
         self.setTextCursor(cursor)
+        self.ensureCursorVisible()
 
     # -- writing keystrokes ------------------------------------------------
 

@@ -1,5 +1,6 @@
 from it_toolbox.modules.connection_manager.models import GcpProject
 from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManagerView
+from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 
 class _FakeTunnel:
@@ -59,10 +60,19 @@ def test_ssh_connect_gives_the_terminal_keyboard_focus(qtbot, monkeypatch):
     qtbot.waitExposed(view)
     tunnel = _FakeTunnel()
 
+    # A real `ssh` against a closed port fails almost instantly, tearing
+    # the tab back down while this test is still polling it — a long-lived
+    # shell exercises the same focus-wiring path deterministically instead.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
+        lambda argv: TerminalWidget(["/bin/sh"]),
+    )
+
     view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
 
     terminal = view._session_tabs.widget(0)
     qtbot.waitUntil(lambda: terminal.hasFocus(), timeout=2000)
+    terminal.close_session()
 
 
 def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
