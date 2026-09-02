@@ -8,6 +8,12 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 # and it can be garbage-collected mid-execution.
 _active_runnables: set["_FunctionRunnable"] = set()
 
+# These tasks are I/O-bound (network calls, gcloud subprocesses), not CPU
+# work, so a bigger pool than Qt's CPU-count-based default is cheap and
+# avoids one slow/stuck task queuing up everything behind it (e.g. expanding
+# several tree nodes in a large GCP org while one project is unresponsive).
+QThreadPool.globalInstance().setMaxThreadCount(16)
+
 
 class _WorkerSignals(QObject):
     result = Signal(object)

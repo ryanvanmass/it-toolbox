@@ -3,10 +3,15 @@ from google.oauth2.credentials import Credentials
 
 from it_toolbox.modules.connection_manager.models import GcpProject, Instance
 
+# Bounds each underlying API call so an unresponsive/slow project can't hang
+# the calling background thread (and, since the Qt thread pool has a limited
+# number of workers, indefinitely block other pending expansions behind it).
+REQUEST_TIMEOUT_SEC = 30.0
+
 
 def list_projects(credentials: Credentials) -> list[GcpProject]:
     client = resourcemanager_v3.ProjectsClient(credentials=credentials)
-    projects = client.search_projects(query="state:ACTIVE")
+    projects = client.search_projects(query="state:ACTIVE", timeout=REQUEST_TIMEOUT_SEC)
     return sorted(
         (GcpProject(project_id=p.project_id, display_name=p.display_name) for p in projects),
         key=lambda p: p.display_name.lower(),
@@ -22,7 +27,7 @@ def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
     request = compute_v1.AggregatedListInstancesRequest(project=project_id)
 
     instances: list[Instance] = []
-    for zone_path, scoped_list in client.aggregated_list(request=request):
+    for zone_path, scoped_list in client.aggregated_list(request=request, timeout=REQUEST_TIMEOUT_SEC):
         if not scoped_list.instances:
             continue
         zone = zone_path.rsplit("/", 1)[-1]
