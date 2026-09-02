@@ -4,8 +4,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -19,16 +17,9 @@ from it_toolbox.core import async_utils, session_launcher, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.tunnel_session import BackgroundTunnel
-from it_toolbox.modules.connection_manager import gcp_client, storage
-from it_toolbox.modules.connection_manager.models import (
-    RDP_PORT,
-    SSH_PORT,
-    Connection,
-    GcpProject,
-    Instance,
-)
+from it_toolbox.modules.connection_manager import gcp_client
+from it_toolbox.modules.connection_manager.models import RDP_PORT, SSH_PORT, GcpProject, Instance
 from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
-from it_toolbox.modules.connection_manager.ui.connection_dialog import ConnectionDialog
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
@@ -36,7 +27,6 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 INSTANCES_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
 INSTANCE_ROLE = Qt.ItemDataRole.UserRole + 2
-CONNECTION_ROLE = Qt.ItemDataRole.UserRole
 
 
 class ConnectionManagerView(QWidget):
@@ -82,39 +72,13 @@ class ConnectionManagerView(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
 
-        self._connections_list = QListWidget()
-        self._connections_list.itemDoubleClicked.connect(self._on_connect_saved_clicked)
-        self._connect_saved_button = QPushButton("Connect")
-        self._edit_connection_button = QPushButton("Edit")
-        self._delete_connection_button = QPushButton("Delete")
-        for button in (
-            self._connect_saved_button,
-            self._edit_connection_button,
-            self._delete_connection_button,
-        ):
-            button.setEnabled(False)
-        self._connect_saved_button.clicked.connect(self._on_connect_saved_clicked)
-        self._edit_connection_button.clicked.connect(self._on_edit_connection_clicked)
-        self._delete_connection_button.clicked.connect(self._on_delete_connection_clicked)
-        self._connections_list.itemSelectionChanged.connect(self._on_connections_selection_changed)
-
-        connections_bar = QHBoxLayout()
-        connections_bar.addWidget(QLabel("Saved connections:"))
-        connections_bar.addWidget(self._connections_list, 1)
-        connections_bar.addWidget(self._connect_saved_button)
-        connections_bar.addWidget(self._edit_connection_button)
-        connections_bar.addWidget(self._delete_connection_button)
-
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
         layout.addWidget(self._tree)
-        layout.addLayout(connections_bar)
 
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._stop_all_sessions)
-
-        self._reload_saved_connections()
 
         if not gcp_auth.is_available():
             self._status_label.setText(
@@ -291,7 +255,7 @@ class ConnectionManagerView(QWidget):
         self._status_label.setText(f"Signed in as {self._account}")
         QMessageBox.warning(self, "Failed to load projects", str(error))
 
-    # -- Tree context menu: connect or save -----------------------------------
+    # -- Tree context menu: connect -------------------------------------------
 
     def _on_tree_context_menu(self, pos) -> None:
         item = self._tree.itemAt(pos)
@@ -304,15 +268,11 @@ class ConnectionManagerView(QWidget):
         menu = QMenu(self)
         rdp_action = menu.addAction("Connect via RDP")
         ssh_action = menu.addAction("Connect via SSH")
-        menu.addSeparator()
-        save_action = menu.addAction("Save as Connection…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
         elif chosen is ssh_action:
             self._start_session_from_instance(instance, "ssh")
-        elif chosen is save_action:
-            self._save_instance_as_connection(instance)
 
     def _start_session_from_instance(self, instance: Instance, kind: str) -> None:
         username = settings.load_default_username()
@@ -334,72 +294,6 @@ class ConnectionManagerView(QWidget):
             username=username,
         )
 
-    def _save_instance_as_connection(self, instance: Instance) -> None:
-        dialog = ConnectionDialog(instance=instance, parent=self)
-        if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
-            return
-        storage.add_connection(dialog.connection())
-        self._reload_saved_connections()
-
-    # -- Saved connections ----------------------------------------------------
-
-    def _reload_saved_connections(self) -> None:
-        self._connections_list.clear()
-        for connection in storage.list_connections():
-            label = f"{connection.name} ({connection.type.upper()}) — {connection.instance_name}"
-            item = QListWidgetItem(label)
-            item.setData(CONNECTION_ROLE, connection)
-            self._connections_list.addItem(item)
-
-    def _on_connections_selection_changed(self) -> None:
-        has_selection = bool(self._connections_list.selectedItems())
-        self._connect_saved_button.setEnabled(has_selection)
-        self._edit_connection_button.setEnabled(has_selection)
-        self._delete_connection_button.setEnabled(has_selection)
-
-    def _selected_connection(self) -> Connection | None:
-        items = self._connections_list.selectedItems()
-        if not items:
-            return None
-        return items[0].data(CONNECTION_ROLE)
-
-    def _on_connect_saved_clicked(self) -> None:
-        connection = self._selected_connection()
-        if connection is None:
-            return
-        self._connect(
-            display_name=connection.name,
-            project_id=connection.project_id,
-            zone=connection.zone,
-            instance_name=connection.instance_name,
-            network_interface=connection.network_interface,
-            kind=connection.type,
-            username=connection.username or settings.load_default_username(),
-            connection_id=connection.id,
-        )
-
-    def _on_edit_connection_clicked(self) -> None:
-        connection = self._selected_connection()
-        if connection is None:
-            return
-        dialog = ConnectionDialog(connection=connection, parent=self)
-        if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
-            return
-        storage.update_connection(dialog.connection())
-        self._reload_saved_connections()
-
-    def _on_delete_connection_clicked(self) -> None:
-        connection = self._selected_connection()
-        if connection is None:
-            return
-        confirm = QMessageBox.question(
-            self, "Delete Connection", f"Delete the saved connection '{connection.name}'?"
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-        storage.delete_connection(connection.id)
-        self._reload_saved_connections()
-
     # -- Connect (tunnel + launch RDP/SSH) -----------------------------------
 
     def _connect(
@@ -411,7 +305,6 @@ class ConnectionManagerView(QWidget):
         network_interface: str,
         kind: str,
         username: str | None,
-        connection_id: int | None = None,
     ) -> None:
         target = IapTunnelTarget(
             project=project_id,
@@ -424,9 +317,7 @@ class ConnectionManagerView(QWidget):
         self._status_label.setText(f"Connecting to {display_name} via {kind.upper()}…")
         async_utils.run_in_background(
             lambda: self._connect_and_launch(target, kind, username),
-            on_result=lambda tunnel: self._on_session_started(
-                display_name, kind, tunnel, connection_id
-            ),
+            on_result=lambda tunnel: self._on_session_started(display_name, kind, tunnel),
             on_error=self._on_session_error,
         )
 
@@ -448,13 +339,8 @@ class ConnectionManagerView(QWidget):
             raise
         return tunnel
 
-    def _on_session_started(
-        self, display_name: str, kind: str, tunnel: BackgroundTunnel, connection_id: int | None
-    ) -> None:
+    def _on_session_started(self, display_name: str, kind: str, tunnel: BackgroundTunnel) -> None:
         self._status_label.setText(f"Signed in as {self._account}")
-
-        if connection_id is not None:
-            storage.touch_last_used(connection_id)
 
         session_id = self._next_session_id
         self._next_session_id += 1
