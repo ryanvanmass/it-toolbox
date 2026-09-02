@@ -1,9 +1,15 @@
+import platform
 import shutil
 import subprocess
 
 from google.oauth2.credentials import Credentials
 
 GCLOUD_CMD = "gcloud"
+
+# On Windows, gcloud is a .cmd batch script — CreateProcess (what subprocess
+# uses under shell=False) can't launch those directly, only cmd.exe can.
+# Linux/macOS's gcloud is a real executable script, so this only applies here.
+_IS_WINDOWS = platform.system() == "Windows"
 
 INSTALL_URL = "https://cloud.google.com/sdk/docs/install"
 
@@ -26,6 +32,7 @@ def _run(*args: str) -> str:
         capture_output=True,
         text=True,
         check=False,
+        shell=_IS_WINDOWS,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"gcloud {' '.join(args)} failed")
