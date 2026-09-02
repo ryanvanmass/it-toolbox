@@ -1,7 +1,12 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTreeWidget,
@@ -10,13 +15,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils
+from it_toolbox.core import async_utils, session_launcher
 from it_toolbox.core.auth import gcp_auth
+from it_toolbox.core.iap_tunnel import IapTunnelTarget
+from it_toolbox.core.tunnel_session import BackgroundTunnel
 from it_toolbox.modules.connection_manager import gcp_client
 from it_toolbox.modules.connection_manager.models import GcpProject, Instance
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 INSTANCES_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
+INSTANCE_ROLE = Qt.ItemDataRole.UserRole + 2
+SESSION_ID_ROLE = Qt.ItemDataRole.UserRole
+
+RDP_PORT = 3389
+SSH_PORT = 22
 
 
 class ConnectionManagerView(QWidget):
@@ -24,6 +36,8 @@ class ConnectionManagerView(QWidget):
         super().__init__(parent)
 
         self._account: str | None = None
+        self._active_sessions: dict[int, tuple[Instance, str, BackgroundTunnel]] = {}
+        self._next_session_id = 1
 
         self._status_label = QLabel("Not signed in")
         self._sign_in_button = QPushButton("Sign in with gcloud")
@@ -37,10 +51,30 @@ class ConnectionManagerView(QWidget):
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Name", "Zone", "Status"])
         self._tree.itemExpanded.connect(self._on_item_expanded)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+
+        self._sessions_list = QListWidget()
+        self._disconnect_button = QPushButton("Disconnect")
+        self._disconnect_button.setEnabled(False)
+        self._disconnect_button.clicked.connect(self._on_disconnect_clicked)
+        self._sessions_list.itemSelectionChanged.connect(
+            lambda: self._disconnect_button.setEnabled(bool(self._sessions_list.selectedItems()))
+        )
+
+        sessions_bar = QHBoxLayout()
+        sessions_bar.addWidget(QLabel("Active sessions:"))
+        sessions_bar.addWidget(self._sessions_list, 1)
+        sessions_bar.addWidget(self._disconnect_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
         layout.addWidget(self._tree)
+        layout.addLayout(sessions_bar)
+
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._stop_all_sessions)
 
         if not gcp_auth.is_available():
             self._status_label.setText(
@@ -140,9 +174,9 @@ class ConnectionManagerView(QWidget):
             project_item.addChild(QTreeWidgetItem(["(no instances)"]))
             return
         for instance in instances:
-            project_item.addChild(
-                QTreeWidgetItem([instance.name, instance.zone, instance.status])
-            )
+            item = QTreeWidgetItem([instance.name, instance.zone, instance.status])
+            item.setData(0, INSTANCE_ROLE, instance)
+            project_item.addChild(item)
 
     def _populate_instances_error(self, project_item: QTreeWidgetItem, error: Exception) -> None:
         project_item.takeChildren()
@@ -151,3 +185,96 @@ class ConnectionManagerView(QWidget):
     def _on_load_error(self, error: Exception) -> None:
         self._status_label.setText(f"Signed in as {self._account}")
         QMessageBox.warning(self, "Failed to load projects", str(error))
+
+    # -- Connect (tunnel + launch RDP/SSH) -----------------------------------
+
+    def _on_tree_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+        instance = item.data(0, INSTANCE_ROLE)
+        if instance is None:
+            return
+
+        menu = QMenu(self)
+        rdp_action = menu.addAction("Connect via RDP")
+        ssh_action = menu.addAction("Connect via SSH")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is rdp_action:
+            self._start_session(instance, "rdp")
+        elif chosen is ssh_action:
+            self._start_session(instance, "ssh")
+
+    def _start_session(self, instance: Instance, kind: str) -> None:
+        username, ok = QInputDialog.getText(
+            self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
+        )
+        if not ok:
+            return
+        username = username.strip() or None
+
+        target = IapTunnelTarget(
+            project=instance.project_id,
+            zone=instance.zone,
+            instance=instance.name,
+            interface=instance.network_interface,
+            port=RDP_PORT if kind == "rdp" else SSH_PORT,
+        )
+
+        self._status_label.setText(f"Connecting to {instance.name} via {kind.upper()}…")
+        async_utils.run_in_background(
+            lambda: self._connect_and_launch(target, kind, username),
+            on_result=lambda tunnel: self._on_session_started(instance, kind, tunnel),
+            on_error=self._on_session_error,
+        )
+
+    @staticmethod
+    def _connect_and_launch(
+        target: IapTunnelTarget, kind: str, username: str | None
+    ) -> BackgroundTunnel:
+        tunnel = BackgroundTunnel(
+            target, get_access_token=lambda: gcp_auth.get_credentials().token
+        )
+        port = tunnel.start()
+        try:
+            if kind == "rdp":
+                session_launcher.launch_rdp("127.0.0.1", port, username)
+            else:
+                session_launcher.launch_ssh("127.0.0.1", port, username)
+        except session_launcher.SessionLaunchError:
+            tunnel.stop()
+            raise
+        return tunnel
+
+    def _on_session_started(self, instance: Instance, kind: str, tunnel: BackgroundTunnel) -> None:
+        self._status_label.setText(f"Signed in as {self._account}")
+
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._active_sessions[session_id] = (instance, kind, tunnel)
+
+        item = QListWidgetItem(f"{instance.name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}")
+        item.setData(SESSION_ID_ROLE, session_id)
+        self._sessions_list.addItem(item)
+
+    def _on_session_error(self, error: Exception) -> None:
+        self._status_label.setText(f"Signed in as {self._account}")
+        QMessageBox.warning(self, "Connection failed", str(error))
+
+    def _on_disconnect_clicked(self) -> None:
+        items = self._sessions_list.selectedItems()
+        if not items:
+            return
+        item = items[0]
+        session_id = item.data(SESSION_ID_ROLE)
+        self._sessions_list.takeItem(self._sessions_list.row(item))
+
+        entry = self._active_sessions.pop(session_id, None)
+        if entry is not None:
+            _, _, tunnel = entry
+            async_utils.run_in_background(tunnel.stop)
+
+    def _stop_all_sessions(self) -> None:
+        for _, _, tunnel in self._active_sessions.values():
+            tunnel.stop(timeout=2)
+        self._active_sessions.clear()
