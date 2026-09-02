@@ -52,12 +52,16 @@ class ConnectionManagerView(QWidget):
         self._select_projects_button = QPushButton("Select Projects…")
         self._select_projects_button.setEnabled(False)
         self._select_projects_button.clicked.connect(self._on_select_projects_clicked)
+        self._default_username_button = QPushButton()
+        self._default_username_button.clicked.connect(self._on_set_default_username_clicked)
+        self._refresh_default_username_button()
         self._sign_in_button = QPushButton("Sign in with gcloud")
         self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._status_label)
         top_bar.addStretch()
+        top_bar.addWidget(self._default_username_button)
         top_bar.addWidget(self._select_projects_button)
         top_bar.addWidget(self._sign_in_button)
 
@@ -232,6 +236,28 @@ class ConnectionManagerView(QWidget):
         settings.save_selected_project_ids(selected_ids)
         self._apply_project_selection(selected_ids)
 
+    # -- Default username -----------------------------------------------------
+
+    def _refresh_default_username_button(self) -> None:
+        username = settings.load_default_username()
+        self._default_username_button.setText(
+            f"Default Username: {username}" if username else "Set Default Username…"
+        )
+
+    def _on_set_default_username_clicked(self) -> None:
+        current = settings.load_default_username() or ""
+        username, ok = QInputDialog.getText(
+            self,
+            "Default Username",
+            "Username to use for connections that don't specify their own "
+            "(leave blank to be prompted each time instead):",
+            text=current,
+        )
+        if not ok:
+            return
+        settings.save_default_username(username.strip() or None)
+        self._refresh_default_username_button()
+
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         project_id = item.data(0, PROJECT_ID_ROLE)
         already_loaded = item.data(0, INSTANCES_LOADED_ROLE)
@@ -287,11 +313,15 @@ class ConnectionManagerView(QWidget):
             self._save_instance_as_connection(instance)
 
     def _start_session_from_instance(self, instance: Instance, kind: str) -> None:
-        username, ok = QInputDialog.getText(
-            self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
-        )
-        if not ok:
-            return
+        username = settings.load_default_username()
+        if username is None:
+            username, ok = QInputDialog.getText(
+                self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
+            )
+            if not ok:
+                return
+            username = username.strip() or None
+
         self._connect(
             display_name=instance.name,
             project_id=instance.project_id,
@@ -299,7 +329,7 @@ class ConnectionManagerView(QWidget):
             instance_name=instance.name,
             network_interface=instance.network_interface,
             kind=kind,
-            username=username.strip() or None,
+            username=username,
         )
 
     def _save_instance_as_connection(self, instance: Instance) -> None:
@@ -342,7 +372,7 @@ class ConnectionManagerView(QWidget):
             instance_name=connection.instance_name,
             network_interface=connection.network_interface,
             kind=connection.type,
-            username=connection.username,
+            username=connection.username or settings.load_default_username(),
             connection_id=connection.id,
         )
 

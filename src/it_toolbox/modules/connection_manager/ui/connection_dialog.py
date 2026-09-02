@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from it_toolbox.core import settings
 from it_toolbox.modules.connection_manager.models import RDP_PORT, SSH_PORT, Connection, Instance
 
 
@@ -58,6 +59,7 @@ class ConnectionDialog(QDialog):
             self._instance_name = instance.name
             self._network_interface = instance.network_interface
             self._name_edit.setText(instance.name)
+            self._username_edit.setText(settings.load_default_username() or "")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

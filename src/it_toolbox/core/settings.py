@@ -34,3 +34,25 @@ def load_selected_project_ids() -> set[str] | None:
 
 def save_selected_project_ids(project_ids: set[str]) -> None:
     selected_projects_path().write_text(json.dumps(sorted(project_ids)))
+
+
+def default_username_path() -> Path:
+    return data_dir() / "default_username.txt"
+
+
+def load_default_username() -> str | None:
+    """The username to connect with when a connection doesn't specify its
+    own — the common case being the same account name everywhere.
+    """
+    path = default_username_path()
+    if not path.is_file():
+        return None
+    return path.read_text().strip() or None
+
+
+def save_default_username(username: str | None) -> None:
+    path = default_username_path()
+    if username and username.strip():
+        path.write_text(username.strip())
+    else:
+        path.unlink(missing_ok=True)
