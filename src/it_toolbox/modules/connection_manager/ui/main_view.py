@@ -1,7 +1,7 @@
 import logging
 import platform
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -378,12 +378,7 @@ class ConnectionManagerView(QWidget):
                 "Embedding failed for %s, falling back to an external client", display_name,
                 exc_info=True,
             )
-            try:
-                self._launch_external(kind, tunnel.port, username)
-            except session_launcher.SessionLaunchError as exc:
-                self._active_sessions.pop(session_id, None)
-                tunnel.stop()
-                QMessageBox.warning(self, "Connection failed", str(exc))
+            if not self._fallback_to_external(session_id, kind, tunnel.port, username):
                 return
 
         label = f"{display_name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}"
@@ -403,10 +398,57 @@ class ConnectionManagerView(QWidget):
 
         rdp = RdpWidget("127.0.0.1", port, username)
         rdp.disconnected.connect(lambda: self._on_disconnect_requested(session_id))
+        rdp.connect_failed.connect(
+            lambda message: self._on_rdp_connect_failed(
+                session_id, display_name, port, username, message
+            )
+        )
         self._session_tab_widgets[session_id] = rdp
         index = self._session_tabs.addTab(rdp, display_name)
         self._session_tabs.setCurrentIndex(index)
         rdp.setFocus()
+        # Connect() needs the control to have a real native window handle,
+        # which it won't until after this widget has actually been shown
+        # (confirmed live: calling it synchronously here, before addTab()
+        # above takes effect, reliably fails with E_INVALIDARG) — defer to
+        # the next event loop iteration instead.
+        QTimer.singleShot(0, rdp.connect_session)
+
+    def _on_rdp_connect_failed(
+        self, session_id: int, display_name: str, port: int, username: str | None, message: str
+    ) -> None:
+        logger.warning("Embedded RDP connect failed for %s: %s", display_name, message)
+        if self._fallback_to_external(session_id, "rdp", port, username):
+            label = f"{display_name} (RDP) — 127.0.0.1:{port}"
+            self._active_sessions_dialog.add_session(session_id, label)
+
+    def _fallback_to_external(
+        self, session_id: int, kind: str, port: int, username: str | None
+    ) -> bool:
+        """Tear down any embedded widget for `session_id` and launch an
+        external client instead. Returns False if the session had to be
+        abandoned entirely (the external launch failed too).
+        """
+        widget = self._session_tab_widgets.pop(session_id, None)
+        if widget is not None:
+            index = self._session_tabs.indexOf(widget)
+            if index != -1:
+                self._session_tabs.removeTab(index)
+            close_session = getattr(widget, "close_session", None)
+            if close_session is not None:
+                close_session()
+            widget.deleteLater()
+
+        try:
+            self._launch_external(kind, port, username)
+        except session_launcher.SessionLaunchError as exc:
+            entry = self._active_sessions.pop(session_id, None)
+            if entry is not None:
+                _, tunnel = entry
+                tunnel.stop()
+            QMessageBox.warning(self, "Connection failed", str(exc))
+            return False
+        return True
 
     def _on_session_tab_changed(self, index: int) -> None:
         widget = self._session_tabs.widget(index)
