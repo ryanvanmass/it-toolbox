@@ -36,7 +36,7 @@ which is empty scaffolding pointing elsewhere).
         --winpr-include /usr/include/winpr3 \
         --system-include /usr/include \
         --resource-include /usr/lib64/clang/<ver>/include \
-        --output src/it_toolbox/widgets/_freerdp3_bindings.py
+        --output src/it_toolbox/core/rdp/_freerdp3_bindings.py
 
 All four include paths are required — see the setup notes above for what
 each one is for. Run `clang2py --help` (after installing ctypeslib2) if
