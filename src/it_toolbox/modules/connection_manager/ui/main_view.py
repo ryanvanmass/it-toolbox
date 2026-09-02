@@ -78,7 +78,7 @@ class ConnectionManagerView(QWidget):
         top_bar.addWidget(self._sign_in_button)
 
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Name", "Zone", "Status"])
+        self._tree.setHeaderLabels(["Name"])
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
@@ -269,8 +269,9 @@ class ConnectionManagerView(QWidget):
             project_item.addChild(QTreeWidgetItem(["(no instances)"]))
             return
         for instance in instances:
-            item = QTreeWidgetItem([instance.name, instance.zone, instance.status])
+            item = QTreeWidgetItem([instance.name])
             item.setData(0, INSTANCE_ROLE, instance)
+            item.setToolTip(0, f"Status: {instance.status}")
             project_item.addChild(item)
 
     def _populate_instances_error(self, project_item: QTreeWidgetItem, error: Exception) -> None:
