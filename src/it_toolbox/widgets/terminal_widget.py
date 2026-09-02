@@ -12,8 +12,8 @@ import threading
 
 import pyte
 from PySide6.QtCore import QSocketNotifier, Qt, Signal
-from PySide6.QtGui import QFont, QKeyEvent, QTextCursor
-from PySide6.QtWidgets import QPlainTextEdit, QWidget
+from PySide6.QtGui import QFont, QKeyEvent, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget
 
 from it_toolbox.widgets.pty_backend import PtyHandle
 
@@ -108,6 +108,31 @@ class TerminalWidget(QPlainTextEdit):
         cursor.movePosition(QTextCursor.MoveOperation.Right, n=self._screen.cursor.x)
         self.setTextCursor(cursor)
         self.ensureCursorVisible()
+        self._paint_cursor_block(cursor)
+
+    def _paint_cursor_block(self, cursor: QTextCursor) -> None:
+        # Qt's native blinking text cursor turned out unreliable to see here
+        # — replacing the whole document on every update (setPlainText,
+        # above) resets its blink phase each time, and a read-only widget
+        # gets no help from normal editing to keep it visible. Paint an
+        # explicit solid block instead, the same way real terminal emulators
+        # render their cursor, using an ExtraSelection rather than Qt's
+        # built-in cursor rendering.
+        if self._screen.cursor.hidden:
+            self.setExtraSelections([])
+            return
+
+        block_cursor = QTextCursor(cursor)
+        block_cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
+
+        fmt = QTextCharFormat()
+        fmt.setBackground(self.palette().text())
+        fmt.setForeground(self.palette().base())
+
+        selection = QTextEdit.ExtraSelection()
+        selection.cursor = block_cursor
+        selection.format = fmt
+        self.setExtraSelections([selection])
 
     # -- writing keystrokes ------------------------------------------------
 
