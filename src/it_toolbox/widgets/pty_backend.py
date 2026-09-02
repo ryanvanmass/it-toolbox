@@ -41,8 +41,11 @@ class PtyHandle:
         return data if isinstance(data, bytes) else data.encode()
 
     def write(self, data: bytes) -> None:
+        # pywinpty's write() wants str, unlike ptyprocess's bytes — confirmed
+        # by a real TypeError from a live Windows test.
+        payload = data.decode(errors="replace") if _IS_WINDOWS else data
         try:
-            self._proc.write(data)
+            self._proc.write(payload)
         except OSError:
             pass  # child already exited; caller will see it via read()
 
