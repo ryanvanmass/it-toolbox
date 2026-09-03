@@ -1,3 +1,6 @@
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QWidget
+
 from it_toolbox.modules.connection_manager.models import GcpProject, GcsBucket, Instance
 from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManagerView
 from it_toolbox.widgets.terminal_widget import TerminalWidget
@@ -200,42 +203,58 @@ def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
     qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
 
 
-def test_rdp_connect_launches_external_client_not_a_tab(qtbot, monkeypatch):
+class _FakeRdpWidget(QWidget):
+    """Stands in for the real RdpWidget in main_view tests — the real one
+    spawns a background thread that immediately drives actual libfreerdp
+    ctypes calls, which needs a real reachable RDP server and isn't
+    something a unit test should depend on. Exposes the same contract
+    main_view relies on: a `finished` signal and close_session()."""
+
+    finished = Signal()
+
+    def __init__(self, host, port, username, password, domain=""):
+        super().__init__()
+        self.host, self.port, self.username, self.password = host, port, username, password
+
+    def close_session(self):
+        pass
+
+
+def test_rdp_connect_embeds_widget_and_registers_session(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.RdpWidget", _FakeRdpWidget
+    )
     view = _make_view(qtbot, monkeypatch)
     tunnel = _FakeTunnel()
 
-    launched = {}
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.session_launcher.launch_rdp",
-        lambda host, port, username: launched.update(host=host, port=port, username=username),
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice", "secret")
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "test-vm"
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port, widget.username, widget.password) == (
+        "127.0.0.1",
+        2222,
+        "alice",
+        "secret",
     )
-
-    view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice")
-
-    assert launched == {"host": "127.0.0.1", "port": 2222, "username": "alice"}
-    assert view._tabs.count() == 0  # RDP never embeds
     assert len(view._active_sessions) == 1
 
 
-def test_rdp_connect_failure_stops_tunnel_and_does_not_register_session(qtbot, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-
-    from it_toolbox.core.session_launcher import SessionLaunchError
-
+def test_rdp_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):
+    # Covers both a connect failure and the remote side dropping the
+    # connection — RdpWidget.finished fires in either case, and main_view
+    # must tear the tab/session/tunnel down the same way for both.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.RdpWidget", _FakeRdpWidget
+    )
     view = _make_view(qtbot, monkeypatch)
     tunnel = _FakeTunnel()
 
-    def _raise(host, port, username):
-        raise SessionLaunchError("no RDP client found")
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", None, None)
+    widget = view._tabs.widget(0)
+    widget.finished.emit()
 
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.session_launcher.launch_rdp", _raise
-    )
-    # QMessageBox.warning() is modal and would otherwise block this test
-    # forever waiting for a click that will never come.
-    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
-
-    view._on_tunnel_ready(tunnel, "test-vm", "rdp", None)
-
+    assert view._tabs.count() == 0
     assert view._active_sessions == {}
-    assert tunnel.stopped
+    qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
