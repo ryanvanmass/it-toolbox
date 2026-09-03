@@ -21,6 +21,7 @@ was validated via a standalone CLI before any Qt code depended on it.
 """
 
 import ctypes
+import os
 import platform
 
 from it_toolbox.core.rdp._freerdp3_bindings import (
@@ -63,18 +64,61 @@ PIXEL_FORMAT_BGRX32 = (32 << 24) | (4 << 16) | (0 << 12) | (8 << 8) | (8 << 4) |
 
 _IS_WINDOWS = platform.system() == "Windows"
 
+# Set this to the folder holding freerdp3.dll/freerdp-client3.dll/winpr3.dll
+# (e.g. a vcpkg installed/x64-windows/bin, or wherever you extracted a
+# FreeRDP3 Windows build) if they aren't already on PATH. See
+# docs/windows-freerdp-setup.md for how to obtain them — there's no
+# official prebuilt package, so this is currently a self-built/vendored
+# dependency on Windows, unlike Linux where it's a normal system package.
+_FREERDP_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
 
-def _load(name: str) -> ctypes.CDLL:
-    return ctypes.WinDLL(name) if _IS_WINDOWS else ctypes.CDLL(name)
+if _IS_WINDOWS:
+    _freerdp_dir = os.environ.get(_FREERDP_DIR_ENV)
+    if _freerdp_dir:
+        # add_dll_directory is what actually matters for *dependency*
+        # resolution (e.g. freerdp3.dll pulling in winpr3.dll) — ctypes.WinDLL
+        # loading freerdp3.dll by an absolute path does not, on its own, add
+        # that DLL's own folder to the search path Windows uses to resolve
+        # its dependencies (a deliberate post-3.7 hardening against DLL
+        # hijacking). Prepending to PATH too is belt-and-suspenders for
+        # older-loader edge cases.
+        os.add_dll_directory(_freerdp_dir)
+        os.environ["PATH"] = _freerdp_dir + os.pathsep + os.environ.get("PATH", "")
+
+
+def _load(candidates: list[str]) -> ctypes.CDLL:
+    """Tries each candidate DLL/SO name in order — the exact Windows naming
+    (lib prefix or not, version suffix or not) depends on how FreeRDP3 was
+    built there, which nothing has verified yet (see the module docstring).
+    Fails with every name tried and a pointer to the setup doc, rather than
+    a bare "file not found" for whichever name happened to be tried first.
+    """
+    errors = []
+    for name in candidates:
+        try:
+            return ctypes.WinDLL(name) if _IS_WINDOWS else ctypes.CDLL(name)
+        except OSError as exc:
+            errors.append(f"  {name}: {exc}")
+    tried = "\n".join(errors)
+    hint = (
+        f"Set {_FREERDP_DIR_ENV} to the folder containing these DLLs — see "
+        "docs/windows-freerdp-setup.md."
+        if _IS_WINDOWS
+        else "Is the freerdp/libfreerdp3 package installed?"
+    )
+    raise OSError(f"Could not load any of:\n{tried}\n{hint}")
 
 
 # libfreerdp-client3 provides the client-context scaffolding functions;
 # libfreerdp3 provides the core connect/disconnect/settings API. Two
-# separate shared objects on Linux; same split on Windows (libfreerdp-client3.dll
-# / libfreerdp3.dll), untested there so far — see the module docstring in
-# scripts/generate_freerdp_bindings.py for the Linux-only status of this work.
-_client_lib = _load("libfreerdp-client3.so.3" if not _IS_WINDOWS else "libfreerdp-client3.dll")
-_core_lib = _load("libfreerdp3.so.3" if not _IS_WINDOWS else "libfreerdp3.dll")
+# separate shared objects on Linux (confirmed via `nm -D`); Windows naming
+# is unverified — CMake shared libraries don't get a "lib" prefix there by
+# default, but some FreeRDP Windows builds have historically kept it, so
+# both are tried.
+_client_lib = _load(
+    ["libfreerdp-client3.so.3"] if not _IS_WINDOWS else ["freerdp-client3.dll", "libfreerdp-client3.dll"]
+)
+_core_lib = _load(["libfreerdp3.so.3"] if not _IS_WINDOWS else ["freerdp3.dll", "libfreerdp3.dll"])
 
 # rdpContext* freerdp_client_context_new(const RDP_CLIENT_ENTRY_POINTS* pEntryPoints);
 _client_lib.freerdp_client_context_new.argtypes = [ctypes.POINTER(RdpClientEntryPointsV1)]
