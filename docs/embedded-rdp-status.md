@@ -117,23 +117,59 @@ via a dedicated local test account):
    keystroke actually reached the server and was acted on, not just
    that no exception was raised locally.
 
+## Verified against a genuinely remote server too (2026-09-03)
+
+Everything above was re-run against a real, separate machine on the LAN
+(a Windows Server 2025 Datacenter Evaluation VM, not `localhost`), to
+rule out anything that only happened to work over loopback:
+
+- Connect/disconnect smoke test and `--capture-frame`: clean, no
+  errors. (The first captured frame was the OOBE loading screen, not a
+  bug — a real network login sequence takes longer to reach
+  `LOGON_MSG_SESSION_CONTINUE` than loopback did, so a widget-level test
+  that waits for more frames is the better way to check rendering, not
+  the CLI harness's single-first-frame capture.)
+- `RdpWidget`, given more time to actually finish logging in: 15 frames
+  received, ending on a crisp, fully correct render of the remote
+  machine's first-login OOBE screen ("Send diagnostic data to
+  Microsoft") — legible text, no artifacts, over a real network path
+  (this machine and the target are both on `192.168.2.0/24`, confirmed
+  via `arp -a`/`Test-NetConnection`, not adjacent processes on one
+  host).
+- Mouse input over that same real network connection: a simulated click
+  on the OOBE screen's "Accept" button round-tripped to the server and
+  actually advanced the session — the next captured frame is the live
+  Windows desktop (wallpaper + Recycle Bin), confirming input isn't
+  loopback-only either.
+
+This was the last item on the "what's still open" list. Everything the
+previous version of this doc flagged as unverified on Windows —
+DLL loading, struct bindings, GDI rendering, the Qt widget, mouse/
+keyboard input, and now a genuinely remote server — has been checked.
+
 ## What's still open
 
-- The MD4/legacy-provider gap above, if it turns out to matter.
-- Testing against a genuinely remote RDP server (everything above used
-  `localhost` as both client and server on the same machine) — rules out
-  most bugs but not ones specific to network latency/fragmentation.
+- The MD4/legacy-provider gap noted above, if it turns out to matter
+  for a real target server (e.g. one that needs NTLM fallback rather
+  than NLA, or RC4-based licensing/security).
+- Everything verified so far has been manual smoke-testing (the CLI
+  harness and throwaway Qt scripts), not automated tests — there's
+  still no pytest coverage for `core/rdp/` itself (only the
+  `main_view.py` wiring is covered), consistent with how this area
+  needs a live server to test against.
 
 ## How to pick this up
 
 1. `git checkout feature/embedded-rdp-libfreerdp`, `git pull`.
 2. Get FreeRDP3 DLLs built per `docs/windows-freerdp-setup.md` (now
    confirmed working) and `IT_TOOLBOX_FREERDP_DIR` pointed at them.
-3. Try the real app (`python -m it_toolbox`, right-click a VM →
-   "Connect via RDP") against a genuinely remote target — everything
-   verified so far used `localhost` as both ends, so this is the first
-   real test of network conditions (latency, fragmentation) rather than
-   a loopback connection.
+3. At this point the embedded RDP client is verified working on both
+   Linux and Windows, over loopback and a real network. What's left is
+   normal hardening/polish work rather than open unknowns — e.g. the
+   MD4 gap above, broader manual testing against different Windows
+   versions/RDP server configurations, or deciding whether this is
+   ready to replace the external `mstsc.exe`/`xfreerdp` path as the
+   default.
 
 ## Repo conventions worth knowing before touching this code
 
