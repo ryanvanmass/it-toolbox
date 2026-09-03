@@ -62,47 +62,69 @@ server, from Linux as the client:
 Full commit-by-commit detail is in `git log` on this branch — each
 commit message documents what was proven and how.
 
-## What's NOT done: the entire Windows side
+## Windows verification (2026-09-03)
 
-Nothing above has run on Windows. Concretely open:
+All of the above is now also verified on Windows, end to end, against a
+real RDP server (this machine's own Remote Desktop service, `localhost`,
+via a dedicated local test account):
 
-1. **FreeRDP3 isn't installed anywhere on Windows yet.** There's no
-   official prebuilt DLL package — see `docs/windows-freerdp-setup.md`
-   for what was researched (vcpkg build, dynamic `x64-windows` triplet,
-   `IT_TOOLBOX_FREERDP_DIR` env var the app now reads). **This has never
-   actually been run** — the vcpkg build itself, the resulting DLL
-   names, whether the app can load them — all unverified. Start here.
-2. **The struct bindings may not be valid on Windows.**
-   `_freerdp3_bindings.py` was generated against a Linux x86_64 target.
-   Windows uses LLP64 (`long` is 4 bytes, vs 8 on Linux); if any FreeRDP
-   struct field is a bare `long` rather than a fixed-width type
-   (`UINT32`/`INT64`/etc.), the generated field size is wrong for
-   Windows. This is the same *class* of bug as the `ContextSize` heap
-   corruption already found and fixed on Linux — don't assume the
-   existing bindings are correct on Windows without checking. If
-   anything crashes with corruption-looking symptoms
-   (`double free`, `access violation`, garbage frame data), suspect this
-   first. Fix, if needed: regenerate with
-   `scripts/generate_freerdp_bindings.py` pointed at a Windows-side
-   clang install/headers, or a MinGW cross-compile target — not
-   attempted yet.
-3. **Everything else** (worker thread, Qt widget, input handling,
-   `main_view.py` wiring) is plain Python/Qt with no Windows-specific
-   code — it *should* work unchanged once the DLLs load and (1)/(2) are
-   sorted, but "should" is doing real work in that sentence until it's
-   actually run once.
+1. **FreeRDP3 built via vcpkg**, `freerdp[client]:x64-windows` —
+   `freerdp3.dll`, `freerdp-client3.dll`, `winpr3.dll` all produced under
+   `<vcpkg root>\installed\x64-windows\bin`. Confirms
+   `docs/windows-freerdp-setup.md`'s vcpkg recipe works as written.
+   Prerequisites (VS Build Tools C++ workload, a real Python — the
+   Windows Store's `python.exe` app-execution-alias stub is not one and
+   errors on `pip`) had to be installed first; neither was present by
+   default.
+2. **Struct bindings are correct on Windows as-is** —
+   `_freerdp3_bindings.py`, generated from Linux/LP64 headers, needed
+   *no* regeneration. Ran the CLI harness's connect/disconnect and
+   `--capture-frame` smoke tests (`core/rdp/freerdp_client.py`'s
+   `_cli_main`) directly against `localhost:3389`: clean connect,
+   disconnect, and a well-formed 1024x768 frame with real pixel
+   diversity, no crash, no corruption. This was the main open risk in
+   this doc's previous version — resolved.
+3. **The actual `RdpWidget` (not just the bare CLI) verified too** — a
+   throwaway offscreen Qt script instantiated `RdpWidget` for real,
+   waited for `frame_ready`, and `grab()`'d the painted widget: a crisp,
+   correctly-rendered capture of the remote Windows login screen came
+   back (confirms `PIXEL_FORMAT_BGRX32` → `QImage.Format_RGB32` still
+   lines up correctly on Windows, and `paintEvent`/`update()` work under
+   the offscreen QPA platform there). One gotcha specific to this test
+   harness: `grab()` right after `_image` is first set returns a blank
+   frame — `update()` only *schedules* a repaint, so a few more
+   `processEvents()` calls are needed before the backing store is
+   actually painted. Not an app bug, just a smoke-test timing detail
+   worth remembering if reproducing this.
+4. Benign warning worth knowing about, not a blocker: this vcpkg build
+   of OpenSSL doesn't load its legacy provider, so `winpr` logs `Failed
+   to initialize digest md4` and FreeRDP warns that "NTLM support" and
+   RC4-based licensing/security aren't available. Connect/auth/render
+   all still worked in this testing (NLA doesn't need MD4), but if NTLM
+   fallback auth or certain older security modes matter for real target
+   servers, that's the thing to revisit.
+
+## What's still open
+
+- Bidirectional **input on Windows** (mouse/keyboard round-tripping to a
+  real server) — verified on Linux (Milestone 4), not yet re-verified on
+  Windows. Should work unchanged (no Windows-specific code in
+  `scancodes.py` or the input handlers) but hasn't actually been
+  exercised there.
+- The MD4/legacy-provider gap above, if it turns out to matter.
+- Testing against a genuinely remote RDP server (everything above used
+  `localhost` as both client and server on the same machine) — rules out
+  most bugs but not ones specific to network latency/fragmentation.
 
 ## How to pick this up
 
 1. `git checkout feature/embedded-rdp-libfreerdp`, `git pull`.
-2. Work through `docs/windows-freerdp-setup.md` to get FreeRDP3 DLLs
-   built and discoverable.
-3. Try the app (`python -m it_toolbox`, right-click a VM →
-   "Connect via RDP") and report back *exactly* what happens — an import
-   error, a DLL-not-found, a crash, a garbled frame, or (hopefully) it
-   just working. Whatever breaks first is the next thing to fix; this
-   doc's job was to make sure that debugging starts from real signal
-   instead of from scratch.
+2. Get FreeRDP3 DLLs built per `docs/windows-freerdp-setup.md` (now
+   confirmed working) and `IT_TOOLBOX_FREERDP_DIR` pointed at them.
+3. Try the real app (`python -m it_toolbox`, right-click a VM →
+   "Connect via RDP") against a real remote target and confirm mouse/
+   keyboard input round-trips correctly — that's the one Milestone-4
+   behavior not yet re-checked on Windows.
 
 ## Repo conventions worth knowing before touching this code
 
