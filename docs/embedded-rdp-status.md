@@ -104,13 +104,21 @@ via a dedicated local test account):
    fallback auth or certain older security modes matter for real target
    servers, that's the thing to revisit.
 
+5. **Bidirectional input on Windows, verified too.** Drove real Qt
+   events at a live `RdpWidget` (via `QTest`, not calling
+   `worker.send_*` directly, so `_remote_pos` scaling and scancode
+   lookup were exercised for real): a mouse click on the login screen's
+   "Other user" tile produced a genuine server-side UI transition (a
+   "sign in anyway?" dialog, since another session was already active),
+   confirmed by screenshot. Then, keyboard-only (no mouse), an Enter
+   keypress on that dialog's default-focused "No" button triggered a
+   clean, verified round-trip: `RdpSessionWorker.signals.disconnected`
+   fired and the server logged `ERRINFO_LOGOFF_BY_USER` — proof the
+   keystroke actually reached the server and was acted on, not just
+   that no exception was raised locally.
+
 ## What's still open
 
-- Bidirectional **input on Windows** (mouse/keyboard round-tripping to a
-  real server) — verified on Linux (Milestone 4), not yet re-verified on
-  Windows. Should work unchanged (no Windows-specific code in
-  `scancodes.py` or the input handlers) but hasn't actually been
-  exercised there.
 - The MD4/legacy-provider gap above, if it turns out to matter.
 - Testing against a genuinely remote RDP server (everything above used
   `localhost` as both client and server on the same machine) — rules out
@@ -122,9 +130,10 @@ via a dedicated local test account):
 2. Get FreeRDP3 DLLs built per `docs/windows-freerdp-setup.md` (now
    confirmed working) and `IT_TOOLBOX_FREERDP_DIR` pointed at them.
 3. Try the real app (`python -m it_toolbox`, right-click a VM →
-   "Connect via RDP") against a real remote target and confirm mouse/
-   keyboard input round-trips correctly — that's the one Milestone-4
-   behavior not yet re-checked on Windows.
+   "Connect via RDP") against a genuinely remote target — everything
+   verified so far used `localhost` as both ends, so this is the first
+   real test of network conditions (latency, fragmentation) rather than
+   a loopback connection.
 
 ## Repo conventions worth knowing before touching this code
 
