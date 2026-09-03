@@ -35,6 +35,9 @@ from it_toolbox.core.rdp._freerdp3_bindings import (
 from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_rdp_freerdp as RdpFreerdp,
 )
+from it_toolbox.core.rdp._freerdp3_bindings import (
+    struct_rdp_gdi as RdpGdi,
+)
 
 RDP_CLIENT_INTERFACE_VERSION = 1  # freerdp/client.h
 
@@ -49,6 +52,14 @@ SETTING_TLS_SECURITY = 1088  # FreeRDP_Settings_Keys_Bool
 SETTING_NLA_SECURITY = 1089  # FreeRDP_Settings_Keys_Bool
 SETTING_RDP_SECURITY = 1090  # FreeRDP_Settings_Keys_Bool
 SETTING_IGNORE_CERTIFICATE = 1408  # FreeRDP_Settings_Keys_Bool
+
+# freerdp/codec/color.h — FREERDP_PIXEL_FORMAT(32, TYPE_BGRA, a=0, r=8, g=8, b=8).
+# Computed rather than transcribed from a literal, since the header only
+# defines it via macro arithmetic: (bpp<<24)|(type<<16)|(a<<12)|(r<<8)|(g<<4)|b.
+# Chosen because it lines up byte-for-byte with Qt's QImage.Format_RGB32 on a
+# little-endian host, letting the gdi primary_buffer be wrapped by a QImage
+# with no per-pixel conversion.
+PIXEL_FORMAT_BGRX32 = (32 << 24) | (4 << 16) | (0 << 12) | (8 << 8) | (8 << 4) | 8
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -101,6 +112,14 @@ _core_lib.freerdp_settings_set_uint32.restype = ctypes.c_int32
 _core_lib.freerdp_settings_set_bool.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int32]
 _core_lib.freerdp_settings_set_bool.restype = ctypes.c_int32
 
+# BOOL gdi_init(freerdp* instance, UINT32 format);   (freerdp/gdi/gdi.h)
+_core_lib.gdi_init.argtypes = [ctypes.POINTER(RdpFreerdp), ctypes.c_uint32]
+_core_lib.gdi_init.restype = ctypes.c_int32
+
+# BOOL freerdp_check_event_handles(rdpContext* context);
+_core_lib.freerdp_check_event_handles.argtypes = [ctypes.POINTER(RdpContext)]
+_core_lib.freerdp_check_event_handles.restype = ctypes.c_int32
+
 # ClientNew/ClientFree are optional per-context init/teardown hooks; we don't
 # need any custom per-context state for a bare connect/disconnect smoke test,
 # but they must be real callable CFUNCTYPE instances (not None) — FreeRDP
@@ -122,20 +141,7 @@ class FreeRdpError(Exception):
         self.code = code
 
 
-def connect_and_disconnect(
-    host: str,
-    port: int,
-    username: str,
-    password: str,
-    domain: str = "",
-    ignore_certificate: bool = True,
-) -> None:
-    """Milestone-1 smoke test: perform a full RDP handshake and immediately
-    tear it down. Proves the ctypes binding layer is wired correctly
-    end-to-end before any rendering or Qt integration is attempted.
-
-    Raises FreeRdpError on failure to connect.
-    """
+def _new_context() -> ctypes.POINTER(RdpContext):
     entry_points = RdpClientEntryPointsV1()
     entry_points.Size = ctypes.sizeof(RdpClientEntryPointsV1)
     entry_points.Version = RDP_CLIENT_INTERFACE_VERSION
@@ -152,30 +158,213 @@ def connect_and_disconnect(
     context = _client_lib.freerdp_client_context_new(ctypes.byref(entry_points))
     if not context:
         raise FreeRdpError("freerdp_client_context_new returned NULL")
+    return context
 
+
+def _configure_settings(
+    context: ctypes.POINTER(RdpContext),
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    domain: str,
+    ignore_certificate: bool,
+) -> None:
+    settings = context.contents.settings  # c_void_p, opaque — accessed via accessors only
+    _core_lib.freerdp_settings_set_string(settings, SETTING_SERVER_HOSTNAME, host.encode())
+    _core_lib.freerdp_settings_set_uint32(settings, SETTING_SERVER_PORT, port)
+    _core_lib.freerdp_settings_set_string(settings, SETTING_USERNAME, username.encode())
+    _core_lib.freerdp_settings_set_string(settings, SETTING_PASSWORD, password.encode())
+    if domain:
+        _core_lib.freerdp_settings_set_string(settings, SETTING_DOMAIN, domain.encode())
+    _core_lib.freerdp_settings_set_bool(settings, SETTING_IGNORE_CERTIFICATE, int(ignore_certificate))
+    _core_lib.freerdp_settings_set_bool(settings, SETTING_NLA_SECURITY, 1)
+    _core_lib.freerdp_settings_set_bool(settings, SETTING_TLS_SECURITY, 1)
+    _core_lib.freerdp_settings_set_bool(settings, SETTING_RDP_SECURITY, 1)
+
+
+def _raise_last_error(context: ctypes.POINTER(RdpContext), prefix: str) -> None:
+    code = _core_lib.freerdp_get_last_error(context)
+    message = _core_lib.freerdp_get_last_error_string(code)
+    text = message.decode(errors="replace") if message else "unknown error"
+    raise FreeRdpError(f"{prefix}: {text} (code {code:#x})", code=code)
+
+
+def connect_and_disconnect(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    domain: str = "",
+    ignore_certificate: bool = True,
+) -> None:
+    """Milestone-1 smoke test: perform a full RDP handshake and immediately
+    tear it down. Proves the ctypes binding layer is wired correctly
+    end-to-end before any rendering or Qt integration is attempted.
+
+    Raises FreeRdpError on failure to connect.
+    """
+    context = _new_context()
     try:
-        settings = context.contents.settings  # c_void_p, opaque — accessed via accessors only
-        _core_lib.freerdp_settings_set_string(settings, SETTING_SERVER_HOSTNAME, host.encode())
-        _core_lib.freerdp_settings_set_uint32(settings, SETTING_SERVER_PORT, port)
-        _core_lib.freerdp_settings_set_string(settings, SETTING_USERNAME, username.encode())
-        _core_lib.freerdp_settings_set_string(settings, SETTING_PASSWORD, password.encode())
-        if domain:
-            _core_lib.freerdp_settings_set_string(settings, SETTING_DOMAIN, domain.encode())
-        _core_lib.freerdp_settings_set_bool(settings, SETTING_IGNORE_CERTIFICATE, int(ignore_certificate))
-        _core_lib.freerdp_settings_set_bool(settings, SETTING_NLA_SECURITY, 1)
-        _core_lib.freerdp_settings_set_bool(settings, SETTING_TLS_SECURITY, 1)
-        _core_lib.freerdp_settings_set_bool(settings, SETTING_RDP_SECURITY, 1)
-
+        _configure_settings(context, host, port, username, password, domain, ignore_certificate)
         instance = context.contents.instance
         if not _core_lib.freerdp_connect(instance):
-            code = _core_lib.freerdp_get_last_error(context)
-            message = _core_lib.freerdp_get_last_error_string(code)
-            text = message.decode(errors="replace") if message else "unknown error"
-            raise FreeRdpError(f"freerdp_connect failed: {text} (code {code:#x})", code=code)
-
+            _raise_last_error(context, "freerdp_connect failed")
         _core_lib.freerdp_disconnect(instance)
     finally:
         _client_lib.freerdp_client_context_free(context)
+
+
+# BOOL (*pPostConnect)(freerdp* instance); called by freerdp_connect() once the
+# handshake is complete — this is where a client is expected to set up
+# rendering (gdi_init) and hook the update callbacks it cares about.
+_POST_CONNECT_TYPE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(RdpFreerdp))
+# BOOL (*pEndPaint)(rdpContext* context); fired after each frame update is
+# fully applied to the GDI surface — the signal to go read gdi->primary_buffer.
+_END_PAINT_TYPE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(RdpContext))
+
+
+class FreeRdpSession:
+    """A connected RDP session with software (GDI) rendering.
+
+    Not thread-safe and not Qt-aware by design — this is the Qt-free core,
+    meant to be driven from a dedicated background thread the same way
+    core/tunnel_session.py drives the IAP tunnel's asyncio loop, with a
+    Qt widget subscribing to on_frame via a queued-connection signal
+    rather than touching this object directly from the GUI thread.
+    """
+
+    def __init__(self) -> None:
+        self._context: ctypes.POINTER(RdpContext) | None = None
+        self.on_frame: callable | None = None  # called with no args after each EndPaint
+        # Kept alive for the lifetime of the session — ctypes does not keep
+        # a reference to a CFUNCTYPE instance on its own, and libfreerdp
+        # holds these pointers for as long as the connection is open.
+        self._post_connect_cb = _POST_CONNECT_TYPE(self._on_post_connect)
+        self._end_paint_cb = _END_PAINT_TYPE(self._on_end_paint)
+
+    def _on_post_connect(self, instance: ctypes.POINTER(RdpFreerdp)) -> int:
+        if not _core_lib.gdi_init(instance, PIXEL_FORMAT_BGRX32):
+            return 0
+        context = instance.contents.context
+        context.contents.update.contents.EndPaint = self._end_paint_cb
+        return 1
+
+    def _on_end_paint(self, context: ctypes.POINTER(RdpContext)) -> int:
+        if self.on_frame is not None:
+            self.on_frame()
+        return 1
+
+    def connect(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        domain: str = "",
+        ignore_certificate: bool = True,
+    ) -> None:
+        context = _new_context()
+        self._context = context
+        _configure_settings(context, host, port, username, password, domain, ignore_certificate)
+        context.contents.instance.contents.PostConnect = self._post_connect_cb
+        if not _core_lib.freerdp_connect(context.contents.instance):
+            self._context = None
+            error = context  # capture before freeing, for the error message
+            try:
+                _raise_last_error(error, "freerdp_connect failed")
+            finally:
+                _client_lib.freerdp_client_context_free(context)
+
+    def pump_once(self) -> bool:
+        """Process any pending protocol data (drives PDU parsing, which in
+        turn fires on_frame via EndPaint). Returns False when the connection
+        has gone away and should be torn down."""
+        if self._context is None:
+            return False
+        return bool(_core_lib.freerdp_check_event_handles(self._context))
+
+    def get_frame(self) -> tuple[bytes, int, int, int]:
+        """Returns (bgrx_pixels, width, height, stride) — a copy of the
+        current GDI surface, safe to hand off across threads."""
+        if self._context is None:
+            raise FreeRdpError("not connected")
+        gdi = self._context.contents.gdi.contents  # rdpContext.gdi: POINTER(struct_rdp_gdi)
+        size = gdi.stride * gdi.height
+        pixels = ctypes.string_at(gdi.primary_buffer, size)
+        return pixels, gdi.width, gdi.height, gdi.stride
+
+    def disconnect(self) -> None:
+        if self._context is None:
+            return
+        instance = self._context.contents.instance
+        _core_lib.freerdp_disconnect(instance)
+        _client_lib.freerdp_client_context_free(self._context)
+        self._context = None
+
+
+def _write_ppm(path: str, pixels: bytes, width: int, height: int, stride: int) -> None:
+    """Writes a raw PPM (P6) — trivial, uncompressed, no dependency beyond
+    stdlib, good enough for a one-off "did rendering actually work" check.
+    Converts BGRX (our PIXEL_FORMAT_BGRX32 surface) to RGB row by row,
+    since PPM has no BGR/padding variant.
+    """
+    with open(path, "wb") as f:
+        f.write(f"P6\n{width} {height}\n255\n".encode())
+        for y in range(height):
+            row = pixels[y * stride : y * stride + width * 4]
+            rgb = bytearray(width * 3)
+            rgb[0::3] = row[2::4]  # R
+            rgb[1::3] = row[1::4]  # G
+            rgb[2::3] = row[0::4]  # B
+            f.write(rgb)
+
+
+def capture_one_frame(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    output_path: str,
+    domain: str = "",
+    timeout_sec: float = 15.0,
+    settle_sec: float = 2.0,
+) -> None:
+    """Milestone-2 smoke test: connect with GDI rendering enabled, pump the
+    protocol until at least one frame has been painted, keep pumping for a
+    short settle period (the desktop arrives as many incremental bitmap
+    updates, not one shot — the very first EndPaint is typically still
+    mostly blank), save the result as a PPM, then disconnect. Proves
+    gdi_init + the EndPaint hook + reading the GDI surface all work before
+    any Qt widget is built around this.
+    """
+    import time
+
+    session = FreeRdpSession()
+    frame_ready = False
+    last_frame_at = 0.0
+
+    def _on_frame() -> None:
+        nonlocal frame_ready, last_frame_at
+        frame_ready = True
+        last_frame_at = time.monotonic()
+
+    session.on_frame = _on_frame
+    session.connect(host, port, username, password, domain=domain)
+    try:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if not session.pump_once():
+                raise FreeRdpError("connection closed before any frame was painted")
+            if frame_ready and time.monotonic() - last_frame_at > settle_sec:
+                break
+        if not frame_ready:
+            raise FreeRdpError(f"no frame painted within {timeout_sec}s")
+        pixels, width, height, stride = session.get_frame()
+        _write_ppm(output_path, pixels, width, height, stride)
+        print(f"Wrote {width}x{height} frame to {output_path}")
+    finally:
+        session.disconnect()
 
 
 def _cli_main() -> None:
@@ -183,9 +372,9 @@ def _cli_main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Milestone-1 smoke test: connect to a real RDP server via the ctypes "
-            "libfreerdp3 bindings and immediately disconnect. Proves the FFI layer "
-            "works before any Qt/rendering code depends on it."
+            "Connect to a real RDP server via the ctypes libfreerdp3 bindings. "
+            "By default performs the Milestone-1 connect/disconnect smoke test; "
+            "with --capture-frame, performs the Milestone-2 rendering smoke test."
         )
     )
     parser.add_argument("--host", required=True)
@@ -193,16 +382,31 @@ def _cli_main() -> None:
     parser.add_argument("--username", required=True)
     parser.add_argument("--password", required=True)
     parser.add_argument("--domain", default="")
+    parser.add_argument(
+        "--capture-frame",
+        metavar="PATH",
+        help="Also render and save the first frame as a PPM image to this path.",
+    )
     args = parser.parse_args()
 
-    connect_and_disconnect(
-        host=args.host,
-        port=args.port,
-        username=args.username,
-        password=args.password,
-        domain=args.domain,
-    )
-    print("Connected and disconnected successfully.")
+    if args.capture_frame:
+        capture_one_frame(
+            host=args.host,
+            port=args.port,
+            username=args.username,
+            password=args.password,
+            domain=args.domain,
+            output_path=args.capture_frame,
+        )
+    else:
+        connect_and_disconnect(
+            host=args.host,
+            port=args.port,
+            username=args.username,
+            password=args.password,
+            domain=args.domain,
+        )
+        print("Connected and disconnected successfully.")
 
 
 if __name__ == "__main__":
