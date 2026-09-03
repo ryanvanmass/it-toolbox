@@ -37,8 +37,15 @@ from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_rdp_freerdp as RdpFreerdp,
 )
 from it_toolbox.core.rdp._freerdp3_bindings import (
+    struct_ChannelConnectedEventArgs as ChannelConnectedEventArgs,
+)
+from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_rdp_gdi as RdpGdi,
 )
+from it_toolbox.core.rdp._freerdp3_bindings import (
+    struct_s_wPubSub as WPubSub,
+)
+from it_toolbox.core.rdp.disp import DispClientContext, DisplayChannel
 
 RDP_CLIENT_INTERFACE_VERSION = 1  # freerdp/client.h
 
@@ -53,6 +60,8 @@ SETTING_TLS_SECURITY = 1088  # FreeRDP_Settings_Keys_Bool
 SETTING_NLA_SECURITY = 1089  # FreeRDP_Settings_Keys_Bool
 SETTING_RDP_SECURITY = 1090  # FreeRDP_Settings_Keys_Bool
 SETTING_IGNORE_CERTIFICATE = 1408  # FreeRDP_Settings_Keys_Bool
+SETTING_DYNAMIC_RESOLUTION_UPDATE = 1558  # FreeRDP_Settings_Keys_Bool
+SETTING_SUPPORT_DISPLAY_CONTROL = 5185  # FreeRDP_Settings_Keys_Bool
 
 # freerdp/codec/color.h — FREERDP_PIXEL_FORMAT(32, TYPE_BGRA, a=0, r=8, g=8, b=8).
 # Computed rather than transcribed from a literal, since the header only
@@ -119,6 +128,9 @@ _client_lib = _load(
     ["libfreerdp-client3.so.3"] if not _IS_WINDOWS else ["freerdp-client3.dll", "libfreerdp-client3.dll"]
 )
 _core_lib = _load(["libfreerdp3.so.3"] if not _IS_WINDOWS else ["freerdp3.dll", "libfreerdp3.dll"])
+# winpr3 provides PubSub_Subscribe, used to learn when a virtual channel
+# (disp/cliprdr/...) has connected — see FreeRdpSession._on_channel_connected.
+_winpr_lib = _load(["libwinpr3.so.3"] if not _IS_WINDOWS else ["winpr3.dll", "libwinpr3.dll"])
 
 # rdpContext* freerdp_client_context_new(const RDP_CLIENT_ENTRY_POINTS* pEntryPoints);
 _client_lib.freerdp_client_context_new.argtypes = [ctypes.POINTER(RdpClientEntryPointsV1)]
@@ -163,6 +175,22 @@ _core_lib.gdi_init.restype = ctypes.c_int32
 # BOOL freerdp_check_event_handles(rdpContext* context);
 _core_lib.freerdp_check_event_handles.argtypes = [ctypes.POINTER(RdpContext)]
 _core_lib.freerdp_check_event_handles.restype = ctypes.c_int32
+
+# BOOL gdi_resize(rdpGdi* gdi, UINT32 width, UINT32 height);  (freerdp/gdi/gdi.h)
+# Resizes the local framebuffer to match a resolution change we requested
+# via the disp channel — there's no "desktop was resized" callback the way
+# PostConnect/EndPaint are exposed, since we're the one initiating the
+# resize, so we're also responsible for keeping gdi's buffer in sync.
+_core_lib.gdi_resize.argtypes = [ctypes.POINTER(RdpGdi), ctypes.c_uint32, ctypes.c_uint32]
+_core_lib.gdi_resize.restype = ctypes.c_int32
+
+# int PubSub_Subscribe(wPubSub* pubSub, const char* EventName, ...);
+# Declared variadic in winpr/collections.h, but every real call site (via
+# the DEFINE_EVENT_SUBSCRIBE macro) passes exactly one further argument, a
+# specific event-handler function pointer — fixed 3-arg ctypes argtypes
+# below match that actual calling pattern.
+_winpr_lib.PubSub_Subscribe.argtypes = [ctypes.POINTER(WPubSub), ctypes.c_char_p, ctypes.c_void_p]
+_winpr_lib.PubSub_Subscribe.restype = ctypes.c_int32
 
 # rdpInput is treated as opaque here — every call below only ever passes the
 # pointer straight through to libfreerdp, never dereferences a field of it.
@@ -277,6 +305,8 @@ def _configure_settings(
     _core_lib.freerdp_settings_set_bool(settings, SETTING_NLA_SECURITY, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_TLS_SECURITY, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_RDP_SECURITY, 1)
+    _core_lib.freerdp_settings_set_bool(settings, SETTING_SUPPORT_DISPLAY_CONTROL, 1)
+    _core_lib.freerdp_settings_set_bool(settings, SETTING_DYNAMIC_RESOLUTION_UPDATE, 1)
 
 
 def _raise_last_error(context: ctypes.POINTER(RdpContext), prefix: str) -> None:
@@ -318,6 +348,13 @@ _POST_CONNECT_TYPE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(RdpFreerdp)
 # BOOL (*pEndPaint)(rdpContext* context); fired after each frame update is
 # fully applied to the GDI surface — the signal to go read gdi->primary_buffer.
 _END_PAINT_TYPE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(RdpContext))
+# void (*)(void* context, const ChannelConnectedEventArgs* e); fired once per
+# virtual channel as each one finishes connecting — the disp/cliprdr client
+# contexts only exist from this point on, unlike PostConnect/EndPaint which
+# are fixed single-slot callbacks set up front.
+_CHANNEL_CONNECTED_TYPE = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.POINTER(ChannelConnectedEventArgs)
+)
 
 
 class FreeRdpSession:
@@ -333,11 +370,13 @@ class FreeRdpSession:
     def __init__(self) -> None:
         self._context: ctypes.POINTER(RdpContext) | None = None
         self.on_frame: callable | None = None  # called with no args after each EndPaint
+        self.display = DisplayChannel()
         # Kept alive for the lifetime of the session — ctypes does not keep
         # a reference to a CFUNCTYPE instance on its own, and libfreerdp
         # holds these pointers for as long as the connection is open.
         self._post_connect_cb = _POST_CONNECT_TYPE(self._on_post_connect)
         self._end_paint_cb = _END_PAINT_TYPE(self._on_end_paint)
+        self._channel_connected_cb = _CHANNEL_CONNECTED_TYPE(self._on_channel_connected)
 
     def _on_post_connect(self, instance: ctypes.POINTER(RdpFreerdp)) -> int:
         if not _core_lib.gdi_init(instance, PIXEL_FORMAT_BGRX32):
@@ -350,6 +389,34 @@ class FreeRdpSession:
         if self.on_frame is not None:
             self.on_frame()
         return 1
+
+    def _on_channel_connected(self, sender, event_args: ctypes.POINTER(ChannelConnectedEventArgs)) -> None:
+        # .name is POINTER(c_char), not c_char_p — doesn't auto-convert to
+        # bytes on comparison, needs an explicit cast to read it as a string.
+        name = ctypes.cast(event_args.contents.name, ctypes.c_char_p).value
+        # disp is a Dynamic Virtual Channel (unlike cliprdr's static
+        # channel) — freerdp/channels/disp.h defines two different name
+        # constants ("disp" the addin name vs. the DVC's actual protocol
+        # name), and it's unverified which one ChannelConnected reports,
+        # so match either rather than guess wrong and silently never bind.
+        if name in (b"disp", b"Microsoft::Windows::RDS::DisplayControl"):
+            disp_context = ctypes.cast(event_args.contents.pInterface, ctypes.POINTER(DispClientContext))
+            self.display.bind(disp_context)
+
+    def request_resize(self, width: int, height: int) -> None:
+        """Ask the server to resize the remote desktop, and resize the
+        local framebuffer to match. Call only from the thread driving the
+        connection (see rdp_session_worker.py's _drain_input_queue)."""
+        if self._context is None or self.display._context is None:
+            # No server-side cooperation possible — resizing the local GDI
+            # buffer alone without the server also resizing would desync
+            # the two (stale bitmap data reinterpreted at wrong
+            # dimensions), which is worse than a no-op: produces a
+            # cropped/corrupted display instead of just not resizing.
+            return
+        gdi = self._context.contents.gdi
+        _core_lib.gdi_resize(gdi, width, height)
+        self.display.request_resize(width, height)
 
     def connect(
         self,
@@ -364,6 +431,11 @@ class FreeRdpSession:
         self._context = context
         _configure_settings(context, host, port, username, password, domain, ignore_certificate)
         context.contents.instance.contents.PostConnect = self._post_connect_cb
+        _winpr_lib.PubSub_Subscribe(
+            context.contents.pubSub,
+            b"ChannelConnected",
+            ctypes.cast(self._channel_connected_cb, ctypes.c_void_p),
+        )
         if not _core_lib.freerdp_connect(context.contents.instance):
             self._context = None
             error = context  # capture before freeing, for the error message

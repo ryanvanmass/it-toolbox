@@ -10,7 +10,7 @@ paintEvent), so pointer coordinates are rescaled from widget-space to
 the remote desktop's native resolution before being sent.
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -57,6 +57,14 @@ class RdpWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._status_label)
 
+        # Debounced so a window drag doesn't fire a resize request per
+        # pixel — restarted on every resizeEvent, only actually sent once
+        # the size has settled for this long.
+        self._resize_debounce = QTimer(self)
+        self._resize_debounce.setSingleShot(True)
+        self._resize_debounce.setInterval(250)
+        self._resize_debounce.timeout.connect(self._send_resize_request)
+
         self._worker = RdpSessionWorker(host, port, username, password, domain)
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
@@ -99,6 +107,13 @@ class RdpWidget(QWidget):
         if self._image is not None:
             return self._image.size()
         return super().sizeHint()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._resize_debounce.start()
+
+    def _send_resize_request(self) -> None:
+        self._worker.request_resize(self.width(), self.height())
 
     def close_session(self) -> None:
         """Matches the close_session() convention main_view uses to tear

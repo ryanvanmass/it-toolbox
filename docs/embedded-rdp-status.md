@@ -147,11 +147,87 @@ previous version of this doc flagged as unverified on Windows —
 DLL loading, struct bindings, GDI rendering, the Qt widget, mouse/
 keyboard input, and now a genuinely remote server — has been checked.
 
+## Dynamic resolution resizing (2026-09-03)
+
+`RdpWidget` now asks the server to resize the remote desktop when the
+widget itself is resized, instead of just stretching whatever fixed-size
+bitmap it already had — implemented and verified against the real
+remote server, both shrinking and growing, with each resize producing a
+genuine fresh render at the new resolution (taskbar/desktop correctly
+re-laid-out, not a stretched or cropped old frame).
+
+- New module `core/rdp/disp.py`: hand-declared `DispClientContext` +
+  `DISPLAY_CONTROL_MONITOR_LAYOUT` (`freerdp/client/disp.h` +
+  `freerdp/channels/disp.h`). Much smaller than cliprdr's bindings —
+  one struct, no embedded pointers, no array-lifetime concerns.
+- `FreeRdpSession.request_resize(width, height)` calls `gdi_resize()`
+  (resizes the local framebuffer) *and* `DisplayChannel.request_resize`
+  (asks the server) together — deliberately gated on the disp channel
+  actually being bound first. Calling `gdi_resize()` alone without
+  server cooperation was tried and produces a cropped/corrupted display
+  (the local buffer's dimensions desync from what the server is
+  actually sending) — worse than doing nothing, so `request_resize` is
+  a no-op until the channel is live.
+- **Important lesson, reusable for any future DVC work**: the
+  `ChannelConnected` pubsub event's `name` field is *not* always the
+  short name a header's `_CHANNEL_NAME` macro suggests. `cliprdr` (a
+  static channel) does report literally `"cliprdr"`, but `disp` (a
+  Dynamic Virtual Channel) reports its full DVC name,
+  `"Microsoft::Windows::RDS::DisplayControl"` — confirmed by tracing
+  every `ChannelConnected` event against the real server. Matching only
+  `"disp"` silently never bound the channel; the code now matches
+  either name. If a future channel doesn't seem to bind, trace the
+  actual names first rather than assuming the short one.
+- `RdpWidget.resizeEvent` debounces via a 250ms single-shot `QTimer` —
+  restarted on every resize, only actually sent once the size has
+  settled — so a window drag doesn't fire a resize request per pixel.
+- Settings: `SupportDisplayControl` (5185) and `DynamicResolutionUpdate`
+  (1558), both bool, set alongside the existing TLS/NLA/RDP-security
+  bools in `_configure_settings`. No `freerdp_client_load_channels`
+  call needed here (unlike cliprdr) — disp is a DVC and loads
+  automatically, confirmed via the "Loading Dynamic Virtual Channel
+  disp" log line already visible in every session before this feature
+  existed.
+
+## Clipboard sync — attempted, reverted, worth knowing before retrying
+
+A full bidirectional clipboard bridge (`core/rdp/cliprdr.py`,
+`CliprdrClientContext` + the `CLIPRDR_FORMAT_LIST`/`FORMAT_DATA_*`
+message structs, wired through `RdpSessionWorker`/`RdpWidget` to Qt's
+`QClipboard`) was built and partially verified, then **reverted** at the
+user's request rather than shipped half-working. Do this over with
+better tooling before re-attempting rather than repeating the same
+trial-and-error:
+
+- **Remote→local text sync worked**, verified twice against the real
+  remote server with fresh (non-stale) data each time.
+- **Local→remote (pasting local content into the remote session) did
+  not work**, and the root cause was never found. The client-side
+  `ClientFormatList` call returns success (`0`/`CHANNEL_RC_OK`), but the
+  server never follows up with a `ServerFormatDataRequest` — ruled out
+  timing (tested with a 6s wait) and widget-focus mixups (confirmed via
+  screenshot the target window stayed empty). Best remaining guesses,
+  untested: something in the `CLIPRDR_FORMAT_LIST` wire serialization
+  (the `formats` array / `dataLen` handling), or a capability-
+  negotiation default (`CB_USE_LONG_FORMAT_NAMES`) that needs setting
+  explicitly via `ClientCapabilities` rather than relying on whatever
+  FreeRDP defaults to unset.
+- Getting further would need either a packet capture (Wireshark on the
+  `cliprdr` static channel) to see the actual wire bytes, or reading
+  FreeRDP's own `client/cliprdr_main.c` reference implementation (not
+  vendored in this repo — only headers were available), rather than
+  more guessing from the header alone.
+- One thing confirmed *not* the bug, worth not re-litigating: `cliprdr`
+  is a static channel and its `ChannelConnected` name genuinely is
+  `"cliprdr"` (unlike `disp`, see above) — channel binding itself
+  worked fine on the first try.
+
 ## What's still open
 
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
+- Clipboard sync (see above) — reverted, not on this branch.
 - Everything verified so far has been manual smoke-testing (the CLI
   harness and throwaway Qt scripts), not automated tests — there's
   still no pytest coverage for `core/rdp/` itself (only the

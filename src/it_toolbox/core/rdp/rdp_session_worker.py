@@ -82,6 +82,12 @@ class RdpSessionWorker:
     def send_key_unicode(self, codepoint: int, down: bool) -> None:
         self._input_queue.put(("key_unicode", codepoint, down))
 
+    def request_resize(self, width: int, height: int) -> None:
+        """Safe to call from the Qt thread. Caller (RdpWidget) is
+        responsible for debouncing — this queues one resize request per
+        call with no coalescing of its own."""
+        self._input_queue.put(("resize", width, height))
+
     def _drain_input_queue(self) -> None:
         while True:
             try:
@@ -99,6 +105,8 @@ class RdpSessionWorker:
                 self._session.send_key_scancode(*args)
             elif kind == "key_unicode":
                 self._session.send_key_unicode(*args)
+            elif kind == "resize":
+                self._session.request_resize(*args)
 
     def _run(self) -> None:
         self._session.on_frame = self._on_frame
