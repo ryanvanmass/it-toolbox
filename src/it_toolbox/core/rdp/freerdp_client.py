@@ -120,6 +120,58 @@ _core_lib.gdi_init.restype = ctypes.c_int32
 _core_lib.freerdp_check_event_handles.argtypes = [ctypes.POINTER(RdpContext)]
 _core_lib.freerdp_check_event_handles.restype = ctypes.c_int32
 
+# rdpInput is treated as opaque here — every call below only ever passes the
+# pointer straight through to libfreerdp, never dereferences a field of it.
+_RdpInputP = ctypes.c_void_p
+
+# BOOL freerdp_input_send_mouse_event(rdpInput* input, UINT16 flags, UINT16 x, UINT16 y);
+_core_lib.freerdp_input_send_mouse_event.argtypes = [
+    _RdpInputP,
+    ctypes.c_uint16,
+    ctypes.c_uint16,
+    ctypes.c_uint16,
+]
+_core_lib.freerdp_input_send_mouse_event.restype = ctypes.c_int32
+
+# BOOL freerdp_input_send_extended_mouse_event(rdpInput* input, UINT16 flags, UINT16 x, UINT16 y);
+_core_lib.freerdp_input_send_extended_mouse_event.argtypes = [
+    _RdpInputP,
+    ctypes.c_uint16,
+    ctypes.c_uint16,
+    ctypes.c_uint16,
+]
+_core_lib.freerdp_input_send_extended_mouse_event.restype = ctypes.c_int32
+
+# BOOL freerdp_input_send_keyboard_event(rdpInput* input, UINT16 flags, UINT8 code);
+_core_lib.freerdp_input_send_keyboard_event.argtypes = [
+    _RdpInputP,
+    ctypes.c_uint16,
+    ctypes.c_uint8,
+]
+_core_lib.freerdp_input_send_keyboard_event.restype = ctypes.c_int32
+
+# BOOL freerdp_input_send_unicode_keyboard_event(rdpInput* input, UINT16 flags, UINT16 code);
+_core_lib.freerdp_input_send_unicode_keyboard_event.argtypes = [
+    _RdpInputP,
+    ctypes.c_uint16,
+    ctypes.c_uint16,
+]
+_core_lib.freerdp_input_send_unicode_keyboard_event.restype = ctypes.c_int32
+
+# freerdp/input.h — keyboard/mouse event flag bits.
+KBD_FLAGS_EXTENDED = 0x0100
+KBD_FLAGS_RELEASE = 0x8000
+PTR_FLAGS_WHEEL = 0x0200
+PTR_FLAGS_WHEEL_NEGATIVE = 0x0100
+PTR_FLAGS_MOVE = 0x0800
+PTR_FLAGS_DOWN = 0x8000
+PTR_FLAGS_BUTTON1 = 0x1000  # left
+PTR_FLAGS_BUTTON2 = 0x2000  # right
+PTR_FLAGS_BUTTON3 = 0x4000  # middle
+PTR_XFLAGS_DOWN = 0x8000
+PTR_XFLAGS_BUTTON1 = 0x0001  # X1 (back)
+PTR_XFLAGS_BUTTON2 = 0x0002  # X2 (forward)
+
 # ClientNew/ClientFree are optional per-context init/teardown hooks; we don't
 # need any custom per-context state for a bare connect/disconnect smoke test,
 # but they must be real callable CFUNCTYPE instances (not None) — FreeRDP
@@ -301,6 +353,61 @@ class FreeRdpSession:
         _core_lib.freerdp_disconnect(instance)
         _client_lib.freerdp_client_context_free(self._context)
         self._context = None
+
+    # --- input ---------------------------------------------------------
+    # Call these only from the same thread that owns the connection (i.e.
+    # the thread calling pump_once()), matching how libfreerdp's own event
+    # loop is documented to be single-threaded per session.
+
+    def send_mouse_move(self, x: int, y: int) -> None:
+        self._send_mouse(PTR_FLAGS_MOVE, x, y)
+
+    def send_mouse_button(self, x: int, y: int, button: str, down: bool) -> None:
+        button_flag = {"left": PTR_FLAGS_BUTTON1, "right": PTR_FLAGS_BUTTON2, "middle": PTR_FLAGS_BUTTON3}
+        if button in button_flag:
+            flags = button_flag[button] | (PTR_FLAGS_DOWN if down else 0)
+            self._send_mouse(flags, x, y)
+        elif button in ("x1", "x2"):
+            xflag = PTR_XFLAGS_BUTTON1 if button == "x1" else PTR_XFLAGS_BUTTON2
+            flags = xflag | (PTR_XFLAGS_DOWN if down else 0)
+            self._send_extended_mouse(flags, x, y)
+
+    def send_mouse_wheel(self, x: int, y: int, delta_steps: int) -> None:
+        """delta_steps > 0 scrolls up/away, < 0 scrolls down/toward — matches
+        the sign of Qt's QWheelEvent.angleDelta().y() // 120."""
+        magnitude = min(abs(delta_steps) * 120, 0xFF)
+        flags = PTR_FLAGS_WHEEL | magnitude
+        if delta_steps < 0:
+            flags |= PTR_FLAGS_WHEEL_NEGATIVE
+        self._send_mouse(flags, x, y)
+
+    def _send_mouse(self, flags: int, x: int, y: int) -> None:
+        if self._context is None:
+            return
+        _core_lib.freerdp_input_send_mouse_event(
+            self._context.contents.input, flags, max(x, 0), max(y, 0)
+        )
+
+    def _send_extended_mouse(self, flags: int, x: int, y: int) -> None:
+        if self._context is None:
+            return
+        _core_lib.freerdp_input_send_extended_mouse_event(
+            self._context.contents.input, flags, max(x, 0), max(y, 0)
+        )
+
+    def send_key_scancode(self, code: int, extended: bool, down: bool) -> None:
+        if self._context is None:
+            return
+        flags = (KBD_FLAGS_EXTENDED if extended else 0) | (0 if down else KBD_FLAGS_RELEASE)
+        _core_lib.freerdp_input_send_keyboard_event(self._context.contents.input, flags, code)
+
+    def send_key_unicode(self, codepoint: int, down: bool) -> None:
+        if self._context is None:
+            return
+        flags = 0 if down else KBD_FLAGS_RELEASE
+        _core_lib.freerdp_input_send_unicode_keyboard_event(
+            self._context.contents.input, flags, codepoint
+        )
 
 
 def _write_ppm(path: str, pixels: bytes, width: int, height: int, stride: int) -> None:

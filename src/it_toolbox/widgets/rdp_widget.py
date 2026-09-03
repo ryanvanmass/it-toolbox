@@ -4,8 +4,10 @@ control, which turned out to be unusable on at least one real Windows
 test machine (no modern MsRdpClient ProgID registered, unfixable from
 app code).
 
-Read-only viewer for now: renders the desktop, does not yet forward
-mouse/keyboard input back to the server.
+Renders the desktop and forwards mouse/keyboard input back to the
+server. Displayed image is stretched to fill the widget (see
+paintEvent), so pointer coordinates are rescaled from widget-space to
+the remote desktop's native resolution before being sent.
 """
 
 from PySide6.QtCore import Qt
@@ -13,6 +15,15 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
+from it_toolbox.core.rdp.scancodes import SCANCODES
+
+_BUTTON_NAMES = {
+    Qt.MouseButton.LeftButton: "left",
+    Qt.MouseButton.RightButton: "right",
+    Qt.MouseButton.MiddleButton: "middle",
+    Qt.MouseButton.BackButton: "x1",
+    Qt.MouseButton.ForwardButton: "x2",
+}
 
 
 class RdpWidget(QWidget):
@@ -28,6 +39,8 @@ class RdpWidget(QWidget):
         super().__init__(parent)
         self._image: QImage | None = None
         self._frame_bytes: bytes | None = None  # keeps QImage's backing buffer alive
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
 
         self._status_label = QLabel("Connecting…")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -74,3 +87,55 @@ class RdpWidget(QWidget):
         """Matches the close_session() convention main_view uses to tear
         down any session tab (terminal, bucket browser, ...) uniformly."""
         self._worker.stop()
+
+    # --- input: widget-space -> remote desktop-space, then forwarded ----
+
+    def _remote_pos(self, widget_pos) -> tuple[int, int]:
+        if self._image is None or self.width() == 0 or self.height() == 0:
+            return int(widget_pos.x()), int(widget_pos.y())
+        scale_x = self._image.width() / self.width()
+        scale_y = self._image.height() / self.height()
+        return int(widget_pos.x() * scale_x), int(widget_pos.y() * scale_y)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        x, y = self._remote_pos(event.position())
+        self._worker.send_mouse_move(x, y)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        button = _BUTTON_NAMES.get(event.button())
+        if button is None:
+            return
+        x, y = self._remote_pos(event.position())
+        self._worker.send_mouse_button(x, y, button, True)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        button = _BUTTON_NAMES.get(event.button())
+        if button is None:
+            return
+        x, y = self._remote_pos(event.position())
+        self._worker.send_mouse_button(x, y, button, False)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        x, y = self._remote_pos(event.position())
+        steps = event.angleDelta().y() // 120
+        if steps:
+            self._worker.send_mouse_wheel(x, y, steps)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        self._forward_key_event(event, down=True)
+
+    def keyReleaseEvent(self, event) -> None:  # noqa: N802
+        self._forward_key_event(event, down=False)
+
+    def _forward_key_event(self, event, down: bool) -> None:
+        key = Qt.Key(event.key())
+        scancode = SCANCODES.get(key)
+        if scancode is not None:
+            code, extended = scancode
+            self._worker.send_key_scancode(code, extended, down)
+            return
+        text = event.text()
+        for char in text:
+            if char.isprintable():
+                self._worker.send_key_unicode(ord(char), down)

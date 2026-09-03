@@ -11,6 +11,7 @@ autoDelete pitfall documented in async_utils.py (that one was about
 cross-thread *object deletion*, not signal emission).
 """
 
+import queue
 import threading
 import time
 
@@ -48,6 +49,10 @@ class RdpSessionWorker:
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
         self._stop_requested = threading.Event()
+        # Input events arrive on the Qt thread but libfreerdp expects a
+        # session to be driven from a single thread — queue them here and
+        # apply them from _run()'s own loop, same thread as pump_once().
+        self._input_queue: queue.Queue = queue.Queue()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -59,6 +64,41 @@ class RdpSessionWorker:
         self._stop_requested.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+
+    # --- input — safe to call from the Qt thread ------------------------
+
+    def send_mouse_move(self, x: int, y: int) -> None:
+        self._input_queue.put(("mouse_move", x, y))
+
+    def send_mouse_button(self, x: int, y: int, button: str, down: bool) -> None:
+        self._input_queue.put(("mouse_button", x, y, button, down))
+
+    def send_mouse_wheel(self, x: int, y: int, delta_steps: int) -> None:
+        self._input_queue.put(("mouse_wheel", x, y, delta_steps))
+
+    def send_key_scancode(self, code: int, extended: bool, down: bool) -> None:
+        self._input_queue.put(("key_scancode", code, extended, down))
+
+    def send_key_unicode(self, codepoint: int, down: bool) -> None:
+        self._input_queue.put(("key_unicode", codepoint, down))
+
+    def _drain_input_queue(self) -> None:
+        while True:
+            try:
+                event = self._input_queue.get_nowait()
+            except queue.Empty:
+                return
+            kind, *args = event
+            if kind == "mouse_move":
+                self._session.send_mouse_move(*args)
+            elif kind == "mouse_button":
+                self._session.send_mouse_button(*args)
+            elif kind == "mouse_wheel":
+                self._session.send_mouse_wheel(*args)
+            elif kind == "key_scancode":
+                self._session.send_key_scancode(*args)
+            elif kind == "key_unicode":
+                self._session.send_key_unicode(*args)
 
     def _run(self) -> None:
         self._session.on_frame = self._on_frame
@@ -73,6 +113,7 @@ class RdpSessionWorker:
         self.signals.connected.emit()
         try:
             while not self._stop_requested.is_set():
+                self._drain_input_queue()
                 if not self._session.pump_once():
                     break
                 # freerdp_check_event_handles() is non-blocking — it processes
