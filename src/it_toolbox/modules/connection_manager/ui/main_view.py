@@ -407,16 +407,24 @@ class ConnectionManagerView(QWidget):
             category_item.addChild(item)
 
     def _populate_buckets(self, category_item: QTreeWidgetItem, buckets: list[GcsBucket]) -> None:
+        # A project with no buckets just hides the category entirely
+        # instead of showing an empty "(no buckets)" row — most projects
+        # never have any, so this cuts a lot of noise out of the tree.
+        # Stays hidden/shown correctly across periodic/manual refreshes
+        # since setHidden() re-evaluates from the latest result every time
+        # (buckets added later un-hide it; all deleted re-hides it).
+        category_item.setHidden(not buckets)
         category_item.takeChildren()
-        if not buckets:
-            category_item.addChild(QTreeWidgetItem(["(no buckets)"]))
-            return
         for bucket in buckets:
             item = QTreeWidgetItem([bucket.name])
             item.setData(0, BUCKET_ROLE, bucket)
             category_item.addChild(item)
 
     def _populate_category_error(self, category_item: QTreeWidgetItem, error: Exception) -> None:
+        # Always surface errors — never leave a category hidden (from a
+        # prior empty-but-successful load) while silently swallowing a
+        # real failure on a later refresh.
+        category_item.setHidden(False)
         category_item.takeChildren()
         category_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
 

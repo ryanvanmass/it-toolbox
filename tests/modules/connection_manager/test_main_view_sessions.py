@@ -130,6 +130,64 @@ def test_expanding_buckets_category_populates_bucket_items(qtbot, monkeypatch):
     assert buckets_item.childCount() == 1
     assert buckets_item.child(0).text(0) == "my-bucket"
     assert buckets_item.child(0).data(0, BUCKET_ROLE) == bucket
+    assert not buckets_item.isHidden()
+
+
+def test_buckets_category_hides_when_project_has_no_buckets(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)  # default gcp_client stub returns []
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    buckets_item = view._tree.topLevelItem(0).child(0).child(1)
+
+    qtbot.waitUntil(lambda: buckets_item.isHidden(), timeout=2000)
+
+
+def test_buckets_category_unhides_once_a_bucket_appears_on_refresh(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)  # starts with no buckets -> hidden
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    buckets_item = view._tree.topLevelItem(0).child(0).child(1)
+    qtbot.waitUntil(lambda: buckets_item.isHidden(), timeout=2000)
+
+    bucket = GcsBucket(name="new-bucket", project_id="p1")
+    monkeypatch.setattr(main_view_module.gcp_auth, "get_credentials", lambda: None)
+    monkeypatch.setattr(
+        main_view_module.gcp_client, "list_buckets", lambda creds, project_id: [bucket]
+    )
+    view._refresh_project(view._tree.topLevelItem(0).child(0))
+
+    qtbot.waitUntil(lambda: not buckets_item.isHidden(), timeout=2000)
+    assert buckets_item.childCount() == 1
+    assert buckets_item.child(0).text(0) == "new-bucket"
+
+
+def test_bucket_list_error_unhides_a_previously_empty_category(qtbot, monkeypatch):
+    # Regression guard for the edge case this hiding behavior introduces:
+    # a category hidden from an earlier empty-but-successful load must
+    # not stay hidden if a later refresh actually fails — that would
+    # silently swallow a real error from the user.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)  # starts with no buckets -> hidden
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    buckets_item = view._tree.topLevelItem(0).child(0).child(1)
+    qtbot.waitUntil(lambda: buckets_item.isHidden(), timeout=2000)
+
+    def failing_list_buckets(creds, project_id):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(main_view_module.gcp_auth, "get_credentials", lambda: None)
+    monkeypatch.setattr(main_view_module.gcp_client, "list_buckets", failing_list_buckets)
+    view._refresh_project(view._tree.topLevelItem(0).child(0))
+
+    qtbot.waitUntil(lambda: not buckets_item.isHidden(), timeout=2000)
+    assert "Error" in buckets_item.child(0).text(0)
 
 
 def test_expanding_vms_category_populates_instance_items(qtbot, monkeypatch):
