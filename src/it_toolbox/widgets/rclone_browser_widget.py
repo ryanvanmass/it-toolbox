@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -53,18 +54,24 @@ class RcloneBrowserWidget(QWidget):
         self._breadcrumb_layout = QHBoxLayout()
         self._breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
         self._breadcrumb_layout.setSpacing(2)
-        self._upload_files_button = QPushButton("Upload Files…")
-        self._upload_files_button.clicked.connect(self._on_upload_files_clicked)
-        self._upload_folder_button = QPushButton("Upload Folder…")
-        self._upload_folder_button.clicked.connect(self._on_upload_folder_clicked)
+        self._upload_button = QToolButton()
+        self._upload_button.setText("Upload")
+        self._upload_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._upload_menu = QMenu(self._upload_button)
+        self._upload_menu.addAction("Upload Files…").triggered.connect(
+            self._on_upload_files_clicked
+        )
+        self._upload_menu.addAction("Upload Folder…").triggered.connect(
+            self._on_upload_folder_clicked
+        )
+        self._upload_button.setMenu(self._upload_menu)
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self._reload)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._up_button)
         top_bar.addLayout(self._breadcrumb_layout, 1)
-        top_bar.addWidget(self._upload_files_button)
-        top_bar.addWidget(self._upload_folder_button)
+        top_bar.addWidget(self._upload_button)
         top_bar.addWidget(self._refresh_button)
 
         self._status_label = QLabel()

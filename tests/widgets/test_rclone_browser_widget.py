@@ -131,6 +131,16 @@ def test_close_session_is_a_harmless_noop(qtbot, monkeypatch):
     browser.close_session()  # must not raise
 
 
+def test_upload_button_offers_files_and_folder_in_one_dropdown(qtbot, monkeypatch):
+    browser = _make_browser(qtbot, monkeypatch, {"": []})
+
+    assert browser._upload_button.text() == "Upload"
+    assert [action.text() for action in browser._upload_menu.actions()] == [
+        "Upload Files…",
+        "Upload Folder…",
+    ]
+
+
 def test_upload_files_sends_a_single_file_to_current_path_and_reloads(qtbot, monkeypatch):
     import it_toolbox.widgets.rclone_browser_widget as module
 
