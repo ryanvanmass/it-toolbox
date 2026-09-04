@@ -90,6 +90,22 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
     assert manual_category.text(0) == "Manual"
 
 
+def test_projects_are_listed_alphabetically_case_insensitive(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._all_projects = [
+        GcpProject(project_id="p1", display_name="pvwrk-fme04"),
+        GcpProject(project_id="p2", display_name="pvsrv-ftp03"),
+        GcpProject(project_id="p3", display_name="PVSRV-GIS03"),
+        GcpProject(project_id="p4", display_name="pvsrv-nas01"),
+    ]
+
+    view._apply_project_selection({"p1", "p2", "p3", "p4"})
+
+    gcp_category = view._tree.topLevelItem(0)
+    names = [gcp_category.child(i).text(0) for i in range(gcp_category.childCount())]
+    assert names == ["pvsrv-ftp03", "PVSRV-GIS03", "pvsrv-nas01", "pvwrk-fme04"]
+
+
 def test_project_has_vms_and_buckets_categories(qtbot, monkeypatch):
     from it_toolbox.modules.connection_manager.ui.main_view import (
         CATEGORY_BUCKETS,

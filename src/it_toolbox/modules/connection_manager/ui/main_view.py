@@ -231,7 +231,10 @@ class ConnectionManagerView(QWidget):
         self._apply_project_selection(selected_ids)
 
     def _apply_project_selection(self, selected_ids: set[str]) -> None:
-        visible = [p for p in self._all_projects if p.project_id in selected_ids]
+        visible = sorted(
+            (p for p in self._all_projects if p.project_id in selected_ids),
+            key=lambda p: (p.display_name or p.project_id).lower(),
+        )
 
         # tree.clear() destroys every top-level item, QEMU/Manual roots
         # included — rebuild them right after so each connection family
