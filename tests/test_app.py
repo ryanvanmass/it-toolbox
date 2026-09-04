@@ -5,21 +5,31 @@ from it_toolbox.app import MainWindow
 from it_toolbox.core.shell_discovery import Shell
 
 
-def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
-    # Keep this test hermetic — it's exercising sidebar wiring, not auth, so
-    # it shouldn't depend on (or spawn a background check against) whatever
-    # gcloud state exists on the machine running the test.
+def _disable_external_tools(monkeypatch):
+    # Keep tests hermetic — they're exercising sidebar/tab wiring, not auth
+    # or rclone discovery, so they shouldn't depend on (or spawn a
+    # background check against) whatever gcloud/rclone state exists on the
+    # machine running the test.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
     )
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.rclone_client.is_available",
+        lambda: False,
+    )
+
+
+def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
 
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window._module_list.count() == 2
+    assert window._module_list.count() == 3
     assert window._module_list.item(0).text() == "Connection Manager"
     assert window._module_list.item(1).text() == "Shell Launcher"
+    assert window._module_list.item(2).text() == "Cloud Storage"
     assert window._module_list.currentRow() == 0
 
     # The GCP browser tree is nested under the module in the sidebar now,
@@ -28,26 +38,22 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
 
 
 def test_connection_manager_and_shell_launcher_share_one_tab_pane(qtbot, monkeypatch):
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
-        lambda: False,
-    )
+    _disable_external_tools(monkeypatch)
 
     window = MainWindow()
     qtbot.addWidget(window)
 
     connection_manager_view = window._stack.widget(0)
     shell_launcher_view = window._stack.widget(1)
+    cloud_storage_view = window._stack.widget(2)
 
     assert connection_manager_view._tabs is window._session_tabs
     assert shell_launcher_view._tabs is window._session_tabs
+    assert cloud_storage_view._tabs is window._session_tabs
 
 
 def test_shell_tab_stays_open_after_switching_to_connection_manager(qtbot, monkeypatch):
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
-        lambda: False,
-    )
+    _disable_external_tools(monkeypatch)
     monkeypatch.setattr(
         "it_toolbox.modules.shell_launcher.ui.main_view.discover_shells",
         lambda: [Shell(name="test-shell", argv=("/bin/sh",))],
@@ -72,10 +78,7 @@ def test_shell_tab_stays_open_after_switching_to_connection_manager(qtbot, monke
 
 
 def test_module_context_menu_has_default_username_and_active_sessions(qtbot, monkeypatch):
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
-        lambda: False,
-    )
+    _disable_external_tools(monkeypatch)
 
     window = MainWindow()
     qtbot.addWidget(window)

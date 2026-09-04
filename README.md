@@ -25,6 +25,12 @@ connection manager for RDP, SSH, and Cloud Storage.
   Linux/macOS; cmd, PowerShell, Git Bash, and installed WSL distros on
   Windows) and launches any of them in the same embedded terminal used
   for SSH.
+- **Cloud Storage** — a separate module (no GCP account needed) that
+  configures and browses `rclone` remotes: any of rclone's ~50 backend
+  types (S3, SFTP, WebDAV, Google Drive, local, etc.), via a generic
+  form built from rclone's own config schema rather than one form per
+  backend. See `docs/cloud-storage-status.md` for its current
+  verification status.
 
 ## Requirements
 
@@ -35,6 +41,9 @@ connection manager for RDP, SSH, and Cloud Storage.
   (via vcpkg) and made available to the app — see
   `docs/windows-freerdp-setup.md` for the full walkthrough. Everything
   else (GCP browsing, SSH, GCS) works without this.
+- **Cloud Storage module**: needs the `rclone` CLI on PATH — see
+  [rclone.org/downloads](https://rclone.org/downloads/). Every other
+  module works without it.
 - **Linux only, for embedded QEMU/SPICE**: needs your distro's
   GObject-Introspection SPICE client library — there's no PyPI-installable
   equivalent, so it has to come from the system package manager (Fedora:
@@ -68,7 +77,8 @@ Project layout:
   without any UI.
 - `widgets/` — the Qt-aware layer built on top of `core/`.
 - `modules/` — top-level app features (Connection Manager, Shell
-  Launcher), each registered with the app shell in `modules/registry.py`.
+  Launcher, Cloud Storage), each registered with the app shell in
+  `modules/registry.py`.
 
 See `docs/` for deeper write-ups of specific subsystems (currently:
 the embedded RDP client's status and the Windows FreeRDP build steps).
