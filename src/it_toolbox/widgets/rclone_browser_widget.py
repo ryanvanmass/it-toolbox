@@ -1,9 +1,12 @@
-"""A read-only rclone remote file browser — browse + download only for
-now (no upload/delete/rename). Near-identical in shape to
-bucket_browser_widget.py (breadcrumb/path bar, Up button, a table of
-folders and files), generalized from GCS's bucket+prefix model to any
-rclone remote+path via rclone_client's lsjson/copyto wrappers.
+"""An rclone remote file browser — browse, download, upload, and delete.
+Near-identical in shape to bucket_browser_widget.py (breadcrumb/path
+bar, Up button, a table of folders and files), generalized from GCS's
+bucket+prefix model to any rclone remote+path via rclone_client's
+lsjson/copyto/deletefile/purge wrappers. No rename — rclone has no
+single "rename" primitive beyond move, and that's not needed yet.
 """
+
+import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -12,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -42,12 +46,15 @@ class RcloneBrowserWidget(QWidget):
         self._up_button = QPushButton("Up")
         self._up_button.clicked.connect(self._go_up)
         self._path_label = QLabel()
+        self._upload_button = QPushButton("Upload")
+        self._upload_button.clicked.connect(self._on_upload_clicked)
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self._reload)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._up_button)
         top_bar.addWidget(self._path_label, 1)
+        top_bar.addWidget(self._upload_button)
         top_bar.addWidget(self._refresh_button)
 
         self._table = QTableWidget(0, 3)
@@ -57,6 +64,8 @@ class RcloneBrowserWidget(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
@@ -119,6 +128,65 @@ class RcloneBrowserWidget(QWidget):
             self._path_label.setText(self._status_before_download)
         except RuntimeError:
             pass  # tab was closed before the download finished
+
+    def _on_upload_clicked(self) -> None:
+        local_path, _ = QFileDialog.getOpenFileName(self, "Upload File")
+        if not local_path:
+            return
+        dest_path = _join(self._path, os.path.basename(local_path))
+        self._status_before_upload = self._path_label.text()
+        self._path_label.setText(f"Uploading {os.path.basename(local_path)}…")
+        async_utils.run_in_background(
+            lambda: rclone_client.upload(self._remote_name, local_path, dest_path),
+            on_result=lambda _: self._on_upload_done(),
+            on_error=self._on_error,
+        )
+
+    def _on_upload_done(self) -> None:
+        try:
+            self._path_label.setText(self._status_before_upload)
+        except RuntimeError:
+            return  # tab was closed before the upload finished
+        self._reload()
+
+    def _build_entry_menu(self, entry: RcloneEntry) -> tuple[QMenu, object, object]:
+        """Returns (menu, download_action_or_None, delete_action) — split
+        out from _on_table_context_menu so tests can inspect the menu's
+        contents without exec()ing it (which blocks for real).
+        """
+        menu = QMenu(self)
+        download_action = menu.addAction("Download") if not entry.is_dir else None
+        delete_action = menu.addAction("Delete")
+        return menu, download_action, delete_action
+
+    def _on_table_context_menu(self, pos) -> None:
+        row = self._table.indexAt(pos).row()
+        if row < 0:
+            return
+        entry: RcloneEntry = self._table.item(row, 0).data(ENTRY_ROLE)
+        menu, download_action, delete_action = self._build_entry_menu(entry)
+        chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if download_action is not None and chosen is download_action:
+            self._download(entry)
+        elif chosen is delete_action:
+            self._delete_entry(entry)
+
+    def _delete_entry(self, entry: RcloneEntry) -> None:
+        kind = "folder and everything in it" if entry.is_dir else "file"
+        confirmed = QMessageBox.question(
+            self,
+            "Delete",
+            f'Delete the {kind} "{entry.name}"? This cannot be undone.',
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        full_path = _join(self._path, entry.path)
+        delete_call = rclone_client.delete_directory if entry.is_dir else rclone_client.delete_file
+        async_utils.run_in_background(
+            lambda: delete_call(self._remote_name, full_path),
+            on_result=lambda _: self._reload(),
+            on_error=self._on_error,
+        )
 
     def _on_error(self, error: Exception) -> None:
         try:

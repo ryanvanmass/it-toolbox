@@ -171,3 +171,18 @@ def list_directory(remote_name: str, path: str = "") -> list[RcloneEntry]:
 
 def download(remote_name: str, path: str, dest: str) -> None:
     _run("copyto", f"{remote_name}:{path}", dest, timeout=RCLONE_TRANSFER_TIMEOUT_SEC)
+
+
+def upload(remote_name: str, local_path: str, dest_path: str) -> None:
+    _run("copyto", local_path, f"{remote_name}:{dest_path}", timeout=RCLONE_TRANSFER_TIMEOUT_SEC)
+
+
+def delete_file(remote_name: str, path: str) -> None:
+    _run("deletefile", f"{remote_name}:{path}")
+
+
+def delete_directory(remote_name: str, path: str) -> None:
+    """Recursively deletes a directory and everything in it (`rclone
+    purge`) — unlike `rclone rmdir`, which only removes empty ones.
+    """
+    _run("purge", f"{remote_name}:{path}")
