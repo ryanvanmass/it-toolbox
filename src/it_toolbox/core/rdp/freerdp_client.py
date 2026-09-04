@@ -371,6 +371,16 @@ class FreeRdpSession:
         self._context: ctypes.POINTER(RdpContext) | None = None
         self.on_frame: callable | None = None  # called with no args after each EndPaint
         self.display = DisplayChannel()
+        # A resize requested before "disp" (a dynamic virtual channel,
+        # negotiated *after* the main handshake) has bound is otherwise
+        # silently dropped by request_resize's guard below — exactly what
+        # happens when a session opens straight into an already-sized
+        # widget (e.g. a maximized window): the initial resize-to-fit
+        # races the channel negotiation and loses, leaving the session
+        # stuck at FreeRDP's default resolution until something happens
+        # to trigger a second resize. Remembered here and replayed once
+        # the channel binds (_on_channel_connected) instead of lost.
+        self._pending_resize: tuple[int, int] | None = None
         # Kept alive for the lifetime of the session — ctypes does not keep
         # a reference to a CFUNCTYPE instance on its own, and libfreerdp
         # holds these pointers for as long as the connection is open.
@@ -402,18 +412,31 @@ class FreeRdpSession:
         if name in (b"disp", b"Microsoft::Windows::RDS::DisplayControl"):
             disp_context = ctypes.cast(event_args.contents.pInterface, ctypes.POINTER(DispClientContext))
             self.display.bind(disp_context)
+            if self._pending_resize is not None:
+                width, height = self._pending_resize
+                self._pending_resize = None
+                self._apply_resize(width, height)
 
     def request_resize(self, width: int, height: int) -> None:
         """Ask the server to resize the remote desktop, and resize the
         local framebuffer to match. Call only from the thread driving the
         connection (see rdp_session_worker.py's _drain_input_queue)."""
-        if self._context is None or self.display._context is None:
-            # No server-side cooperation possible — resizing the local GDI
-            # buffer alone without the server also resizing would desync
-            # the two (stale bitmap data reinterpreted at wrong
-            # dimensions), which is worse than a no-op: produces a
-            # cropped/corrupted display instead of just not resizing.
+        if self._context is None:
             return
+        if self.display._context is None:
+            # "disp" hasn't bound yet (see _on_channel_connected) — no
+            # server-side cooperation possible right now, and resizing the
+            # local GDI buffer alone without the server also resizing
+            # would desync the two (stale bitmap data reinterpreted at
+            # wrong dimensions), which is worse than a no-op: produces a
+            # cropped/corrupted display instead of just not resizing yet.
+            # Remember the request and replay it once the channel binds,
+            # rather than dropping it on the floor.
+            self._pending_resize = (width, height)
+            return
+        self._apply_resize(width, height)
+
+    def _apply_resize(self, width: int, height: int) -> None:
         gdi = self._context.contents.gdi
         _core_lib.gdi_resize(gdi, width, height)
         self.display.request_resize(width, height)

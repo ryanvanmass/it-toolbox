@@ -189,6 +189,47 @@ re-laid-out, not a stretched or cropped old frame).
   disp" log line already visible in every session before this feature
   existed.
 
+## Fixed: wrong initial resolution when opened straight into a maximized/fullscreen window (2026-09-04)
+
+Reported bug: a fresh RDP connection sometimes opened at the wrong
+(FreeRDP-default) resolution when the app window was already maximized/
+fullscreened, staying wrong until the user forced *any* further resize
+(e.g. nudging the window) — at which point it snapped to the correct
+size.
+
+Root cause, found by tracing the exact guard the "Dynamic resolution
+resizing" section above already flagged as intentional: `request_resize`
+is a no-op whenever `disp` (a Dynamic Virtual Channel, negotiated
+*after* the main handshake completes) hasn't bound yet, specifically to
+avoid the local-buffer/server desync described above. That guard is
+correct, but the *dropped* request was never remembered or retried —
+so the very first resize-to-fit (`RdpWidget`'s initial `resizeEvent`
+firing while the widget lays out into an already-maximized window,
+almost immediately after `RdpSessionWorker.start()`) reliably lost the
+race against `disp`'s negotiation and vanished for good. Every
+*subsequent* resize succeeded because by then the channel had finished
+binding — exactly matching "stays wrong until I force a resize."
+
+Fix: `FreeRdpSession` now remembers a resize requested before `disp` is
+bound (`self._pending_resize`) and replays it automatically the moment
+`_on_channel_connected` binds the channel, instead of requiring a
+second, user-triggered resize to ever reach the server. `request_resize`
+itself is unchanged in the already-bound case.
+
+Verified via `tests/core/test_freerdp_client.py` — the first pytest
+coverage for `core/rdp/` itself (previous note above about "no pytest
+coverage for core/rdp/" is now stale for this one file). Exercises the
+real `FreeRdpSession._on_channel_connected`/`request_resize` control
+flow with real `ChannelConnectedEventArgs`/`DispClientContext` ctypes
+structures, stubbing out only the parts that need a live connection
+(`gdi_resize`, `SendMonitorLayout`) via `_apply_resize`. Skips cleanly
+(`allow_module_level=True`) on a machine without libfreerdp3 installed,
+same concern as every other native-library import in this project.
+**Not yet verified against a real server** — that needs someone with a
+reachable RDP target to open a session straight into a maximized window
+and confirm it's correctly sized from the first frame, no manual resize
+needed.
+
 ## Clipboard sync — attempted, reverted, worth knowing before retrying
 
 A full bidirectional clipboard bridge (`core/rdp/cliprdr.py`,
@@ -228,10 +269,13 @@ trial-and-error:
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
 - Clipboard sync (see above) — reverted, not on this branch.
-- Everything verified so far has been manual smoke-testing (the CLI
-  harness and throwaway Qt scripts), not automated tests — there's
-  still no pytest coverage for `core/rdp/` itself (only the
-  `main_view.py` wiring is covered), consistent with how this area
+- The initial-resolution fix above (2026-09-04) hasn't been verified
+  against a real server yet — needs someone with a reachable RDP
+  target to confirm.
+- Everything else verified so far has been manual smoke-testing (the
+  CLI harness and throwaway Qt scripts), not automated tests — pytest
+  coverage for `core/rdp/` itself is now limited to the one fix above
+  (`tests/core/test_freerdp_client.py`); the rest of this area still
   needs a live server to test against.
 
 ## How to pick this up
