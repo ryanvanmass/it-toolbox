@@ -18,21 +18,27 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
+from it_toolbox.core.qemu_tunnel import QemuTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
-from it_toolbox.modules.connection_manager import gcp_client
+from it_toolbox.modules.connection_manager import gcp_client, qemu_client
 from it_toolbox.modules.connection_manager.models import (
     RDP_PORT,
     SSH_PORT,
     GcpProject,
     GcsBucket,
     Instance,
+    QemuHost,
+    QemuVm,
 )
+from it_toolbox.modules.connection_manager.qemu_client import QemuApiError
 from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
+from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import ManageHostsDialog
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
 from it_toolbox.widgets.rdp_widget import RdpWidget
+from it_toolbox.widgets.spice_widget import SpiceWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
@@ -41,6 +47,9 @@ INSTANCE_ROLE = Qt.ItemDataRole.UserRole + 2
 IS_GCP_ROOT_ROLE = Qt.ItemDataRole.UserRole + 3
 CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 4
 BUCKET_ROLE = Qt.ItemDataRole.UserRole + 5
+IS_QEMU_ROOT_ROLE = Qt.ItemDataRole.UserRole + 6
+HOST_ROLE = Qt.ItemDataRole.UserRole + 7
+VM_ROLE = Qt.ItemDataRole.UserRole + 8
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
@@ -51,10 +60,11 @@ class ConnectionManagerView(QWidget):
         super().__init__(parent)
 
         self._account: str | None = None
-        self._active_sessions: dict[int, tuple[str, BackgroundTunnel]] = {}
-        self._session_tab_widgets: dict[int, TerminalWidget] = {}
+        self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel]] = {}
+        self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget] = {}
         self._next_session_id = 1
         self._all_projects: list[GcpProject] = []
+        self._qemu_root_item: QTreeWidgetItem | None = None
 
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
@@ -88,6 +98,11 @@ class ConnectionManagerView(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._stop_all_sessions)
+
+        # QEMU hosts are a second, independent connection family — shown
+        # regardless of GCP sign-in state, unlike everything below this
+        # point which requires the gcloud CLI.
+        self._populate_qemu_hosts()
 
         if not gcp_auth.is_available():
             self._status_label.setText(
@@ -161,6 +176,12 @@ class ConnectionManagerView(QWidget):
         self._status_label.setText("Not signed in" if self._account is None else "Signed in")
         QMessageBox.warning(self, "gcloud auth failed", str(error))
 
+    def _base_status_text(self) -> str:
+        """The status bar's resting text — reflects GCP sign-in state only;
+        QEMU connections (which need no sign-in) restore to this too, same
+        as RDP/SSH already do once their own connect attempt finishes."""
+        return f"Signed in as {self._account}" if self._account else "Not signed in"
+
     # -- Project / instance tree --------------------------------------------
 
     def _populate_projects(self, projects: list[GcpProject]) -> None:
@@ -192,7 +213,11 @@ class ConnectionManagerView(QWidget):
             f"{len(self._all_projects)} project(s)"
         )
 
+        # tree.clear() destroys every top-level item, QEMU root included —
+        # rebuild it right after so the two connection families stay
+        # independent of each other's refresh cycles.
         self._tree.clear()
+        self._qemu_root_item = None
         gcp_category = QTreeWidgetItem(["GCP"])
         gcp_category.setData(0, IS_GCP_ROOT_ROLE, True)
         self._tree.addTopLevelItem(gcp_category)
@@ -209,6 +234,7 @@ class ConnectionManagerView(QWidget):
                 category_item.addChild(QTreeWidgetItem(["Loading…"]))
                 item.addChild(category_item)
         gcp_category.setExpanded(True)
+        self._populate_qemu_hosts()
 
     def _on_select_projects_clicked(self) -> None:
         current_ids = settings.load_selected_project_ids() or set()
@@ -254,6 +280,13 @@ class ConnectionManagerView(QWidget):
         self._active_sessions_dialog.activateWindow()
 
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        host = item.data(0, HOST_ROLE)
+        if host is not None and item.data(0, VM_ROLE) is None:  # a QEMU host node, not a VM leaf
+            if not item.data(0, CHILDREN_LOADED_ROLE):
+                item.setData(0, CHILDREN_LOADED_ROLE, True)
+                self._load_qemu_vms(item, host)
+            return
+
         project_id = item.data(0, PROJECT_ID_ROLE)
         category = item.data(0, CATEGORY_ROLE)
         already_loaded = item.data(0, CHILDREN_LOADED_ROLE)
@@ -303,6 +336,79 @@ class ConnectionManagerView(QWidget):
         self._status_label.setText(f"Signed in as {self._account}")
         QMessageBox.warning(self, "Failed to load projects", str(error))
 
+    # -- QEMU host / VM tree ----------------------------------------------
+
+    @staticmethod
+    def _load_qemu_hosts() -> list[QemuHost]:
+        return [QemuHost(name=h["name"], uri=h["uri"]) for h in settings.load_qemu_hosts()]
+
+    @staticmethod
+    def _save_qemu_hosts(hosts: list[QemuHost]) -> None:
+        settings.save_qemu_hosts([{"name": h.name, "uri": h.uri} for h in hosts])
+
+    def _populate_qemu_hosts(self) -> None:
+        if self._qemu_root_item is None:
+            self._qemu_root_item = QTreeWidgetItem(["QEMU"])
+            self._qemu_root_item.setData(0, IS_QEMU_ROOT_ROLE, True)
+            self._tree.addTopLevelItem(self._qemu_root_item)
+        self._qemu_root_item.takeChildren()
+        for host in self._load_qemu_hosts():
+            host_item = QTreeWidgetItem([host.name])
+            host_item.setData(0, HOST_ROLE, host)
+            host_item.setData(0, CHILDREN_LOADED_ROLE, False)
+            host_item.addChild(QTreeWidgetItem(["Loading…"]))
+            self._qemu_root_item.addChild(host_item)
+
+    def _find_qemu_host_item(self, host: QemuHost) -> QTreeWidgetItem | None:
+        if self._qemu_root_item is None:
+            return None
+        for i in range(self._qemu_root_item.childCount()):
+            child = self._qemu_root_item.child(i)
+            if child.data(0, HOST_ROLE) == host:
+                return child
+        return None
+
+    def _load_qemu_vms(self, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        async_utils.run_in_background(
+            lambda: qemu_client.list_vms(host),
+            on_result=lambda vms: self._populate_qemu_vms(host_item, host, vms),
+            on_error=lambda error: self._populate_category_error(host_item, error),
+        )
+
+    def _populate_qemu_vms(
+        self, host_item: QTreeWidgetItem, host: QemuHost, vms: list[QemuVm]
+    ) -> None:
+        host_item.takeChildren()
+        if not vms:
+            host_item.addChild(QTreeWidgetItem(["(no VMs)"]))
+            return
+        for vm in vms:
+            item = QTreeWidgetItem([vm.name])
+            item.setData(0, HOST_ROLE, host)
+            item.setData(0, VM_ROLE, vm)
+            item.setToolTip(0, f"State: {vm.state}")
+            host_item.addChild(item)
+
+    def _on_manage_hosts_clicked(self) -> None:
+        dialog = ManageHostsDialog(self._load_qemu_hosts(), parent=self)
+        dialog.exec()
+        self._save_qemu_hosts(dialog.hosts())
+        self._populate_qemu_hosts()
+
+    def _run_qemu_power_action(self, host: QemuHost, vm: QemuVm, action: str) -> None:
+        async_utils.run_in_background(
+            lambda: qemu_client.power_action(host, vm.name, action),
+            on_result=lambda _: self._on_qemu_power_action_done(host),
+            on_error=self._on_session_error,
+        )
+
+    def _on_qemu_power_action_done(self, host: QemuHost) -> None:
+        # Refresh the host's VM list so the state column (and SPICE port,
+        # once it's actually running) reflects the change.
+        host_item = self._find_qemu_host_item(host)
+        if host_item is not None:
+            self._load_qemu_vms(host_item, host)
+
     # -- Tree context menu: connect -------------------------------------------
 
     def _on_tree_context_menu(self, pos) -> None:
@@ -312,6 +418,15 @@ class ConnectionManagerView(QWidget):
 
         if item.data(0, IS_GCP_ROOT_ROLE):
             self._show_gcp_root_context_menu(pos)
+            return
+
+        if item.data(0, IS_QEMU_ROOT_ROLE):
+            self._show_qemu_root_context_menu(pos)
+            return
+
+        vm = item.data(0, VM_ROLE)
+        if vm is not None:
+            self._show_qemu_vm_context_menu(pos, item, vm)
             return
 
         instance = item.data(0, INSTANCE_ROLE)
@@ -326,6 +441,32 @@ class ConnectionManagerView(QWidget):
             self._start_session_from_instance(instance, "rdp")
         elif chosen is ssh_action:
             self._start_session_from_instance(instance, "ssh")
+
+    def _show_qemu_root_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Manage Hosts…").triggered.connect(self._on_manage_hosts_clicked)
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _show_qemu_vm_context_menu(self, pos, item: QTreeWidgetItem, vm: QemuVm) -> None:
+        host = item.data(0, HOST_ROLE)
+        menu = QMenu(self)
+        connect_action = menu.addAction("Connect via SPICE")
+        menu.addSeparator()
+        start_action = menu.addAction("Start")
+        pause_action = menu.addAction("Pause")
+        resume_action = menu.addAction("Resume")
+        shutdown_action = menu.addAction("Shutdown")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is connect_action:
+            self._connect_qemu(host, vm)
+        elif chosen is start_action:
+            self._run_qemu_power_action(host, vm, "start")
+        elif chosen is pause_action:
+            self._run_qemu_power_action(host, vm, "pause")
+        elif chosen is resume_action:
+            self._run_qemu_power_action(host, vm, "resume")
+        elif chosen is shutdown_action:
+            self._run_qemu_power_action(host, vm, "shutdown")
 
     def _build_gcp_root_menu(self) -> QMenu | None:
         if self._account is None:
@@ -432,7 +573,7 @@ class ConnectionManagerView(QWidget):
         username: str | None,
         password: str | None = None,
     ) -> None:
-        self._status_label.setText(f"Signed in as {self._account}")
+        self._status_label.setText(self._base_status_text())
 
         session_id = self._next_session_id
         self._next_session_id += 1
@@ -465,13 +606,52 @@ class ConnectionManagerView(QWidget):
         self._tabs.setCurrentIndex(index)
         rdp.setFocus()
 
+    # -- Connect: QEMU/libvirt, tunnel over SSH, embed SPICE ------------------
+
+    def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
+        self._status_label.setText(f"Connecting to {vm.name} via SPICE…")
+        async_utils.run_in_background(
+            lambda: self._start_qemu_tunnel(host, vm),
+            on_result=lambda tunnel: self._on_qemu_tunnel_ready(tunnel, vm),
+            on_error=self._on_session_error,
+        )
+
+    @staticmethod
+    def _start_qemu_tunnel(host: QemuHost, vm: QemuVm) -> QemuTunnel:
+        spice_port = qemu_client.get_vm_spice_port(host, vm.name)
+        if spice_port is None:
+            raise QemuApiError(f"{vm.name} has no SPICE port available — is it running?")
+        tunnel = QemuTunnel(host.uri, spice_port)
+        tunnel.start()
+        return tunnel
+
+    def _on_qemu_tunnel_ready(self, tunnel: QemuTunnel, vm: QemuVm) -> None:
+        self._status_label.setText(self._base_status_text())
+
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._active_sessions[session_id] = ("spice", tunnel)
+
+        self._embed_spice(session_id, vm.name, tunnel.port)
+
+        label = f"{vm.name} (SPICE) — 127.0.0.1:{tunnel.port}"
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    def _embed_spice(self, session_id: int, display_name: str, port: int) -> None:
+        spice = SpiceWidget("127.0.0.1", port)
+        spice.finished.connect(lambda: self._on_disconnect_requested(session_id))
+        self._session_tab_widgets[session_id] = spice
+        index = self._tabs.addTab(spice, display_name)
+        self._tabs.setCurrentIndex(index)
+        spice.setFocus()
+
     def _on_session_tab_changed(self, index: int) -> None:
         widget = self._tabs.widget(index)
         if widget is not None:
             widget.setFocus()
 
     def _on_session_error(self, error: Exception) -> None:
-        self._status_label.setText(f"Signed in as {self._account}")
+        self._status_label.setText(self._base_status_text())
         QMessageBox.warning(self, "Connection failed", str(error))
 
     # -- Disconnect ------------------------------------------------------

@@ -1,7 +1,14 @@
+import pytest
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QTreeWidgetItem, QWidget
 
-from it_toolbox.modules.connection_manager.models import GcpProject, GcsBucket, Instance
+from it_toolbox.modules.connection_manager.models import (
+    GcpProject,
+    GcsBucket,
+    Instance,
+    QemuHost,
+    QemuVm,
+)
 from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManagerView
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
@@ -18,10 +25,17 @@ class _FakeTunnel:
         self.stopped = True
 
 
-def _make_view(qtbot, monkeypatch):
+def _make_view(qtbot, monkeypatch, qemu_hosts=()):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
+    )
+    # QEMU hosts are loaded unconditionally (independent of GCP sign-in) —
+    # stub this out so tests don't depend on this machine's real
+    # qemu_hosts.json.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings.load_qemu_hosts",
+        lambda: list(qemu_hosts),
     )
     view = ConnectionManagerView()
     qtbot.addWidget(view)
@@ -34,13 +48,18 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
 
     view._apply_project_selection({"p1"})
 
-    assert view._tree.topLevelItemCount() == 1
+    # GCP and QEMU are independent top-level roots (QEMU host list is
+    # empty here, but the root itself is always present).
+    assert view._tree.topLevelItemCount() == 2
     gcp_category = view._tree.topLevelItem(0)
     assert gcp_category.text(0) == "GCP"
     assert gcp_category.isExpanded()
     assert gcp_category.childCount() == 1
     project_item = gcp_category.child(0)
     assert project_item.text(0) == "Project One"
+
+    qemu_category = view._tree.topLevelItem(1)
+    assert qemu_category.text(0) == "QEMU"
 
 
 def test_project_has_vms_and_buckets_categories(qtbot, monkeypatch):
@@ -258,3 +277,154 @@ def test_rdp_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):
     assert view._tabs.count() == 0
     assert view._active_sessions == {}
     qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
+
+
+# -- QEMU hosts / VMs --------------------------------------------------------
+
+
+def test_populate_qemu_hosts_creates_lazy_loading_host_items(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import CHILDREN_LOADED_ROLE, HOST_ROLE
+
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    view = _make_view(qtbot, monkeypatch, qemu_hosts=[{"name": host.name, "uri": host.uri}])
+
+    assert view._tree.topLevelItemCount() == 1  # gcloud unavailable, so only QEMU
+    qemu_root = view._tree.topLevelItem(0)
+    assert qemu_root.text(0) == "QEMU"
+    assert qemu_root.childCount() == 1
+    host_item = qemu_root.child(0)
+    assert host_item.text(0) == "lab"
+    assert host_item.data(0, HOST_ROLE) == host
+    assert host_item.data(0, CHILDREN_LOADED_ROLE) is False
+    assert host_item.child(0).text(0) == "Loading…"
+
+
+def test_populate_qemu_vms_creates_items_with_roles(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import HOST_ROLE, VM_ROLE
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._populate_qemu_vms(host_item, host, [vm])
+
+    assert host_item.childCount() == 1
+    vm_item = host_item.child(0)
+    assert vm_item.text(0) == "myvm"
+    assert vm_item.data(0, HOST_ROLE) == host
+    assert vm_item.data(0, VM_ROLE) == vm
+
+
+def test_populate_qemu_vms_shows_placeholder_when_empty(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+
+    view._populate_qemu_vms(host_item, host, [])
+
+    assert host_item.childCount() == 1
+    assert host_item.child(0).text(0) == "(no VMs)"
+
+
+class _FakeSpiceWidget(QWidget):
+    """Stands in for the real SpiceWidget — the real one spawns a
+    background thread that immediately drives actual SpiceClientGLib
+    calls against a real SPICE server. Exposes the same contract
+    main_view relies on: a `finished` signal and close_session()."""
+
+    finished = Signal()
+
+    def __init__(self, host, port, password=""):
+        super().__init__()
+        self.host, self.port, self.password = host, port, password
+
+    def close_session(self):
+        pass
+
+
+def test_qemu_connect_embeds_widget_and_registers_session(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.SpiceWidget", _FakeSpiceWidget
+    )
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel(port=5901)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_tunnel_ready(tunnel, vm)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "myvm"
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port) == ("127.0.0.1", 5901)
+    assert len(view._active_sessions) == 1
+    assert view._active_sessions[next(iter(view._active_sessions))][0] == "spice"
+
+
+def test_spice_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.SpiceWidget", _FakeSpiceWidget
+    )
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel(port=5901)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_tunnel_ready(tunnel, vm)
+    widget = view._tabs.widget(0)
+    widget.finished.emit()
+
+    assert view._tabs.count() == 0
+    assert view._active_sessions == {}
+    qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
+
+
+def test_start_qemu_tunnel_raises_when_no_spice_port(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: None)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="shut off")
+
+    with pytest.raises(main_view_module.QemuApiError, match="no SPICE port"):
+        ConnectionManagerView._start_qemu_tunnel(host, vm)
+
+
+def test_qemu_power_action_calls_client_and_refreshes_vm_list(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "power_action",
+        lambda host, vm_name, action: calls.append((host, vm_name, action)),
+    )
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    view._qemu_root_item = QTreeWidgetItem(["QEMU"])
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+    view._qemu_root_item.addChild(host_item)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._run_qemu_power_action(host, vm, "shutdown")
+
+    qtbot.waitUntil(lambda: calls == [(host, "myvm", "shutdown")], timeout=2000)
+    qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
+    assert host_item.child(0).text(0) == "(no VMs)"
+
+
+def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings, "save_qemu_hosts", lambda hosts: saved.setdefault("hosts", hosts)
+    )
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_qemu_hosts([host])
+
+    assert saved["hosts"] == [{"name": "lab", "uri": "qemu+ssh://user@lab-host/system"}]

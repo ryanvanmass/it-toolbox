@@ -3,9 +3,11 @@
 Branch: `feature/qemu-spice-connections`. Read this file first if you're
 picking this work up in a new session (e.g. on a different machine) —
 it's written so a fresh session with no prior conversation history can
-get oriented from the repo alone. Milestones 1-4 (below) are done and
-verified against a real libvirt/QEMU host; the rest is still the
-original plan.
+get oriented from the repo alone. All 7 milestones are done, verified
+against a real libvirt/QEMU host, and wired into the real app — this
+branch is feature-complete relative to the plan below (kept for
+reference and for whatever comes next, e.g. resize support or
+multi-monitor VMs, neither of which were ever in scope here).
 
 ## What this branch is
 
@@ -36,7 +38,7 @@ does **not** have, because it delegates the whole connection to
 that's the new work here, and it mirrors the embedded-RDP architecture
 closely enough to use as a template throughout.
 
-## What's done and verified (Milestones 1-6)
+## What's done and verified (Milestones 1-7 — the whole plan)
 
 All of this has been tested against a real local libvirt/QEMU host
 (`qemu:///system`, a running VM called "WorkPC") — not mocked, not just
@@ -105,6 +107,27 @@ checked against docs:
    buttons are reported as separate messages), so a `position()` call is
    sent immediately before every button/wheel event to guarantee the
    click lands where the widget last knew the cursor to be.
+7. **Wired into the real app** (`modules/connection_manager/ui/main_view.py`
+   + new `ui/manage_hosts_dialog.py`, `core/settings.py`
+   load_qemu_hosts/save_qemu_hosts). The tree now has two independent
+   top-level roots — "GCP" and "QEMU" — the latter populated unconditionally
+   at startup (no sign-in needed) and rebuilt alongside GCP's own refreshes
+   without disturbing it. Host nodes lazily list VMs via `qemu_client.list_vms`
+   on expand; a VM's context menu offers "Connect via SPICE" plus
+   Start/Pause/Resume/Shutdown; the QEMU root's context menu offers "Manage
+   Hosts…" (add/edit/remove, backed by `settings.load_qemu_hosts`/
+   `save_qemu_hosts` as plain dicts — kept out of `core/settings.py` to
+   avoid a `core/` → `modules/` dependency the rest of the codebase doesn't
+   have). Connecting goes through its own `_connect_qemu` →
+   `qemu_client.get_vm_spice_port` → `QemuTunnel` → `_embed_spice` flow,
+   entirely separate from the GCP/IAP `_connect`/`_on_tunnel_ready` path
+   (no `kind=="rdp"`-style special-casing needed, since QEMU never routes
+   through it in the first place). Verified end-to-end against the real
+   local libvirt host through a real (throwaway, cleaned-up-after) SSH
+   tunnel: registering the host, expanding it to discover the real VM,
+   connecting through the actual `main_view.py` code path to a live,
+   rendering `SpiceWidget`, and a clean disconnect — plus the failure path
+   (a non-SSH-transport URI) surfacing a clear error instead of hanging.
 
 See the git log on this branch for the full detail behind each of these.
 
