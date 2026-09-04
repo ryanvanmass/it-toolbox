@@ -12,7 +12,7 @@ the remote desktop's native resolution before being sent.
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
@@ -50,6 +50,13 @@ class RdpWidget(QWidget):
         self._finished_emitted = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        # sizeHint() below deliberately reports the live remote resolution
+        # (useful context for a layout that's choosing between competing
+        # hints), but this widget must never actually be *shrunk* to it —
+        # the displayed image already stretches to fill whatever size we
+        # are (see paintEvent), so anything less than all the space our
+        # container has to offer is just wasted whitespace, not a benefit.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._status_label = QLabel("Connecting…")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

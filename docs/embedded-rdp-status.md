@@ -225,10 +225,52 @@ structures, stubbing out only the parts that need a live connection
 (`gdi_resize`, `SendMonitorLayout`) via `_apply_resize`. Skips cleanly
 (`allow_module_level=True`) on a machine without libfreerdp3 installed,
 same concern as every other native-library import in this project.
-**Not yet verified against a real server** — that needs someone with a
-reachable RDP target to open a session straight into a maximized window
-and confirm it's correctly sized from the first frame, no manual resize
-needed.
+**Verified against a real server (2026-09-04)**, once one became
+available: reproduced the exact race directly against `core/rdp/`
+(request a resize before `pump_once()` has run at all, confirm it's
+held as `_pending_resize` and only reaches the server once `disp` binds
+~1-1.5s later) and through the real production path (`ConnectionManagerView`'s
+manual-connection flow, a real `MainWindow` shown maximized, a real
+tab-embedded `RdpWidget`) — both confirm the pending resize is now
+correctly replayed and the final frame lands at the exact requested
+size, with no manual resize needed.
+
+### Follow-up: whitespace around the (correctly-sized) image
+
+After the fix above, the *stretching* was gone, but a real Windows
+retest turned up a new symptom: whitespace along the bottom/right of an
+otherwise correctly-rendered session — i.e. the image itself was fine,
+but `RdpWidget` was rendering smaller than the tab actually gives it.
+
+Root cause: `RdpWidget.sizeHint()` returns the *live remote image's*
+native pixel size, and the widget never declared a size policy —
+QWidget's default is `Preferred`/`Preferred` in both directions, which
+lets a layout shrink a widget down to its sizeHint instead of always
+filling available space. `TerminalWidget` (SSH's tab-page widget, never
+reported to have this problem) sets no custom sizeHint and no size
+policy either, so it just takes whatever the tab gives it — `RdpWidget`
+is the one widget in this app that overrides sizeHint, and until now
+the one place that needed an explicit `Expanding` policy to stop that
+hint from ever shrinking it below the tab's real content area (the
+displayed image already stretches to fill self.rect() regardless of
+its native size — see paintEvent — so there was never a reason for the
+widget to render any smaller than its container allows).
+
+Fix: `RdpWidget.__init__` now calls
+`setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)`.
+sizeHint() is left as-is (still useful context for a layout choosing
+between competing hints) — only the "shrink to fit the hint" behavior
+is what needed to stop.
+
+**Not yet re-verified against a real server** — the exact trigger
+condition for the shrink (almost certainly the very first, smaller
+default-resolution frame landing before the resize race above
+resolves, and some container in the real Windows app honoring that
+transient sizeHint) didn't reproduce in this environment's Linux/X11
+layout stack, so this fix is reasoned from the size-policy mismatch
+rather than a locally-reproduced before/after. Needs the same
+maximized-window retest as above, watching specifically for whitespace
+this time.
 
 ## Clipboard sync — attempted, reverted, worth knowing before retrying
 
@@ -269,9 +311,9 @@ trial-and-error:
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
 - Clipboard sync (see above) — reverted, not on this branch.
-- The initial-resolution fix above (2026-09-04) hasn't been verified
-  against a real server yet — needs someone with a reachable RDP
-  target to confirm.
+- The pending-resize race fix (2026-09-04) is now verified against a
+  real server; its whitespace follow-up fix (same date, size policy)
+  is not — needs a real Windows maximized-window retest.
 - Everything else verified so far has been manual smoke-testing (the
   CLI harness and throwaway Qt scripts), not automated tests — pytest
   coverage for `core/rdp/` itself is now limited to the one fix above
