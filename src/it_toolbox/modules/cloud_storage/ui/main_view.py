@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils, rclone_client
 from it_toolbox.modules.cloud_storage.models import RemoteConfig
+from it_toolbox.modules.cloud_storage.ui.add_remote_dialog import AddRemoteDialog
 
 REMOTE_ROLE = Qt.ItemDataRole.UserRole
 IS_REMOTES_ROOT_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -103,6 +104,7 @@ class CloudStorageView(QWidget):
 
         if item.data(0, IS_REMOTES_ROOT_ROLE):
             menu = QMenu(self)
+            menu.addAction("Add Remote…").triggered.connect(self._on_add_remote_clicked)
             menu.addAction("Refresh").triggered.connect(self.refresh_remotes)
             menu.exec(self._tree.viewport().mapToGlobal(pos))
             return
@@ -115,6 +117,18 @@ class CloudStorageView(QWidget):
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is remove_action:
             self._remove_remote(remote)
+
+    def _on_add_remote_clicked(self) -> None:
+        if not rclone_client.is_available():
+            QMessageBox.warning(
+                self,
+                "rclone CLI not found",
+                f"Install it from {rclone_client.INSTALL_URL} and relaunch.",
+            )
+            return
+        dialog = AddRemoteDialog(parent=self)
+        if dialog.exec() == AddRemoteDialog.DialogCode.Accepted:
+            self.refresh_remotes()
 
     def _remove_remote(self, remote: RemoteConfig) -> None:
         confirmed = QMessageBox.question(
