@@ -389,6 +389,29 @@ def test_start_qemu_tunnel_raises_when_no_spice_port(qtbot, monkeypatch):
         ConnectionManagerView._start_qemu_tunnel(host, vm)
 
 
+def test_connect_qemu_warns_instead_of_crashing_when_spice_unavailable(qtbot, monkeypatch):
+    # Regression test: SpiceWidget is None on platforms without PyGObject/
+    # spice-glib (see the try/except import at the top of main_view.py).
+    # _connect_qemu must degrade to a clear warning, not an AttributeError
+    # from trying to construct a SpiceWidget that doesn't exist.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "SpiceWidget", None)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox, "warning", staticmethod(lambda *a: warnings.append(a))
+    )
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._connect_qemu(host, vm)
+
+    assert len(warnings) == 1
+    assert view._tabs.count() == 0
+    assert view._active_sessions == {}
+
+
 def test_qemu_power_action_calls_client_and_refreshes_vm_list(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
