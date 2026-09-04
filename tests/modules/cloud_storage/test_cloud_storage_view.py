@@ -71,6 +71,50 @@ def test_context_menu_on_root_offers_refresh(qtbot, monkeypatch):
     assert [action.text() for action in menu.actions()] == ["Refresh"]
 
 
+def test_double_clicking_a_remote_opens_a_browser_tab(qtbot, monkeypatch):
+    remotes = [RemoteConfig(name="myLocal", type="local")]
+    view = _make_view(qtbot, monkeypatch, remotes=remotes)
+    root = view._tree.topLevelItem(0)
+    qtbot.waitUntil(lambda: root.childCount() == 1, timeout=1000)
+    monkeypatch.setattr(
+        "it_toolbox.widgets.rclone_browser_widget.rclone_client.list_directory",
+        lambda remote, path: [],
+    )
+
+    view._on_tree_item_double_clicked(root.child(0), 0)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "myLocal"
+
+
+def test_browse_context_action_opens_a_browser_tab(qtbot, monkeypatch):
+    remotes = [RemoteConfig(name="myLocal", type="local")]
+    view = _make_view(qtbot, monkeypatch, remotes=remotes)
+    monkeypatch.setattr(
+        "it_toolbox.widgets.rclone_browser_widget.rclone_client.list_directory",
+        lambda remote, path: [],
+    )
+
+    view._open_browser(remotes[0])
+
+    assert view._tabs.count() == 1
+
+
+def test_closing_a_browser_tab_removes_it(qtbot, monkeypatch):
+    remotes = [RemoteConfig(name="myLocal", type="local")]
+    view = _make_view(qtbot, monkeypatch, remotes=remotes)
+    monkeypatch.setattr(
+        "it_toolbox.widgets.rclone_browser_widget.rclone_client.list_directory",
+        lambda remote, path: [],
+    )
+    view._open_browser(remotes[0])
+    assert view._tabs.count() == 1
+
+    widget = view._tabs.widget(0)
+    assert view.try_close_tab(widget) is True
+    assert view._tabs.count() == 0
+
+
 def test_removing_a_remote_deletes_it_and_refreshes(qtbot, monkeypatch):
     remotes = [RemoteConfig(name="myLocal", type="local")]
     view = _make_view(qtbot, monkeypatch, remotes=remotes)

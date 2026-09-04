@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils, rclone_client
 from it_toolbox.modules.cloud_storage.models import RemoteConfig
 from it_toolbox.modules.cloud_storage.ui.add_remote_dialog import AddRemoteDialog
+from it_toolbox.widgets.rclone_browser_widget import RcloneBrowserWidget
 
 REMOTE_ROLE = Qt.ItemDataRole.UserRole
 IS_REMOTES_ROOT_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -44,6 +45,7 @@ class CloudStorageView(QWidget):
         self._tree.setHeaderLabels(["Remotes"])
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self._tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
 
         layout = QVBoxLayout(self)
         if self._owns_tabs:
@@ -113,10 +115,24 @@ class CloudStorageView(QWidget):
         if remote is None:
             return
         menu = QMenu(self)
+        browse_action = menu.addAction("Browse")
         remove_action = menu.addAction("Remove")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
-        if chosen is remove_action:
+        if chosen is browse_action:
+            self._open_browser(remote)
+        elif chosen is remove_action:
             self._remove_remote(remote)
+
+    def _on_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        remote = item.data(0, REMOTE_ROLE)
+        if remote is not None:
+            self._open_browser(remote)
+
+    def _open_browser(self, remote: RemoteConfig) -> None:
+        browser = RcloneBrowserWidget(remote.name)
+        self._owned_tab_widgets.add(browser)
+        index = self._tabs.addTab(browser, remote.name)
+        self._tabs.setCurrentIndex(index)
 
     def _on_add_remote_clicked(self) -> None:
         if not rclone_client.is_available():
