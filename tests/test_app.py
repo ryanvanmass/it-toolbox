@@ -2,6 +2,7 @@ import subprocess
 import sys
 
 from it_toolbox.app import MainWindow
+from it_toolbox.core.shell_discovery import Shell
 
 
 def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
@@ -24,6 +25,50 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     # The GCP browser tree is nested under the module in the sidebar now,
     # not tab content in the main view.
     assert window._sidebar_extras.currentWidget() is window._stack.widget(0).sidebar_tree
+
+
+def test_connection_manager_and_shell_launcher_share_one_tab_pane(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
+        lambda: False,
+    )
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    connection_manager_view = window._stack.widget(0)
+    shell_launcher_view = window._stack.widget(1)
+
+    assert connection_manager_view._tabs is window._session_tabs
+    assert shell_launcher_view._tabs is window._session_tabs
+
+
+def test_shell_tab_stays_open_after_switching_to_connection_manager(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.shell_launcher.ui.main_view.discover_shells",
+        lambda: [Shell(name="test-shell", argv=("/bin/sh",))],
+    )
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window._module_list.setCurrentRow(1)  # Shell Launcher
+    shell_launcher_view = window._stack.widget(1)
+    shell_launcher_view._on_item_double_clicked(shell_launcher_view._list.topLevelItem(0), 0)
+    assert window._session_tabs.count() == 1
+
+    window._module_list.setCurrentRow(0)  # Connection Manager
+
+    # Switching the sidebar selection swaps _stack/_sidebar_extras only —
+    # the shared tab pane itself is never part of that swap, so the shell
+    # tab opened above must still be there.
+    assert window._session_tabs.count() == 1
+    terminal = window._session_tabs.widget(0)
+    terminal.close_session()
 
 
 def test_module_context_menu_has_default_username_and_active_sessions(qtbot, monkeypatch):

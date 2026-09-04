@@ -34,3 +34,11 @@ class ToolModule(ABC):
         entry in the sidebar. Return None (the default) for no menu.
         """
         return None
+
+    def try_close_tab(self, widget: QWidget) -> bool:
+        """Called by the shared session-tab pane when its close button is
+        clicked, for each module in turn, until one claims the tab.
+        Return True if `widget` belongs to this module and has been torn
+        down; False (the default) if it doesn't recognize `widget`.
+        """
+        return False

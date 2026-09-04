@@ -16,10 +16,10 @@ def test_discovered_shells_populate_the_list(qtbot, monkeypatch):
     shell = Shell(name="bash", argv=("/bin/sh",))
     view = _make_view(qtbot, monkeypatch, shells=[shell])
 
-    assert view._list.count() == 1
-    item = view._list.item(0)
-    assert item.text() == "bash"
-    assert item.data(SHELL_ROLE) == shell
+    assert view._list.topLevelItemCount() == 1
+    item = view._list.topLevelItem(0)
+    assert item.text(0) == "bash"
+    assert item.data(0, SHELL_ROLE) == shell
 
 
 def test_double_clicking_a_shell_launches_a_real_terminal_tab(qtbot, monkeypatch):
@@ -28,7 +28,7 @@ def test_double_clicking_a_shell_launches_a_real_terminal_tab(qtbot, monkeypatch
     shell = Shell(name="test-shell", argv=("/bin/sh",))
     view = _make_view(qtbot, monkeypatch, shells=[shell])
 
-    view._on_item_double_clicked(view._list.item(0))
+    view._on_item_double_clicked(view._list.topLevelItem(0), 0)
 
     assert view._tabs.count() == 1
     assert view._tabs.tabText(0) == "test-shell"
@@ -41,8 +41,8 @@ def test_launching_the_same_shell_twice_opens_two_tabs(qtbot, monkeypatch):
     shell = Shell(name="test-shell", argv=("/bin/sh",))
     view = _make_view(qtbot, monkeypatch, shells=[shell])
 
-    view._on_item_double_clicked(view._list.item(0))
-    view._on_item_double_clicked(view._list.item(0))
+    view._on_item_double_clicked(view._list.topLevelItem(0), 0)
+    view._on_item_double_clicked(view._list.topLevelItem(0), 0)
 
     assert view._tabs.count() == 2
     for i in range(view._tabs.count()):
@@ -52,7 +52,7 @@ def test_launching_the_same_shell_twice_opens_two_tabs(qtbot, monkeypatch):
 def test_closing_a_tab_ends_the_session(qtbot, monkeypatch):
     shell = Shell(name="test-shell", argv=("/bin/sh",))
     view = _make_view(qtbot, monkeypatch, shells=[shell])
-    view._on_item_double_clicked(view._list.item(0))
+    view._on_item_double_clicked(view._list.topLevelItem(0), 0)
 
     view._on_tab_close_requested(0)
 
@@ -62,13 +62,13 @@ def test_closing_a_tab_ends_the_session(qtbot, monkeypatch):
 def test_refresh_repopulates_the_list(qtbot, monkeypatch):
     shells = [Shell(name="bash", argv=("/bin/sh",))]
     view = _make_view(qtbot, monkeypatch, shells=shells)
-    assert view._list.count() == 1
+    assert view._list.topLevelItemCount() == 1
 
     shells.append(Shell(name="zsh", argv=("/bin/zsh",)))
     view.refresh_shells()
 
-    assert view._list.count() == 2
-    assert {view._list.item(i).text() for i in range(2)} == {"bash", "zsh"}
+    assert view._list.topLevelItemCount() == 2
+    assert {view._list.topLevelItem(i).text(0) for i in range(2)} == {"bash", "zsh"}
 
 
 def test_context_menu_offers_refresh(qtbot, monkeypatch):

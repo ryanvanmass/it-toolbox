@@ -77,12 +77,17 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 
 
 class ConnectionManagerView(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
         super().__init__(parent)
 
         self._account: str | None = None
         self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel]] = {}
         self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget] = {}
+        # Every widget this view has added to self._tabs (sessions above,
+        # plus untracked ones like bucket browsers) — lets try_close_tab
+        # recognize its own tabs when self._tabs is shared with other
+        # modules (see ConnectionManagerModule / MainWindow).
+        self._owned_tab_widgets: set[QWidget] = set()
         self._next_session_id = 1
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
@@ -103,20 +108,27 @@ class ConnectionManagerView(QWidget):
         top_bar.addWidget(self._sign_in_button)
 
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Name"])
+        self._tree.setHeaderLabels(["Connections"])
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
 
-        self._tabs = QTabWidget()
-        self._tabs.setTabsClosable(True)
-        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        self._tabs.currentChanged.connect(self._on_session_tab_changed)
+        # A shared tabs widget (injected by ConnectionManagerModule/
+        # MainWindow in the real app) is owned and wired up centrally —
+        # see MainWindow._on_session_tab_close_requested / _changed.
+        # Standalone/test usage (tabs=None) stays fully self-contained.
+        self._owns_tabs = tabs is None
+        self._tabs = tabs if tabs is not None else QTabWidget()
+        if self._owns_tabs:
+            self._tabs.setTabsClosable(True)
+            self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+            self._tabs.currentChanged.connect(self._on_session_tab_changed)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
-        layout.addWidget(self._tabs, 1)
+        if self._owns_tabs:
+            layout.addWidget(self._tabs, 1)
 
         app = QApplication.instance()
         if app is not None:
@@ -189,7 +201,7 @@ class ConnectionManagerView(QWidget):
     def _set_signed_in(self, account: str) -> None:
         self._account = account
         self._sign_in_button.setVisible(False)
-        self._status_label.setText(f"Signed in as {account} — loading projects…")
+        self._status_label.setText("Signed in — loading projects…")
         async_utils.run_in_background(
             lambda: gcp_client.list_projects(gcp_auth.get_credentials()),
             on_result=self._populate_projects,
@@ -213,7 +225,7 @@ class ConnectionManagerView(QWidget):
         """The status bar's resting text — reflects GCP sign-in state only;
         QEMU connections (which need no sign-in) restore to this too, same
         as RDP/SSH already do once their own connect attempt finishes."""
-        return f"Signed in as {self._account}" if self._account else "Not signed in"
+        return "Signed in" if self._account else "Not signed in"
 
     # -- Project / instance tree --------------------------------------------
 
@@ -227,7 +239,7 @@ class ConnectionManagerView(QWidget):
             # default is both unusable and means one slow/unresponsive
             # project can eat a request timeout on every session start.
             self._status_label.setText(
-                f"Signed in as {self._account} — {len(projects)} project(s) found, "
+                f"Signed in — {len(projects)} project(s) found, "
                 "pick which to show…"
             )
             dialog = ProjectSelectionDialog(projects, selected_ids=set(), parent=self)
@@ -242,7 +254,7 @@ class ConnectionManagerView(QWidget):
     def _apply_project_selection(self, selected_ids: set[str]) -> None:
         visible = [p for p in self._all_projects if p.project_id in selected_ids]
         self._status_label.setText(
-            f"Signed in as {self._account} — showing {len(visible)} of "
+            f"Signed in — showing {len(visible)} of "
             f"{len(self._all_projects)} project(s)"
         )
 
@@ -429,7 +441,7 @@ class ConnectionManagerView(QWidget):
         category_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
 
     def _on_load_error(self, error: Exception) -> None:
-        self._status_label.setText(f"Signed in as {self._account}")
+        self._status_label.setText("Signed in")
         QMessageBox.warning(self, "Failed to load projects", str(error))
 
     # -- QEMU host / VM tree ----------------------------------------------
@@ -669,6 +681,7 @@ class ConnectionManagerView(QWidget):
 
     def _open_bucket_browser(self, bucket: GcsBucket) -> None:
         browser = BucketBrowserWidget(bucket, get_credentials=gcp_auth.get_credentials)
+        self._owned_tab_widgets.add(browser)
         index = self._tabs.addTab(browser, bucket.name)
         self._tabs.setCurrentIndex(index)
 
@@ -780,6 +793,7 @@ class ConnectionManagerView(QWidget):
         terminal = TerminalWidget(["ssh", "-p", str(port), target])
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
+        self._owned_tab_widgets.add(terminal)
         index = self._tabs.addTab(terminal, display_name)
         self._tabs.setCurrentIndex(index)
         terminal.setFocus()
@@ -796,6 +810,7 @@ class ConnectionManagerView(QWidget):
         rdp = RdpWidget(host, port, username or "", password or "")
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = rdp
+        self._owned_tab_widgets.add(rdp)
         index = self._tabs.addTab(rdp, display_name)
         self._tabs.setCurrentIndex(index)
         rdp.setFocus()
@@ -882,6 +897,7 @@ class ConnectionManagerView(QWidget):
         spice = SpiceWidget("127.0.0.1", port)
         spice.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = spice
+        self._owned_tab_widgets.add(spice)
         index = self._tabs.addTab(spice, display_name)
         self._tabs.setCurrentIndex(index)
         spice.setFocus()
@@ -897,16 +913,31 @@ class ConnectionManagerView(QWidget):
 
     # -- Disconnect ------------------------------------------------------
 
-    def _on_tab_close_requested(self, index: int) -> None:
-        widget = self._tabs.widget(index)
+    def try_close_tab(self, widget: QWidget) -> bool:
+        """Tear down `widget` if this view added it to (possibly shared)
+        self._tabs, and report whether it did — see ToolModule.try_close_tab
+        and MainWindow._on_session_tab_close_requested.
+        """
+        if widget not in self._owned_tab_widgets:
+            return False
         session_id = next(
             (sid for sid, w in self._session_tab_widgets.items() if w is widget), None
         )
         if session_id is not None:
             self._on_disconnect_requested(session_id)
         else:
-            # Not a tracked session (e.g. a bucket browser tab) — just a
-            # plain tab with nothing to tear down.
+            # Owned but not a tracked session (e.g. a bucket browser tab)
+            # — just a plain tab with nothing else to tear down.
+            index = self._tabs.indexOf(widget)
+            if index != -1:
+                self._tabs.removeTab(index)
+            self._owned_tab_widgets.discard(widget)
+            widget.deleteLater()
+        return True
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        widget = self._tabs.widget(index)
+        if not self.try_close_tab(widget):
             self._tabs.removeTab(index)
             widget.deleteLater()
 
@@ -918,6 +949,7 @@ class ConnectionManagerView(QWidget):
             index = self._tabs.indexOf(widget)
             if index != -1:
                 self._tabs.removeTab(index)
+            self._owned_tab_widgets.discard(widget)
             widget.close_session()
             widget.deleteLater()
 

@@ -2,11 +2,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QPushButton,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -26,21 +26,30 @@ class ShellLauncherView(QWidget):
     truth (no parallel session-id bookkeeping needed).
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
         super().__init__(parent)
 
-        self._list = QListWidget()
+        self._list = QTreeWidget()
+        self._list.setHeaderLabels(["Shells"])
         self._list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._on_list_context_menu)
 
-        self._tabs = QTabWidget()
-        self._tabs.setTabsClosable(True)
-        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        self._tabs.currentChanged.connect(self._on_tab_changed)
+        # A shared tabs widget (injected by ShellLauncherModule/MainWindow
+        # in the real app) is owned and wired up centrally — see
+        # MainWindow._on_session_tab_close_requested / _changed.
+        # Standalone/test usage (tabs=None) stays fully self-contained.
+        self._owns_tabs = tabs is None
+        self._tabs = tabs if tabs is not None else QTabWidget()
+        if self._owns_tabs:
+            self._tabs.setTabsClosable(True)
+            self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+            self._tabs.currentChanged.connect(self._on_tab_changed)
+        self._owned_tab_widgets: set[TerminalWidget] = set()
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._tabs, 1)
+        if self._owns_tabs:
+            layout.addWidget(self._tabs, 1)
 
         app = QApplication.instance()
         if app is not None:
@@ -69,17 +78,17 @@ class ShellLauncherView(QWidget):
     def refresh_shells(self) -> None:
         self._list.clear()
         for shell in discover_shells():
-            item = QListWidgetItem(shell.name)
-            item.setData(SHELL_ROLE, shell)
-            self._list.addItem(item)
+            item = QTreeWidgetItem([shell.name])
+            item.setData(0, SHELL_ROLE, shell)
+            self._list.addTopLevelItem(item)
 
     def _on_list_context_menu(self, pos) -> None:
         menu = QMenu(self)
         menu.addAction("Refresh").triggered.connect(self.refresh_shells)
         menu.exec(self._list.viewport().mapToGlobal(pos))
 
-    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
-        shell = item.data(SHELL_ROLE)
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        shell = item.data(0, SHELL_ROLE)
         self._launch_shell(shell)
 
     # -- Launch / teardown ----------------------------------------------
@@ -87,6 +96,7 @@ class ShellLauncherView(QWidget):
     def _launch_shell(self, shell: Shell) -> None:
         terminal = TerminalWidget(list(shell.argv))
         terminal.finished.connect(lambda: self._on_terminal_finished(terminal))
+        self._owned_tab_widgets.add(terminal)
         index = self._tabs.addTab(terminal, shell.name)
         self._tabs.setCurrentIndex(index)
         terminal.setFocus()
@@ -95,13 +105,27 @@ class ShellLauncherView(QWidget):
         index = self._tabs.indexOf(terminal)
         if index != -1:
             self._tabs.removeTab(index)
+        self._owned_tab_widgets.discard(terminal)
         terminal.deleteLater()
+
+    def try_close_tab(self, widget: QWidget) -> bool:
+        """Tear down `widget` if this view launched it into (possibly
+        shared) self._tabs, and report whether it did — see
+        ToolModule.try_close_tab and MainWindow._on_session_tab_close_requested.
+        """
+        if widget not in self._owned_tab_widgets:
+            return False
+        index = self._tabs.indexOf(widget)
+        if index != -1:
+            self._tabs.removeTab(index)
+        self._owned_tab_widgets.discard(widget)
+        widget.close_session()
+        widget.deleteLater()
+        return True
 
     def _on_tab_close_requested(self, index: int) -> None:
         widget = self._tabs.widget(index)
-        self._tabs.removeTab(index)
-        widget.close_session()
-        widget.deleteLater()
+        self.try_close_tab(widget)
 
     def _on_tab_changed(self, index: int) -> None:
         widget = self._tabs.widget(index)
@@ -109,5 +133,5 @@ class ShellLauncherView(QWidget):
             widget.setFocus()
 
     def _close_all_sessions(self) -> None:
-        for i in range(self._tabs.count()):
-            self._tabs.widget(i).close_session()
+        for widget in list(self._owned_tab_widgets):
+            widget.close_session()
