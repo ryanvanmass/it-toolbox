@@ -50,3 +50,17 @@ class QemuVm:
     id: str  # libvirt domain id, or "-" when the VM is not running
     name: str
     state: str  # e.g. "running", "shut off", "paused"
+
+
+@dataclass(frozen=True)
+class ManualConnection:
+    """A directly user-entered RDP or SSH endpoint — no account, project,
+    or host discovery involved, unlike the GCP/QEMU families. Connects
+    straight to host:port, with no tunnel in front of it.
+    """
+
+    name: str
+    host: str
+    port: int
+    kind: str  # "rdp" or "ssh"
+    username: str | None = None

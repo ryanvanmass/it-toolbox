@@ -27,12 +27,16 @@ from it_toolbox.modules.connection_manager.models import (
     GcpProject,
     GcsBucket,
     Instance,
+    ManualConnection,
     QemuHost,
     QemuVm,
 )
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError
 from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
 from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import ManageHostsDialog
+from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
+    ManageManualConnectionsDialog,
+)
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
@@ -50,6 +54,8 @@ BUCKET_ROLE = Qt.ItemDataRole.UserRole + 5
 IS_QEMU_ROOT_ROLE = Qt.ItemDataRole.UserRole + 6
 HOST_ROLE = Qt.ItemDataRole.UserRole + 7
 VM_ROLE = Qt.ItemDataRole.UserRole + 8
+IS_MANUAL_ROOT_ROLE = Qt.ItemDataRole.UserRole + 9
+MANUAL_CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 10
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
@@ -65,6 +71,7 @@ class ConnectionManagerView(QWidget):
         self._next_session_id = 1
         self._all_projects: list[GcpProject] = []
         self._qemu_root_item: QTreeWidgetItem | None = None
+        self._manual_root_item: QTreeWidgetItem | None = None
 
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
@@ -99,10 +106,11 @@ class ConnectionManagerView(QWidget):
         if app is not None:
             app.aboutToQuit.connect(self._stop_all_sessions)
 
-        # QEMU hosts are a second, independent connection family — shown
-        # regardless of GCP sign-in state, unlike everything below this
-        # point which requires the gcloud CLI.
+        # QEMU hosts and manually-configured connections are independent
+        # connection families — shown regardless of GCP sign-in state,
+        # unlike everything below this point which requires the gcloud CLI.
         self._populate_qemu_hosts()
+        self._populate_manual_connections()
 
         if not gcp_auth.is_available():
             self._status_label.setText(
@@ -213,11 +221,12 @@ class ConnectionManagerView(QWidget):
             f"{len(self._all_projects)} project(s)"
         )
 
-        # tree.clear() destroys every top-level item, QEMU root included —
-        # rebuild it right after so the two connection families stay
-        # independent of each other's refresh cycles.
+        # tree.clear() destroys every top-level item, QEMU/Manual roots
+        # included — rebuild them right after so each connection family
+        # stays independent of the others' refresh cycles.
         self._tree.clear()
         self._qemu_root_item = None
+        self._manual_root_item = None
         gcp_category = QTreeWidgetItem(["GCP"])
         gcp_category.setData(0, IS_GCP_ROOT_ROLE, True)
         self._tree.addTopLevelItem(gcp_category)
@@ -235,6 +244,7 @@ class ConnectionManagerView(QWidget):
                 item.addChild(category_item)
         gcp_category.setExpanded(True)
         self._populate_qemu_hosts()
+        self._populate_manual_connections()
 
     def _on_select_projects_clicked(self) -> None:
         current_ids = settings.load_selected_project_ids() or set()
@@ -409,6 +419,50 @@ class ConnectionManagerView(QWidget):
         if host_item is not None:
             self._load_qemu_vms(host_item, host)
 
+    # -- Manually-configured RDP/SSH connections --------------------------
+
+    @staticmethod
+    def _load_manual_connections() -> list[ManualConnection]:
+        return [
+            ManualConnection(
+                name=c["name"], host=c["host"], port=c["port"], kind=c["kind"], username=c.get("username")
+            )
+            for c in settings.load_manual_connections()
+        ]
+
+    @staticmethod
+    def _save_manual_connections(connections: list[ManualConnection]) -> None:
+        settings.save_manual_connections(
+            [
+                {
+                    "name": c.name,
+                    "host": c.host,
+                    "port": c.port,
+                    "kind": c.kind,
+                    "username": c.username,
+                }
+                for c in connections
+            ]
+        )
+
+    def _populate_manual_connections(self) -> None:
+        if self._manual_root_item is None:
+            self._manual_root_item = QTreeWidgetItem(["Manual"])
+            self._manual_root_item.setData(0, IS_MANUAL_ROOT_ROLE, True)
+            self._tree.addTopLevelItem(self._manual_root_item)
+        self._manual_root_item.takeChildren()
+        for connection in self._load_manual_connections():
+            item = QTreeWidgetItem([connection.name])
+            item.setData(0, MANUAL_CONNECTION_ROLE, connection)
+            item.setToolTip(0, f"{connection.kind.upper()} {connection.host}:{connection.port}")
+            self._manual_root_item.addChild(item)
+
+    def _on_manage_manual_connections_clicked(self) -> None:
+        dialog = ManageManualConnectionsDialog(self._load_manual_connections(), parent=self)
+        dialog.exec()
+        self._save_manual_connections(dialog.connections())
+        self._populate_manual_connections()
+
     # -- Tree context menu: connect -------------------------------------------
 
     def _on_tree_context_menu(self, pos) -> None:
@@ -427,6 +481,15 @@ class ConnectionManagerView(QWidget):
         vm = item.data(0, VM_ROLE)
         if vm is not None:
             self._show_qemu_vm_context_menu(pos, item, vm)
+            return
+
+        if item.data(0, IS_MANUAL_ROOT_ROLE):
+            self._show_manual_root_context_menu(pos)
+            return
+
+        manual_connection = item.data(0, MANUAL_CONNECTION_ROLE)
+        if manual_connection is not None:
+            self._show_manual_connection_context_menu(pos, manual_connection)
             return
 
         instance = item.data(0, INSTANCE_ROLE)
@@ -467,6 +530,20 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
+
+    def _show_manual_root_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Manage Connections…").triggered.connect(
+            self._on_manage_manual_connections_clicked
+        )
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _show_manual_connection_context_menu(self, pos, connection: ManualConnection) -> None:
+        menu = QMenu(self)
+        connect_action = menu.addAction(f"Connect via {connection.kind.upper()}")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is connect_action:
+            self._start_session_from_manual_connection(connection)
 
     def _build_gcp_root_menu(self) -> QMenu | None:
         if self._account is None:
@@ -587,8 +664,15 @@ class ConnectionManagerView(QWidget):
         label = f"{display_name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
-    def _embed_ssh(self, session_id: int, display_name: str, port: int, username: str | None) -> None:
-        target = f"{username}@127.0.0.1" if username else "127.0.0.1"
+    def _embed_ssh(
+        self,
+        session_id: int,
+        display_name: str,
+        port: int,
+        username: str | None,
+        host: str = "127.0.0.1",
+    ) -> None:
+        target = f"{username}@{host}" if username else host
         terminal = TerminalWidget(["ssh", "-p", str(port), target])
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
@@ -597,14 +681,59 @@ class ConnectionManagerView(QWidget):
         terminal.setFocus()
 
     def _embed_rdp(
-        self, session_id: int, display_name: str, port: int, username: str | None, password: str | None
+        self,
+        session_id: int,
+        display_name: str,
+        port: int,
+        username: str | None,
+        password: str | None,
+        host: str = "127.0.0.1",
     ) -> None:
-        rdp = RdpWidget("127.0.0.1", port, username or "", password or "")
+        rdp = RdpWidget(host, port, username or "", password or "")
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = rdp
         index = self._tabs.addTab(rdp, display_name)
         self._tabs.setCurrentIndex(index)
         rdp.setFocus()
+
+    # -- Connect: manually-configured RDP/SSH, direct (no tunnel) ---------
+
+    def _start_session_from_manual_connection(self, connection: ManualConnection) -> None:
+        username = connection.username or settings.load_default_username()
+        if username is None:
+            username, ok = QInputDialog.getText(
+                self, "Username", f"Username for {connection.name} (leave blank to be prompted):"
+            )
+            if not ok:
+                return
+            username = username.strip() or None
+
+        password = None
+        if connection.kind == "rdp":
+            password, ok = QInputDialog.getText(
+                self,
+                "Password",
+                f"Password for {username or 'RDP'}@{connection.name}:",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok:
+                return
+
+        self._status_label.setText(f"Connecting to {connection.name} via {connection.kind.upper()}…")
+
+        session_id = self._next_session_id
+        self._next_session_id += 1
+
+        if connection.kind == "ssh":
+            self._embed_ssh(session_id, connection.name, connection.port, username, host=connection.host)
+        else:
+            self._embed_rdp(
+                session_id, connection.name, connection.port, username, password, host=connection.host
+            )
+
+        self._status_label.setText(self._base_status_text())
+        label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
+        self._active_sessions_dialog.add_session(session_id, label)
 
     # -- Connect: QEMU/libvirt, tunnel over SSH, embed SPICE ------------------
 

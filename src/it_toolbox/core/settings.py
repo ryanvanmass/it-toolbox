@@ -59,6 +59,29 @@ def save_qemu_hosts(hosts: list[dict[str, str]]) -> None:
     qemu_hosts_path().write_text(json.dumps(hosts))
 
 
+def manual_connections_path() -> Path:
+    return data_dir() / "manual_connections.json"
+
+
+def load_manual_connections() -> list[dict]:
+    """Manually-configured RDP/SSH connections, as raw dicts — kept free
+    of any dependency on modules/connection_manager.models.ManualConnection
+    (core/ doesn't import from modules/ anywhere else); the caller wraps
+    these into ManualConnection objects.
+    """
+    path = manual_connections_path()
+    if not path.is_file():
+        return []
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_manual_connections(connections: list[dict]) -> None:
+    manual_connections_path().write_text(json.dumps(connections))
+
+
 def default_username_path() -> Path:
     return data_dir() / "default_username.txt"
 
