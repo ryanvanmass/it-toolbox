@@ -164,6 +164,7 @@ def test_windows_ignores_non_git_bash_on_path(monkeypatch):
 
 
 def test_windows_wsl_distros_parsed_from_utf16_output(monkeypatch):
+    monkeypatch.setattr(shell_discovery, "_wsl_has_registered_distros", lambda: True)
     monkeypatch.setattr(
         shell_discovery.shutil, "which", lambda name: "wsl.exe" if name == "wsl.exe" else None
     )
@@ -185,12 +186,14 @@ def test_windows_wsl_distros_parsed_from_utf16_output(monkeypatch):
 
 
 def test_wsl_not_installed_returns_empty_list(monkeypatch):
+    monkeypatch.setattr(shell_discovery, "_wsl_has_registered_distros", lambda: True)
     monkeypatch.setattr(shell_discovery.shutil, "which", lambda name: None)
 
     assert shell_discovery._discover_wsl_distros() == []
 
 
 def test_wsl_command_failure_returns_empty_list_not_raises(monkeypatch):
+    monkeypatch.setattr(shell_discovery, "_wsl_has_registered_distros", lambda: True)
     monkeypatch.setattr(shell_discovery.shutil, "which", lambda name: "wsl.exe")
 
     def fake_run(cmd, capture_output, timeout):
@@ -202,6 +205,7 @@ def test_wsl_command_failure_returns_empty_list_not_raises(monkeypatch):
 
 
 def test_wsl_nonzero_exit_returns_empty_list(monkeypatch):
+    monkeypatch.setattr(shell_discovery, "_wsl_has_registered_distros", lambda: True)
     monkeypatch.setattr(shell_discovery.shutil, "which", lambda name: "wsl.exe")
 
     def fake_run(cmd, capture_output, timeout):
@@ -210,6 +214,30 @@ def test_wsl_nonzero_exit_returns_empty_list(monkeypatch):
     monkeypatch.setattr(shell_discovery.subprocess, "run", fake_run)
 
     assert shell_discovery._discover_wsl_distros() == []
+
+
+def test_wsl_skips_invoking_wsl_exe_entirely_when_no_distros_are_registered(monkeypatch):
+    # Regression test: wsl.exe ships as a stub in System32 on modern
+    # Windows even when WSL was never set up, and merely running it in
+    # that state triggers Windows' "install WSL now" flow — an elevated
+    # operation that pops a UAC prompt — as a side effect of what should
+    # be passive shell discovery on app launch. Confirmed live on a real
+    # Windows machine with no WSL configured.
+    monkeypatch.setattr(shell_discovery, "_wsl_has_registered_distros", lambda: False)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("wsl.exe must not be invoked when no distros are registered")
+
+    monkeypatch.setattr(shell_discovery.shutil, "which", fail_if_called)
+    monkeypatch.setattr(shell_discovery.subprocess, "run", fail_if_called)
+
+    assert shell_discovery._discover_wsl_distros() == []
+
+
+def test_wsl_has_registered_distros_is_false_without_winreg(monkeypatch):
+    # This dev/CI machine is never Windows, so the real (unmocked)
+    # function must take its ImportError fallback and report no distros.
+    assert shell_discovery._wsl_has_registered_distros() is False
 
 
 # -- Top-level dispatch ---------------------------------------------------
