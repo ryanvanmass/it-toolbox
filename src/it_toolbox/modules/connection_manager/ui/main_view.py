@@ -42,8 +42,20 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
 from it_toolbox.widgets.rdp_widget import RdpWidget
-from it_toolbox.widgets.spice_widget import SpiceWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
+
+try:
+    # SpiceWidget pulls in PyGObject/spice-glib (core/spice/spice_session_worker.py
+    # does `from gi.repository import GLib`), which pyproject.toml only
+    # installs on sys_platform == "linux" — importing it unconditionally
+    # here would crash the *entire app* at startup on Windows/macOS, not
+    # just disable the QEMU/SPICE feature. VM discovery/power actions
+    # (qemu_client.py, pure subprocess/virsh) don't need this and stay
+    # available regardless; only the actual "Connect via SPICE" action is
+    # gated on SpiceWidget being importable.
+    from it_toolbox.widgets.spice_widget import SpiceWidget
+except ImportError:
+    SpiceWidget = None
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 CHILDREN_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -513,14 +525,19 @@ class ConnectionManagerView(QWidget):
     def _show_qemu_vm_context_menu(self, pos, item: QTreeWidgetItem, vm: QemuVm) -> None:
         host = item.data(0, HOST_ROLE)
         menu = QMenu(self)
-        connect_action = menu.addAction("Connect via SPICE")
-        menu.addSeparator()
+        # SpiceWidget (and so "Connect via SPICE") is only available where
+        # PyGObject/spice-glib are installed — see the SpiceWidget import
+        # at the top of this file. VM discovery/power actions below don't
+        # need it and stay available regardless.
+        connect_action = menu.addAction("Connect via SPICE") if SpiceWidget is not None else None
+        if connect_action is not None:
+            menu.addSeparator()
         start_action = menu.addAction("Start")
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
-        if chosen is connect_action:
+        if connect_action is not None and chosen is connect_action:
             self._connect_qemu(host, vm)
         elif chosen is start_action:
             self._run_qemu_power_action(host, vm, "start")
@@ -738,6 +755,14 @@ class ConnectionManagerView(QWidget):
     # -- Connect: QEMU/libvirt, tunnel over SSH, embed SPICE ------------------
 
     def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
+        if SpiceWidget is None:
+            QMessageBox.warning(
+                self,
+                "SPICE unavailable",
+                "Embedded SPICE needs PyGObject/spice-glib, which aren't available on "
+                "this platform — see docs/qemu-spice-status.md.",
+            )
+            return
         self._status_label.setText(f"Connecting to {vm.name} via SPICE…")
         async_utils.run_in_background(
             lambda: self._start_qemu_tunnel(host, vm),
