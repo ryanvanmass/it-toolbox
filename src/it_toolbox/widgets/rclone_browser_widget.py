@@ -1,8 +1,9 @@
-"""An rclone remote file browser — browse, download, upload, and delete.
-Near-identical in shape to bucket_browser_widget.py (breadcrumb/path
-bar, Up button, a table of folders and files), generalized from GCS's
-bucket+prefix model to any rclone remote+path via rclone_client's
-lsjson/copyto/deletefile/purge wrappers. No rename — rclone has no
+"""An rclone remote file browser — browse, download, upload (files and
+whole folders), and delete. Near-identical in shape to
+bucket_browser_widget.py (breadcrumb/path bar, Up button, a table of
+folders and files), generalized from GCS's bucket+prefix model to any
+rclone remote+path via rclone_client's
+lsjson/copyto/copy/deletefile/purge wrappers. No rename — rclone has no
 single "rename" primitive beyond move, and that's not needed yet.
 
 The path bar is a clickable breadcrumb (Windows Explorer-style): one
@@ -52,15 +53,18 @@ class RcloneBrowserWidget(QWidget):
         self._breadcrumb_layout = QHBoxLayout()
         self._breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
         self._breadcrumb_layout.setSpacing(2)
-        self._upload_button = QPushButton("Upload")
-        self._upload_button.clicked.connect(self._on_upload_clicked)
+        self._upload_files_button = QPushButton("Upload Files…")
+        self._upload_files_button.clicked.connect(self._on_upload_files_clicked)
+        self._upload_folder_button = QPushButton("Upload Folder…")
+        self._upload_folder_button.clicked.connect(self._on_upload_folder_clicked)
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self._reload)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._up_button)
         top_bar.addLayout(self._breadcrumb_layout, 1)
-        top_bar.addWidget(self._upload_button)
+        top_bar.addWidget(self._upload_files_button)
+        top_bar.addWidget(self._upload_folder_button)
         top_bar.addWidget(self._refresh_button)
 
         self._status_label = QLabel()
@@ -171,14 +175,39 @@ class RcloneBrowserWidget(QWidget):
         except RuntimeError:
             pass  # tab was closed before the download finished
 
-    def _on_upload_clicked(self) -> None:
-        local_path, _ = QFileDialog.getOpenFileName(self, "Upload File")
-        if not local_path:
+    def _on_upload_files_clicked(self) -> None:
+        local_paths, _ = QFileDialog.getOpenFileNames(self, "Upload Files")
+        if not local_paths:
             return
-        dest_path = _join(self._path, os.path.basename(local_path))
-        self._set_status(f"Uploading {os.path.basename(local_path)}…")
+        if len(local_paths) == 1:
+            self._set_status(f"Uploading {os.path.basename(local_paths[0])}…")
+        else:
+            self._set_status(f"Uploading {len(local_paths)} files…")
         async_utils.run_in_background(
-            lambda: rclone_client.upload(self._remote_name, local_path, dest_path),
+            lambda: self._upload_files(local_paths),
+            on_result=lambda _: self._on_upload_done(),
+            on_error=self._on_error,
+        )
+
+    def _upload_files(self, local_paths: list[str]) -> None:
+        # Runs on a background thread — one copyto per file, sequentially
+        # (rclone has no single "copy exactly these N files" primitive
+        # that isn't itself a whole-directory copy with an include filter,
+        # which would be overkill for a handful of individually-picked
+        # files from a file-open dialog).
+        for local_path in local_paths:
+            dest_path = _join(self._path, os.path.basename(local_path))
+            rclone_client.upload(self._remote_name, local_path, dest_path)
+
+    def _on_upload_folder_clicked(self) -> None:
+        local_dir = QFileDialog.getExistingDirectory(self, "Upload Folder")
+        if not local_dir:
+            return
+        folder_name = os.path.basename(local_dir.rstrip("/\\"))
+        dest_path = _join(self._path, folder_name)
+        self._set_status(f"Uploading folder {folder_name}…")
+        async_utils.run_in_background(
+            lambda: rclone_client.upload_directory(self._remote_name, local_dir, dest_path),
             on_result=lambda _: self._on_upload_done(),
             on_error=self._on_error,
         )

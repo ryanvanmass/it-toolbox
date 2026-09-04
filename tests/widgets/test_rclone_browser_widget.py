@@ -131,7 +131,7 @@ def test_close_session_is_a_harmless_noop(qtbot, monkeypatch):
     browser.close_session()  # must not raise
 
 
-def test_upload_sends_local_file_to_current_path_and_reloads(qtbot, monkeypatch):
+def test_upload_files_sends_a_single_file_to_current_path_and_reloads(qtbot, monkeypatch):
     import it_toolbox.widgets.rclone_browser_widget as module
 
     entries = {"some/dir": []}
@@ -139,7 +139,7 @@ def test_upload_sends_local_file_to_current_path_and_reloads(qtbot, monkeypatch)
     qtbot.waitUntil(lambda: browser._table.rowCount() == 0, timeout=2000)
 
     monkeypatch.setattr(
-        module.QFileDialog, "getOpenFileName", lambda *a, **k: ("/tmp/local.txt", "")
+        module.QFileDialog, "getOpenFileNames", lambda *a, **k: (["/tmp/local.txt"], "")
     )
     captured = {}
     monkeypatch.setattr(
@@ -150,24 +150,85 @@ def test_upload_sends_local_file_to_current_path_and_reloads(qtbot, monkeypatch)
         ),
     )
 
-    browser._on_upload_clicked()
+    browser._on_upload_files_clicked()
 
     qtbot.waitUntil(lambda: captured.get("remote") == "myRemote", timeout=2000)
     assert captured["local_path"] == "/tmp/local.txt"
     assert captured["dest_path"] == "some/dir/local.txt"
 
 
-def test_upload_does_nothing_on_cancel(qtbot, monkeypatch):
+def test_upload_files_uploads_each_selected_file(qtbot, monkeypatch):
     import it_toolbox.widgets.rclone_browser_widget as module
 
     browser = _make_browser(qtbot, monkeypatch, {"": []})
-    monkeypatch.setattr(module.QFileDialog, "getOpenFileName", lambda *a, **k: ("", ""))
-    called = []
     monkeypatch.setattr(
-        module.rclone_client, "upload", lambda *a, **k: called.append(True)
+        module.QFileDialog,
+        "getOpenFileNames",
+        lambda *a, **k: (["/tmp/one.txt", "/tmp/two.txt"], ""),
+    )
+    uploaded = []
+    monkeypatch.setattr(
+        module.rclone_client,
+        "upload",
+        lambda remote, local_path, dest_path: uploaded.append((local_path, dest_path)),
     )
 
-    browser._on_upload_clicked()
+    browser._on_upload_files_clicked()
+
+    qtbot.waitUntil(lambda: len(uploaded) == 2, timeout=2000)
+    assert uploaded == [("/tmp/one.txt", "one.txt"), ("/tmp/two.txt", "two.txt")]
+
+
+def test_upload_files_does_nothing_on_cancel(qtbot, monkeypatch):
+    import it_toolbox.widgets.rclone_browser_widget as module
+
+    browser = _make_browser(qtbot, monkeypatch, {"": []})
+    monkeypatch.setattr(module.QFileDialog, "getOpenFileNames", lambda *a, **k: ([], ""))
+    called = []
+    monkeypatch.setattr(module.rclone_client, "upload", lambda *a, **k: called.append(True))
+
+    browser._on_upload_files_clicked()
+
+    assert called == []
+
+
+def test_upload_folder_sends_local_dir_to_current_path_and_reloads(qtbot, monkeypatch):
+    import it_toolbox.widgets.rclone_browser_widget as module
+
+    entries = {"some/dir": []}
+    browser = _make_browser(qtbot, monkeypatch, entries, start_path="some/dir")
+    qtbot.waitUntil(lambda: browser._table.rowCount() == 0, timeout=2000)
+
+    monkeypatch.setattr(
+        module.QFileDialog, "getExistingDirectory", lambda *a, **k: "/tmp/my_folder"
+    )
+    captured = {}
+    monkeypatch.setattr(
+        module.rclone_client,
+        "upload_directory",
+        lambda remote, local_dir, dest_path: captured.update(
+            remote=remote, local_dir=local_dir, dest_path=dest_path
+        ),
+    )
+
+    browser._on_upload_folder_clicked()
+
+    qtbot.waitUntil(lambda: captured.get("remote") == "myRemote", timeout=2000)
+    assert captured["local_dir"] == "/tmp/my_folder"
+    assert captured["dest_path"] == "some/dir/my_folder"
+
+
+def test_upload_folder_does_nothing_on_cancel(qtbot, monkeypatch):
+    import it_toolbox.widgets.rclone_browser_widget as module
+
+    browser = _make_browser(qtbot, monkeypatch, {"": []})
+    monkeypatch.setattr(module.QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    called = []
+    monkeypatch.setattr(
+        module.rclone_client, "upload_directory", lambda *a, **k: called.append(True)
+    )
+
+    browser._on_upload_folder_clicked()
 
     assert called == []
 

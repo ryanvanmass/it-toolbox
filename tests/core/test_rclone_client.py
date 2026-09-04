@@ -357,6 +357,20 @@ def test_upload_invokes_copyto_local_to_remote(monkeypatch):
     assert captured["cmd"] == ["rclone", "copyto", "/tmp/local.txt", "myRemote:path/to/dest.txt"]
 
 
+def test_upload_directory_invokes_copy_local_dir_to_remote(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        captured["cmd"] = cmd
+        return _completed(stdout="")
+
+    monkeypatch.setattr(rclone_client.subprocess, "run", fake_run)
+
+    rclone_client.upload_directory("myRemote", "/tmp/local_dir", "path/to/local_dir")
+
+    assert captured["cmd"] == ["rclone", "copy", "/tmp/local_dir", "myRemote:path/to/local_dir"]
+
+
 def test_delete_file_invokes_deletefile(monkeypatch):
     captured = {}
 

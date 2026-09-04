@@ -177,6 +177,16 @@ def upload(remote_name: str, local_path: str, dest_path: str) -> None:
     _run("copyto", local_path, f"{remote_name}:{dest_path}", timeout=RCLONE_TRANSFER_TIMEOUT_SEC)
 
 
+def upload_directory(remote_name: str, local_dir: str, dest_path: str) -> None:
+    """Recursively uploads local_dir's contents into dest_path (`rclone
+    copy` merges a source directory's *contents* into the destination
+    rather than nesting the source's own name inside it — so to have the
+    uploaded folder keep its name, pass dest_path as
+    <current dir>/<basename(local_dir)> yourself, as the browser does).
+    """
+    _run("copy", local_dir, f"{remote_name}:{dest_path}", timeout=RCLONE_TRANSFER_TIMEOUT_SEC)
+
+
 def delete_file(remote_name: str, path: str) -> None:
     _run("deletefile", f"{remote_name}:{path}")
 
