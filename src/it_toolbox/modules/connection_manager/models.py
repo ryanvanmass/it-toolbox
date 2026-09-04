@@ -37,3 +37,16 @@ class GcsEntry:
     is_folder: bool
     size: int = 0
     updated: str = ""
+
+
+@dataclass(frozen=True)
+class QemuHost:
+    name: str
+    uri: str  # libvirt connection URI, e.g. "qemu+ssh://user@host/system"
+
+
+@dataclass(frozen=True)
+class QemuVm:
+    id: str  # libvirt domain id, or "-" when the VM is not running
+    name: str
+    state: str  # e.g. "running", "shut off", "paused"

@@ -36,6 +36,29 @@ def save_selected_project_ids(project_ids: set[str]) -> None:
     selected_projects_path().write_text(json.dumps(sorted(project_ids)))
 
 
+def qemu_hosts_path() -> Path:
+    return data_dir() / "qemu_hosts.json"
+
+
+def load_qemu_hosts() -> list[dict[str, str]]:
+    """Registered QEMU/libvirt hosts, as raw {"name": ..., "uri": ...}
+    dicts — kept free of any dependency on
+    modules/connection_manager.models.QemuHost (core/ doesn't import from
+    modules/ anywhere else); the caller wraps these into QemuHost objects.
+    """
+    path = qemu_hosts_path()
+    if not path.is_file():
+        return []
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_qemu_hosts(hosts: list[dict[str, str]]) -> None:
+    qemu_hosts_path().write_text(json.dumps(hosts))
+
+
 def default_username_path() -> Path:
     return data_dir() / "default_username.txt"
 
