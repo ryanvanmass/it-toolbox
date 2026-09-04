@@ -4,6 +4,10 @@ bar, Up button, a table of folders and files), generalized from GCS's
 bucket+prefix model to any rclone remote+path via rclone_client's
 lsjson/copyto/deletefile/purge wrappers. No rename — rclone has no
 single "rename" primitive beyond move, and that's not needed yet.
+
+The path bar is a clickable breadcrumb (Windows Explorer-style): one
+button per path segment, each jumping straight to that ancestor
+directory, with only the current (last) segment inert.
 """
 
 import os
@@ -45,7 +49,9 @@ class RcloneBrowserWidget(QWidget):
 
         self._up_button = QPushButton("Up")
         self._up_button.clicked.connect(self._go_up)
-        self._path_label = QLabel()
+        self._breadcrumb_layout = QHBoxLayout()
+        self._breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
+        self._breadcrumb_layout.setSpacing(2)
         self._upload_button = QPushButton("Upload")
         self._upload_button.clicked.connect(self._on_upload_clicked)
         self._refresh_button = QPushButton("Refresh")
@@ -53,9 +59,13 @@ class RcloneBrowserWidget(QWidget):
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._up_button)
-        top_bar.addWidget(self._path_label, 1)
+        top_bar.addLayout(self._breadcrumb_layout, 1)
         top_bar.addWidget(self._upload_button)
         top_bar.addWidget(self._refresh_button)
+
+        self._status_label = QLabel()
+        self._status_label.setStyleSheet("color: gray; font-style: italic;")
+        self._status_label.setVisible(False)
 
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["Name", "Size", "Modified"])
@@ -69,12 +79,13 @@ class RcloneBrowserWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
+        layout.addWidget(self._status_label)
         layout.addWidget(self._table)
 
         self._reload()
 
     def _reload(self) -> None:
-        self._path_label.setText(f"{self._remote_name}:/{self._path}")
+        self._update_breadcrumb()
         self._up_button.setEnabled(bool(self._path))
         self._table.setRowCount(0)
         async_utils.run_in_background(
@@ -82,6 +93,38 @@ class RcloneBrowserWidget(QWidget):
             on_result=self._populate_table,
             on_error=self._on_error,
         )
+
+    def _update_breadcrumb(self) -> None:
+        while self._breadcrumb_layout.count():
+            item = self._breadcrumb_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        parts = [p for p in self._path.split("/") if p]
+        for i in range(len(parts) + 1):
+            is_current = i == len(parts)
+            button = QPushButton(self._remote_name if i == 0 else parts[i - 1])
+            button.setFlat(True)
+            button.setEnabled(not is_current)
+            if not is_current:
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                target_path = "/".join(parts[:i])
+                button.clicked.connect(
+                    lambda checked=False, p=target_path: self._navigate_to(p)
+                )
+            self._breadcrumb_layout.addWidget(button)
+            if not is_current:
+                self._breadcrumb_layout.addWidget(QLabel("›"))
+        self._breadcrumb_layout.addStretch(1)
+
+    def _navigate_to(self, path: str) -> None:
+        self._path = path
+        self._reload()
+
+    def _set_status(self, text: str) -> None:
+        self._status_label.setText(text)
+        self._status_label.setVisible(bool(text))
 
     def _populate_table(self, entries: list[RcloneEntry]) -> None:
         # The tab (and this widget) can be closed while a listing was still
@@ -115,8 +158,7 @@ class RcloneBrowserWidget(QWidget):
         dest, _ = QFileDialog.getSaveFileName(self, "Download File", entry.name)
         if not dest:
             return
-        self._status_before_download = self._path_label.text()
-        self._path_label.setText(f"Downloading {entry.name}…")
+        self._set_status(f"Downloading {entry.name}…")
         async_utils.run_in_background(
             lambda: rclone_client.download(self._remote_name, full_path, dest),
             on_result=lambda _: self._on_download_done(),
@@ -125,7 +167,7 @@ class RcloneBrowserWidget(QWidget):
 
     def _on_download_done(self) -> None:
         try:
-            self._path_label.setText(self._status_before_download)
+            self._set_status("")
         except RuntimeError:
             pass  # tab was closed before the download finished
 
@@ -134,8 +176,7 @@ class RcloneBrowserWidget(QWidget):
         if not local_path:
             return
         dest_path = _join(self._path, os.path.basename(local_path))
-        self._status_before_upload = self._path_label.text()
-        self._path_label.setText(f"Uploading {os.path.basename(local_path)}…")
+        self._set_status(f"Uploading {os.path.basename(local_path)}…")
         async_utils.run_in_background(
             lambda: rclone_client.upload(self._remote_name, local_path, dest_path),
             on_result=lambda _: self._on_upload_done(),
@@ -144,7 +185,7 @@ class RcloneBrowserWidget(QWidget):
 
     def _on_upload_done(self) -> None:
         try:
-            self._path_label.setText(self._status_before_upload)
+            self._set_status("")
         except RuntimeError:
             return  # tab was closed before the upload finished
         self._reload()
@@ -190,7 +231,7 @@ class RcloneBrowserWidget(QWidget):
 
     def _on_error(self, error: Exception) -> None:
         try:
-            self._path_label.setText(f"{self._remote_name}:/{self._path}")
+            self._set_status("")
             QMessageBox.warning(self, "Error", str(error))
         except RuntimeError:
             pass  # tab was closed before the background call finished

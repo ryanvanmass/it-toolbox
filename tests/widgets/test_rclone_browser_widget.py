@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QPushButton
 
 from it_toolbox.modules.cloud_storage.models import RcloneEntry
 from it_toolbox.widgets.rclone_browser_widget import ENTRY_ROLE, RcloneBrowserWidget
@@ -79,6 +79,51 @@ def test_up_button_navigates_back_to_parent(qtbot, monkeypatch):
     browser._go_up()
     assert browser._path == ""
     assert browser._up_button.isEnabled() is False
+
+
+def _breadcrumb_buttons(browser):
+    layout = browser._breadcrumb_layout
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    return [w for w in widgets if isinstance(w, QPushButton)]
+
+
+def test_breadcrumb_shows_only_remote_name_at_root(qtbot, monkeypatch):
+    browser = _make_browser(qtbot, monkeypatch, {"": []})
+
+    buttons = _breadcrumb_buttons(browser)
+
+    assert [b.text() for b in buttons] == ["myRemote"]
+    assert buttons[0].isEnabled() is False  # current location — not a link
+
+
+def test_breadcrumb_shows_one_segment_per_path_component(qtbot, monkeypatch):
+    entries = {"photos/2024": []}
+    browser = _make_browser(qtbot, monkeypatch, entries, start_path="photos/2024")
+
+    buttons = _breadcrumb_buttons(browser)
+
+    assert [b.text() for b in buttons] == ["myRemote", "photos", "2024"]
+    assert [b.isEnabled() for b in buttons] == [True, True, False]
+
+
+def test_clicking_a_breadcrumb_segment_navigates_there(qtbot, monkeypatch):
+    entries = {"photos/2024": [], "photos": []}
+    browser = _make_browser(qtbot, monkeypatch, entries, start_path="photos/2024")
+    buttons = _breadcrumb_buttons(browser)
+
+    buttons[1].click()  # "photos"
+
+    assert browser._path == "photos"
+
+
+def test_clicking_the_remote_name_navigates_to_root(qtbot, monkeypatch):
+    entries = {"photos/2024": [], "": []}
+    browser = _make_browser(qtbot, monkeypatch, entries, start_path="photos/2024")
+    buttons = _breadcrumb_buttons(browser)
+
+    buttons[0].click()  # remote name
+
+    assert browser._path == ""
 
 
 def test_close_session_is_a_harmless_noop(qtbot, monkeypatch):
