@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -20,7 +21,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("IT Toolbox")
         self.resize(1000, 650)
 
-        self._modules: list[ToolModule] = load_modules()
+        # One tab pane shared by every module, so sessions/terminals
+        # opened from any tool stay visible and switchable regardless of
+        # which module is selected in the sidebar below.
+        self._session_tabs = QTabWidget()
+        self._session_tabs.setTabsClosable(True)
+        self._session_tabs.tabCloseRequested.connect(self._on_session_tab_close_requested)
+        self._session_tabs.currentChanged.connect(self._on_session_tab_changed)
+
+        self._modules: list[ToolModule] = load_modules(self._session_tabs)
 
         self._module_list = QListWidget()
         self._module_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -29,6 +38,9 @@ class MainWindow(QMainWindow):
         # tree) is nested directly beneath its entry, switching in sync
         # with which module is selected above.
         self._sidebar_extras = QStackedWidget()
+        # Each module's own small header/toolbar area (e.g. Connection
+        # Manager's sign-in status bar) — swaps per module, sitting above
+        # the shared, never-swapped self._session_tabs below it.
         self._stack = QStackedWidget()
 
         sidebar = QWidget()
@@ -49,9 +61,15 @@ class MainWindow(QMainWindow):
         if self._module_list.count():
             self._module_list.setCurrentRow(0)
 
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addWidget(self._stack)
+        content_layout.addWidget(self._session_tabs, 1)
+
         splitter = QSplitter()
         splitter.addWidget(sidebar)
-        splitter.addWidget(self._stack)
+        splitter.addWidget(content)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([250, 750])
 
@@ -66,3 +84,17 @@ class MainWindow(QMainWindow):
         menu = module.build_context_menu(self)
         if menu is not None:
             menu.exec(self._module_list.viewport().mapToGlobal(pos))
+
+    def _on_session_tab_close_requested(self, index: int) -> None:
+        widget = self._session_tabs.widget(index)
+        for module in self._modules:
+            if module.try_close_tab(widget):
+                return
+        # No module claimed it — a stray tab with nothing to tear down.
+        self._session_tabs.removeTab(index)
+        widget.deleteLater()
+
+    def _on_session_tab_changed(self, index: int) -> None:
+        widget = self._session_tabs.widget(index)
+        if widget is not None:
+            widget.setFocus()

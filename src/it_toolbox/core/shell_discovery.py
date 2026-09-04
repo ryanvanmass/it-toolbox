@@ -90,7 +90,34 @@ def _find_git_bash() -> str | None:
     return None
 
 
+def _wsl_has_registered_distros() -> bool:
+    """Whether at least one WSL distro is actually registered on this
+    machine — checked *before* ever invoking wsl.exe. wsl.exe ships as a
+    stub in System32 on modern Windows even when WSL was never set up,
+    and running it in that state triggers Windows' "install WSL now" flow
+    (an elevated operation — hence a UAC prompt) as a side effect of what
+    should be passive shell discovery on app launch. Reading the registry
+    key WSL itself populates once a distro is registered avoids ever
+    invoking wsl.exe on a machine where it would try to install anything.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+        ) as key:
+            winreg.EnumKey(key, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _discover_wsl_distros() -> list[Shell]:
+    if not _wsl_has_registered_distros():
+        return []
+
     wsl = shutil.which("wsl.exe") or shutil.which("wsl")
     if not wsl:
         return []

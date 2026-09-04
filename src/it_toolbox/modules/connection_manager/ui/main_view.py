@@ -1,9 +1,8 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QInputDialog,
-    QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
@@ -68,55 +67,77 @@ HOST_ROLE = Qt.ItemDataRole.UserRole + 7
 VM_ROLE = Qt.ItemDataRole.UserRole + 8
 IS_MANUAL_ROOT_ROLE = Qt.ItemDataRole.UserRole + 9
 MANUAL_CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 10
+IS_LOADING_ROLE = Qt.ItemDataRole.UserRole + 11
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
 
+GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it sooner"
+
 
 class ConnectionManagerView(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
         super().__init__(parent)
 
         self._account: str | None = None
         self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel]] = {}
         self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget] = {}
+        # Every widget this view has added to self._tabs (sessions above,
+        # plus untracked ones like bucket browsers) — lets try_close_tab
+        # recognize its own tabs when self._tabs is shared with other
+        # modules (see ConnectionManagerModule / MainWindow).
+        self._owned_tab_widgets: set[QWidget] = set()
         self._next_session_id = 1
         self._all_projects: list[GcpProject] = []
+        self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
         self._manual_root_item: QTreeWidgetItem | None = None
 
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
 
-        self._status_label = QLabel("Not signed in")
-
         self._sign_in_button = QPushButton("Sign in with gcloud")
         self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
 
         top_bar = QHBoxLayout()
-        top_bar.addWidget(self._status_label)
         top_bar.addStretch()
         top_bar.addWidget(self._sign_in_button)
 
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Name"])
+        self._tree.setHeaderLabels(["Connections"])
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
 
-        self._tabs = QTabWidget()
-        self._tabs.setTabsClosable(True)
-        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
-        self._tabs.currentChanged.connect(self._on_session_tab_changed)
+        # A shared tabs widget (injected by ConnectionManagerModule/
+        # MainWindow in the real app) is owned and wired up centrally —
+        # see MainWindow._on_session_tab_close_requested / _changed.
+        # Standalone/test usage (tabs=None) stays fully self-contained.
+        self._owns_tabs = tabs is None
+        self._tabs = tabs if tabs is not None else QTabWidget()
+        if self._owns_tabs:
+            self._tabs.setTabsClosable(True)
+            self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+            self._tabs.currentChanged.connect(self._on_session_tab_changed)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
-        layout.addWidget(self._tabs, 1)
+        if self._owns_tabs:
+            layout.addWidget(self._tabs, 1)
 
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._stop_all_sessions)
+
+        # Keeps selected projects' VMs/buckets from going stale between
+        # visits — runs regardless of sign-in state (no-ops via
+        # _refresh_all_gcp_data's own guard until there's data to refresh)
+        # so it's already running by the time there is.
+        self._gcp_refresh_timer = QTimer(self)
+        self._gcp_refresh_timer.setInterval(GCP_REFRESH_INTERVAL_MS)
+        self._gcp_refresh_timer.timeout.connect(self._refresh_all_gcp_data)
+        self._gcp_refresh_timer.start()
 
         # QEMU hosts and manually-configured connections are independent
         # connection families — shown regardless of GCP sign-in state,
@@ -125,14 +146,13 @@ class ConnectionManagerView(QWidget):
         self._populate_manual_connections()
 
         if not gcp_auth.is_available():
-            self._status_label.setText(
+            self._sign_in_button.setEnabled(False)
+            self._sign_in_button.setToolTip(
                 f"gcloud CLI not found — install it from {gcp_auth.INSTALL_URL} "
                 "and relaunch."
             )
-            self._sign_in_button.setEnabled(False)
             return
 
-        self._status_label.setText("Checking for an active gcloud session…")
         self._sign_in_button.setEnabled(False)
         async_utils.run_in_background(
             gcp_auth.get_active_account,
@@ -154,11 +174,8 @@ class ConnectionManagerView(QWidget):
         self._sign_in_button.setEnabled(True)
         if account is not None:
             self._set_signed_in(account)
-        else:
-            self._status_label.setText("Not signed in")
 
     def _on_sign_in_clicked(self) -> None:
-        self._status_label.setText("Signing in — check your browser…")
         self._sign_in_button.setEnabled(False)
         async_utils.run_in_background(
             gcp_auth.sign_in,
@@ -176,7 +193,6 @@ class ConnectionManagerView(QWidget):
     def _set_signed_in(self, account: str) -> None:
         self._account = account
         self._sign_in_button.setVisible(False)
-        self._status_label.setText(f"Signed in as {account} — loading projects…")
         async_utils.run_in_background(
             lambda: gcp_client.list_projects(gcp_auth.get_credentials()),
             on_result=self._populate_projects,
@@ -187,20 +203,12 @@ class ConnectionManagerView(QWidget):
         self._account = None
         self._all_projects = []
         self._tree.clear()
-        self._status_label.setText("Not signed in")
         self._sign_in_button.setEnabled(True)
         self._sign_in_button.setVisible(True)
 
     def _on_auth_error(self, error: Exception) -> None:
         self._sign_in_button.setEnabled(True)
-        self._status_label.setText("Not signed in" if self._account is None else "Signed in")
         QMessageBox.warning(self, "gcloud auth failed", str(error))
-
-    def _base_status_text(self) -> str:
-        """The status bar's resting text — reflects GCP sign-in state only;
-        QEMU connections (which need no sign-in) restore to this too, same
-        as RDP/SSH already do once their own connect attempt finishes."""
-        return f"Signed in as {self._account}" if self._account else "Not signed in"
 
     # -- Project / instance tree --------------------------------------------
 
@@ -213,10 +221,6 @@ class ConnectionManagerView(QWidget):
             # that can have hundreds of projects, showing everything by
             # default is both unusable and means one slow/unresponsive
             # project can eat a request timeout on every session start.
-            self._status_label.setText(
-                f"Signed in as {self._account} — {len(projects)} project(s) found, "
-                "pick which to show…"
-            )
             dialog = ProjectSelectionDialog(projects, selected_ids=set(), parent=self)
             if dialog.exec() == ProjectSelectionDialog.DialogCode.Accepted:
                 selected_ids = dialog.selected_project_ids()
@@ -227,10 +231,9 @@ class ConnectionManagerView(QWidget):
         self._apply_project_selection(selected_ids)
 
     def _apply_project_selection(self, selected_ids: set[str]) -> None:
-        visible = [p for p in self._all_projects if p.project_id in selected_ids]
-        self._status_label.setText(
-            f"Signed in as {self._account} — showing {len(visible)} of "
-            f"{len(self._all_projects)} project(s)"
+        visible = sorted(
+            (p for p in self._all_projects if p.project_id in selected_ids),
+            key=lambda p: (p.display_name or p.project_id).lower(),
         )
 
         # tree.clear() destroys every top-level item, QEMU/Manual roots
@@ -242,6 +245,7 @@ class ConnectionManagerView(QWidget):
         gcp_category = QTreeWidgetItem(["GCP"])
         gcp_category.setData(0, IS_GCP_ROOT_ROLE, True)
         self._tree.addTopLevelItem(gcp_category)
+        self._gcp_root_item = gcp_category
         for project in visible:
             item = QTreeWidgetItem([project.display_name or project.project_id])
             item.setData(0, PROJECT_ID_ROLE, project.project_id)
@@ -254,6 +258,10 @@ class ConnectionManagerView(QWidget):
                 category_item.setData(0, CHILDREN_LOADED_ROLE, False)
                 category_item.addChild(QTreeWidgetItem(["Loading…"]))
                 item.addChild(category_item)
+                # Pre-load in the background so the data is already there
+                # (or visibly loading) the first time the user expands it,
+                # rather than waiting for that expand to even start fetching.
+                self._load_category(category_item, project.project_id, category)
         gcp_category.setExpanded(True)
         self._populate_qemu_hosts()
         self._populate_manual_connections()
@@ -315,19 +323,67 @@ class ConnectionManagerView(QWidget):
         if project_id is None or category is None or already_loaded or self._account is None:
             return
 
+        self._load_category(item, project_id, category)
+
+    def _load_category(self, item: QTreeWidgetItem, project_id: str, category: str) -> None:
+        """Fetch one project's VMs or buckets and populate `item` with the
+        result. The single entry point for that fetch regardless of what
+        triggered it — first expand, background pre-load, a periodic
+        refresh, or a manual "Refresh" — so all four naturally share the
+        same in-flight guard (IS_LOADING_ROLE) instead of each needing
+        their own bookkeeping.
+        """
+        if item.data(0, IS_LOADING_ROLE):
+            # Already loading (or still loading from a previous trigger) —
+            # letting a second call through here risks a slow stale
+            # request's error arriving *after* a fresh success and
+            # clobbering good data with an error message.
+            return
         item.setData(0, CHILDREN_LOADED_ROLE, True)
+        item.setData(0, IS_LOADING_ROLE, True)
+
         if category == CATEGORY_VMS:
             async_utils.run_in_background(
                 lambda: gcp_client.list_instances(gcp_auth.get_credentials(), project_id),
-                on_result=lambda instances: self._populate_instances(item, instances),
-                on_error=lambda error: self._populate_category_error(item, error),
+                on_result=lambda instances: self._on_category_loaded(
+                    item, self._populate_instances, instances
+                ),
+                on_error=lambda error: self._on_category_load_failed(item, error),
             )
         elif category == CATEGORY_BUCKETS:
             async_utils.run_in_background(
                 lambda: gcp_client.list_buckets(gcp_auth.get_credentials(), project_id),
-                on_result=lambda buckets: self._populate_buckets(item, buckets),
-                on_error=lambda error: self._populate_category_error(item, error),
+                on_result=lambda buckets: self._on_category_loaded(
+                    item, self._populate_buckets, buckets
+                ),
+                on_error=lambda error: self._on_category_load_failed(item, error),
             )
+
+    def _on_category_loaded(self, item: QTreeWidgetItem, populate, data) -> None:
+        item.setData(0, IS_LOADING_ROLE, False)
+        populate(item, data)
+
+    def _on_category_load_failed(self, item: QTreeWidgetItem, error: Exception) -> None:
+        item.setData(0, IS_LOADING_ROLE, False)
+        self._populate_category_error(item, error)
+
+    def _refresh_project(self, project_item: QTreeWidgetItem) -> None:
+        """Re-fetch both of a project's categories — used by the manual
+        "Refresh" context-menu action and, per-project, by the periodic
+        refresh timer.
+        """
+        project_id = project_item.data(0, PROJECT_ID_ROLE)
+        for i in range(project_item.childCount()):
+            category_item = project_item.child(i)
+            category = category_item.data(0, CATEGORY_ROLE)
+            if category is not None:
+                self._load_category(category_item, project_id, category)
+
+    def _refresh_all_gcp_data(self) -> None:
+        if self._account is None or self._gcp_root_item is None:
+            return
+        for i in range(self._gcp_root_item.childCount()):
+            self._refresh_project(self._gcp_root_item.child(i))
 
     def _populate_instances(self, category_item: QTreeWidgetItem, instances: list[Instance]) -> None:
         category_item.takeChildren()
@@ -341,21 +397,28 @@ class ConnectionManagerView(QWidget):
             category_item.addChild(item)
 
     def _populate_buckets(self, category_item: QTreeWidgetItem, buckets: list[GcsBucket]) -> None:
+        # A project with no buckets just hides the category entirely
+        # instead of showing an empty "(no buckets)" row — most projects
+        # never have any, so this cuts a lot of noise out of the tree.
+        # Stays hidden/shown correctly across periodic/manual refreshes
+        # since setHidden() re-evaluates from the latest result every time
+        # (buckets added later un-hide it; all deleted re-hides it).
+        category_item.setHidden(not buckets)
         category_item.takeChildren()
-        if not buckets:
-            category_item.addChild(QTreeWidgetItem(["(no buckets)"]))
-            return
         for bucket in buckets:
             item = QTreeWidgetItem([bucket.name])
             item.setData(0, BUCKET_ROLE, bucket)
             category_item.addChild(item)
 
     def _populate_category_error(self, category_item: QTreeWidgetItem, error: Exception) -> None:
+        # Always surface errors — never leave a category hidden (from a
+        # prior empty-but-successful load) while silently swallowing a
+        # real failure on a later refresh.
+        category_item.setHidden(False)
         category_item.takeChildren()
         category_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
 
     def _on_load_error(self, error: Exception) -> None:
-        self._status_label.setText(f"Signed in as {self._account}")
         QMessageBox.warning(self, "Failed to load projects", str(error))
 
     # -- QEMU host / VM tree ----------------------------------------------
@@ -504,6 +567,19 @@ class ConnectionManagerView(QWidget):
             self._show_manual_connection_context_menu(pos, manual_connection)
             return
 
+        # A GCP project node — PROJECT_ID_ROLE set, but neither a VMs/
+        # Buckets category (CATEGORY_ROLE) nor an instance leaf
+        # (INSTANCE_ROLE).
+        if (
+            item.data(0, PROJECT_ID_ROLE) is not None
+            and item.data(0, CATEGORY_ROLE) is None
+            and item.data(0, INSTANCE_ROLE) is None
+        ):
+            menu = QMenu(self)
+            menu.addAction("Refresh").triggered.connect(lambda: self._refresh_project(item))
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
+            return
+
         instance = item.data(0, INSTANCE_ROLE)
         if instance is None:
             return
@@ -582,6 +658,7 @@ class ConnectionManagerView(QWidget):
 
     def _open_bucket_browser(self, bucket: GcsBucket) -> None:
         browser = BucketBrowserWidget(bucket, get_credentials=gcp_auth.get_credentials)
+        self._owned_tab_widgets.add(browser)
         index = self._tabs.addTab(browser, bucket.name)
         self._tabs.setCurrentIndex(index)
 
@@ -642,7 +719,6 @@ class ConnectionManagerView(QWidget):
             port=RDP_PORT if kind == "rdp" else SSH_PORT,
         )
 
-        self._status_label.setText(f"Connecting to {display_name} via {kind.upper()}…")
         async_utils.run_in_background(
             lambda: self._start_tunnel(target),
             on_result=lambda tunnel: self._on_tunnel_ready(
@@ -667,8 +743,6 @@ class ConnectionManagerView(QWidget):
         username: str | None,
         password: str | None = None,
     ) -> None:
-        self._status_label.setText(self._base_status_text())
-
         session_id = self._next_session_id
         self._next_session_id += 1
         self._active_sessions[session_id] = (kind, tunnel)
@@ -693,6 +767,7 @@ class ConnectionManagerView(QWidget):
         terminal = TerminalWidget(["ssh", "-p", str(port), target])
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
+        self._owned_tab_widgets.add(terminal)
         index = self._tabs.addTab(terminal, display_name)
         self._tabs.setCurrentIndex(index)
         terminal.setFocus()
@@ -709,6 +784,7 @@ class ConnectionManagerView(QWidget):
         rdp = RdpWidget(host, port, username or "", password or "")
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = rdp
+        self._owned_tab_widgets.add(rdp)
         index = self._tabs.addTab(rdp, display_name)
         self._tabs.setCurrentIndex(index)
         rdp.setFocus()
@@ -736,8 +812,6 @@ class ConnectionManagerView(QWidget):
             if not ok:
                 return
 
-        self._status_label.setText(f"Connecting to {connection.name} via {connection.kind.upper()}…")
-
         session_id = self._next_session_id
         self._next_session_id += 1
 
@@ -748,7 +822,6 @@ class ConnectionManagerView(QWidget):
                 session_id, connection.name, connection.port, username, password, host=connection.host
             )
 
-        self._status_label.setText(self._base_status_text())
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
@@ -763,7 +836,6 @@ class ConnectionManagerView(QWidget):
                 "this platform — see docs/qemu-spice-status.md.",
             )
             return
-        self._status_label.setText(f"Connecting to {vm.name} via SPICE…")
         async_utils.run_in_background(
             lambda: self._start_qemu_tunnel(host, vm),
             on_result=lambda tunnel: self._on_qemu_tunnel_ready(tunnel, vm),
@@ -780,8 +852,6 @@ class ConnectionManagerView(QWidget):
         return tunnel
 
     def _on_qemu_tunnel_ready(self, tunnel: QemuTunnel, vm: QemuVm) -> None:
-        self._status_label.setText(self._base_status_text())
-
         session_id = self._next_session_id
         self._next_session_id += 1
         self._active_sessions[session_id] = ("spice", tunnel)
@@ -795,6 +865,7 @@ class ConnectionManagerView(QWidget):
         spice = SpiceWidget("127.0.0.1", port)
         spice.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = spice
+        self._owned_tab_widgets.add(spice)
         index = self._tabs.addTab(spice, display_name)
         self._tabs.setCurrentIndex(index)
         spice.setFocus()
@@ -805,21 +876,35 @@ class ConnectionManagerView(QWidget):
             widget.setFocus()
 
     def _on_session_error(self, error: Exception) -> None:
-        self._status_label.setText(self._base_status_text())
         QMessageBox.warning(self, "Connection failed", str(error))
 
     # -- Disconnect ------------------------------------------------------
 
-    def _on_tab_close_requested(self, index: int) -> None:
-        widget = self._tabs.widget(index)
+    def try_close_tab(self, widget: QWidget) -> bool:
+        """Tear down `widget` if this view added it to (possibly shared)
+        self._tabs, and report whether it did — see ToolModule.try_close_tab
+        and MainWindow._on_session_tab_close_requested.
+        """
+        if widget not in self._owned_tab_widgets:
+            return False
         session_id = next(
             (sid for sid, w in self._session_tab_widgets.items() if w is widget), None
         )
         if session_id is not None:
             self._on_disconnect_requested(session_id)
         else:
-            # Not a tracked session (e.g. a bucket browser tab) — just a
-            # plain tab with nothing to tear down.
+            # Owned but not a tracked session (e.g. a bucket browser tab)
+            # — just a plain tab with nothing else to tear down.
+            index = self._tabs.indexOf(widget)
+            if index != -1:
+                self._tabs.removeTab(index)
+            self._owned_tab_widgets.discard(widget)
+            widget.deleteLater()
+        return True
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        widget = self._tabs.widget(index)
+        if not self.try_close_tab(widget):
             self._tabs.removeTab(index)
             widget.deleteLater()
 
@@ -831,6 +916,7 @@ class ConnectionManagerView(QWidget):
             index = self._tabs.indexOf(widget)
             if index != -1:
                 self._tabs.removeTab(index)
+            self._owned_tab_widgets.discard(widget)
             widget.close_session()
             widget.deleteLater()
 
