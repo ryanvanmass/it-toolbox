@@ -89,12 +89,30 @@ class RdpSessionWorker:
         self._input_queue.put(("resize", width, height))
 
     def _drain_input_queue(self) -> None:
+        # Multiple resize requests can pile up here if RdpWidget's own
+        # 250ms debounce fires more than once in quick succession (e.g.
+        # a window manager laying a maximized window out in two passes,
+        # each more than 250ms apart) — only the *last* one matters.
+        # Applying an earlier, already-superseded target first just
+        # means resizing the local buffer and asking the server for a
+        # full redraw twice in a row, right as the first redraw's
+        # response is still landing — a real way to end up with a
+        # buffer that's the right final size but only partially filled
+        # in, since the first request's response can arrive after the
+        # second resize has already changed the canvas out from under
+        # it. Collect one full batch, then apply only the newest resize
+        # (after every other queued event, in whatever order it's found)
+        # instead of every one queued.
+        pending_resize = None
         while True:
             try:
                 event = self._input_queue.get_nowait()
             except queue.Empty:
-                return
+                break
             kind, *args = event
+            if kind == "resize":
+                pending_resize = args
+                continue
             if kind == "mouse_move":
                 self._session.send_mouse_move(*args)
             elif kind == "mouse_button":
@@ -105,8 +123,8 @@ class RdpSessionWorker:
                 self._session.send_key_scancode(*args)
             elif kind == "key_unicode":
                 self._session.send_key_unicode(*args)
-            elif kind == "resize":
-                self._session.request_resize(*args)
+        if pending_resize is not None:
+            self._session.request_resize(*pending_resize)
 
     def _run(self) -> None:
         self._session.on_frame = self._on_frame

@@ -293,6 +293,58 @@ the full real production path (`ConnectionManagerView`'s
 manual-connection flow, a real maximized `MainWindow`, a real
 tab-embedded `RdpWidget`, sampled via the actual rendered `QImage`).
 
+### Follow-up 2: the Refresh Rect response can itself arrive incomplete — settle window, and a real environment ceiling found while chasing it
+
+A live retest (still 2026-09-04) of the fix above surfaced two more
+things, one a real client-side gap and one a red herring that turned
+out not to be this app's bug at all.
+
+**Real gap, fixed**: the Refresh Rect fix only covered *resizes* — but
+the very first frame after connecting has exactly the same "arrives as
+incremental updates, not one shot" nature (already called out by
+`capture_one_frame`'s own `settle_sec`), and briefly showed the same
+kind of incomplete frame. `RdpWidget` now tracks a `_display_image`
+separate from the latest raw `_image`: after *any* transition (first
+connect or a resize) it keeps showing the last frame confirmed to have
+settled — stretched, same as normal — until either 2s pass with no
+further size change after first reaching the target size, or (for a
+resize specifically) that target is itself superseded by a newer one
+before settling. `RdpSessionWorker._drain_input_queue` was also
+tightened to coalesce multiple resize requests queued in the same
+drain pass into just the newest one, rather than applying (and
+re-triggering a refresh for) each in turn. Covered by
+`tests/widgets/test_rdp_widget.py`.
+
+**Red herring, resolved**: even after the above, a live retest kept
+showing a region stuck at a single uniform color (sometimes black,
+sometimes white depending on whatever was already in that memory) no
+matter how long it waited, and manually re-sending Refresh Rect several
+more times over several seconds never fixed it either — ruling out
+"just needs more time." Rebooting the test VM entirely (in case dozens
+of repeated automated test connections had left behind stale
+disconnected RDS sessions with inconsistent state) didn't change
+anything either. The actual cause: **this specific test VM's virtual
+display adapter has its own resolution ceiling around 1920x1080**,
+confirmed by binary search against the real server —
+
+| Requested size | Result |
+|---|---|
+| 1600x900   | fully painted, real varied content |
+| 1920x1080  | fully painted, real varied content |
+| 2048x1152  | stuck solid color, never updates |
+| 2200x1200  | stuck solid color, never updates |
+| 2302x1259  | stuck solid color, never updates (the real bug report's size) |
+
+The server acknowledges the resize (`SendMonitorLayout` and every
+`RefreshRect` retry return success) but a boundary between 1920x1080
+and 2048x1152 means its own display hardware can't actually produce
+more pixels than that — no client-side fix can make a server render
+pixels its virtual display driver doesn't have. This is a property of
+this one test VM (likely a generic/basic virtual display adapter
+without an enhanced high-resolution mode), not a bug in this app; both
+Refresh Rect fixes above are confirmed correct and working up to
+whatever ceiling the target server's own display actually supports.
+
 ## Clipboard sync — attempted, reverted, worth knowing before retrying
 
 A full bidirectional clipboard bridge (`core/rdp/cliprdr.py`,
@@ -332,12 +384,17 @@ trial-and-error:
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
 - Clipboard sync (see above) — reverted, not on this branch.
-- Both 2026-09-04 fixes (pending-resize race, and the Refresh Rect PDU
-  for the whitespace bug) are now verified against a real server,
-  including at the pixel level for the whitespace one. Still worth a
+- All three 2026-09-04 fixes (pending-resize race, the Refresh Rect PDU,
+  and the display-settle window) are verified against a real server, at
+  the pixel level, including binary-searching a real environment
+  ceiling (this test VM's virtual display caps around 1920x1080 — see
+  above) to confirm the fixes work correctly up to whatever resolution
+  the target server's own display can actually produce. Still worth a
   real Windows retest of the full original repro (maximize, connect,
-  confirm no stretch and no whitespace from the first frame) since all
-  the live verification above happened on Linux.
+  confirm no stretch and no whitespace from the first frame) against a
+  server *without* a display ceiling below the client's natural
+  maximized size, since all the live verification above happened on
+  Linux against one that has one.
 - Everything else verified so far has been manual smoke-testing (the
   CLI harness and throwaway Qt scripts), not automated tests — pytest
   coverage for `core/rdp/` itself is now limited to the one fix above
