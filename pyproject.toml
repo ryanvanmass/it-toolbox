@@ -7,6 +7,7 @@ name = "it-toolbox"
 version = "0.1.0"
 description = "Cross-platform IT tooling desktop app — starting with a GCP IAP connection manager for RDP/SSH."
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
     "PySide6",
     "google-auth",
