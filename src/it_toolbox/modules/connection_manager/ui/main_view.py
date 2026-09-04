@@ -3,7 +3,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QInputDialog,
-    QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
@@ -97,13 +96,10 @@ class ConnectionManagerView(QWidget):
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
 
-        self._status_label = QLabel("Not signed in")
-
         self._sign_in_button = QPushButton("Sign in with gcloud")
         self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
 
         top_bar = QHBoxLayout()
-        top_bar.addWidget(self._status_label)
         top_bar.addStretch()
         top_bar.addWidget(self._sign_in_button)
 
@@ -150,14 +146,13 @@ class ConnectionManagerView(QWidget):
         self._populate_manual_connections()
 
         if not gcp_auth.is_available():
-            self._status_label.setText(
+            self._sign_in_button.setEnabled(False)
+            self._sign_in_button.setToolTip(
                 f"gcloud CLI not found — install it from {gcp_auth.INSTALL_URL} "
                 "and relaunch."
             )
-            self._sign_in_button.setEnabled(False)
             return
 
-        self._status_label.setText("Checking for an active gcloud session…")
         self._sign_in_button.setEnabled(False)
         async_utils.run_in_background(
             gcp_auth.get_active_account,
@@ -179,11 +174,8 @@ class ConnectionManagerView(QWidget):
         self._sign_in_button.setEnabled(True)
         if account is not None:
             self._set_signed_in(account)
-        else:
-            self._status_label.setText("Not signed in")
 
     def _on_sign_in_clicked(self) -> None:
-        self._status_label.setText("Signing in — check your browser…")
         self._sign_in_button.setEnabled(False)
         async_utils.run_in_background(
             gcp_auth.sign_in,
@@ -201,7 +193,6 @@ class ConnectionManagerView(QWidget):
     def _set_signed_in(self, account: str) -> None:
         self._account = account
         self._sign_in_button.setVisible(False)
-        self._status_label.setText("Signed in — loading projects…")
         async_utils.run_in_background(
             lambda: gcp_client.list_projects(gcp_auth.get_credentials()),
             on_result=self._populate_projects,
@@ -212,20 +203,12 @@ class ConnectionManagerView(QWidget):
         self._account = None
         self._all_projects = []
         self._tree.clear()
-        self._status_label.setText("Not signed in")
         self._sign_in_button.setEnabled(True)
         self._sign_in_button.setVisible(True)
 
     def _on_auth_error(self, error: Exception) -> None:
         self._sign_in_button.setEnabled(True)
-        self._status_label.setText("Not signed in" if self._account is None else "Signed in")
         QMessageBox.warning(self, "gcloud auth failed", str(error))
-
-    def _base_status_text(self) -> str:
-        """The status bar's resting text — reflects GCP sign-in state only;
-        QEMU connections (which need no sign-in) restore to this too, same
-        as RDP/SSH already do once their own connect attempt finishes."""
-        return "Signed in" if self._account else "Not signed in"
 
     # -- Project / instance tree --------------------------------------------
 
@@ -238,10 +221,6 @@ class ConnectionManagerView(QWidget):
             # that can have hundreds of projects, showing everything by
             # default is both unusable and means one slow/unresponsive
             # project can eat a request timeout on every session start.
-            self._status_label.setText(
-                f"Signed in — {len(projects)} project(s) found, "
-                "pick which to show…"
-            )
             dialog = ProjectSelectionDialog(projects, selected_ids=set(), parent=self)
             if dialog.exec() == ProjectSelectionDialog.DialogCode.Accepted:
                 selected_ids = dialog.selected_project_ids()
@@ -253,10 +232,6 @@ class ConnectionManagerView(QWidget):
 
     def _apply_project_selection(self, selected_ids: set[str]) -> None:
         visible = [p for p in self._all_projects if p.project_id in selected_ids]
-        self._status_label.setText(
-            f"Signed in — showing {len(visible)} of "
-            f"{len(self._all_projects)} project(s)"
-        )
 
         # tree.clear() destroys every top-level item, QEMU/Manual roots
         # included — rebuild them right after so each connection family
@@ -441,7 +416,6 @@ class ConnectionManagerView(QWidget):
         category_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
 
     def _on_load_error(self, error: Exception) -> None:
-        self._status_label.setText("Signed in")
         QMessageBox.warning(self, "Failed to load projects", str(error))
 
     # -- QEMU host / VM tree ----------------------------------------------
@@ -742,7 +716,6 @@ class ConnectionManagerView(QWidget):
             port=RDP_PORT if kind == "rdp" else SSH_PORT,
         )
 
-        self._status_label.setText(f"Connecting to {display_name} via {kind.upper()}…")
         async_utils.run_in_background(
             lambda: self._start_tunnel(target),
             on_result=lambda tunnel: self._on_tunnel_ready(
@@ -767,8 +740,6 @@ class ConnectionManagerView(QWidget):
         username: str | None,
         password: str | None = None,
     ) -> None:
-        self._status_label.setText(self._base_status_text())
-
         session_id = self._next_session_id
         self._next_session_id += 1
         self._active_sessions[session_id] = (kind, tunnel)
@@ -838,8 +809,6 @@ class ConnectionManagerView(QWidget):
             if not ok:
                 return
 
-        self._status_label.setText(f"Connecting to {connection.name} via {connection.kind.upper()}…")
-
         session_id = self._next_session_id
         self._next_session_id += 1
 
@@ -850,7 +819,6 @@ class ConnectionManagerView(QWidget):
                 session_id, connection.name, connection.port, username, password, host=connection.host
             )
 
-        self._status_label.setText(self._base_status_text())
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
@@ -865,7 +833,6 @@ class ConnectionManagerView(QWidget):
                 "this platform — see docs/qemu-spice-status.md.",
             )
             return
-        self._status_label.setText(f"Connecting to {vm.name} via SPICE…")
         async_utils.run_in_background(
             lambda: self._start_qemu_tunnel(host, vm),
             on_result=lambda tunnel: self._on_qemu_tunnel_ready(tunnel, vm),
@@ -882,8 +849,6 @@ class ConnectionManagerView(QWidget):
         return tunnel
 
     def _on_qemu_tunnel_ready(self, tunnel: QemuTunnel, vm: QemuVm) -> None:
-        self._status_label.setText(self._base_status_text())
-
         session_id = self._next_session_id
         self._next_session_id += 1
         self._active_sessions[session_id] = ("spice", tunnel)
@@ -908,7 +873,6 @@ class ConnectionManagerView(QWidget):
             widget.setFocus()
 
     def _on_session_error(self, error: Exception) -> None:
-        self._status_label.setText(self._base_status_text())
         QMessageBox.warning(self, "Connection failed", str(error))
 
     # -- Disconnect ------------------------------------------------------
