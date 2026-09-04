@@ -30,6 +30,15 @@ connection manager for RDP, SSH, and Cloud Storage.
   (via vcpkg) and made available to the app — see
   `docs/windows-freerdp-setup.md` for the full walkthrough. Everything
   else (GCP browsing, SSH, GCS) works without this.
+- **Linux only, for embedded QEMU/SPICE**: needs your distro's
+  GObject-Introspection SPICE client library — there's no PyPI-installable
+  equivalent, so it has to come from the system package manager (Fedora:
+  `python3-gobject` + `spice-glib`; Debian/Ubuntu: `python3-gi` +
+  `gir1.2-spice-client-glib-2.0`). Since that's a system package, your
+  venv needs `include-system-site-packages = true` in its `pyvenv.cfg` to
+  see it — either create the venv with `python -m venv --system-site-packages
+  .venv`, or flip that line in an existing `.venv/pyvenv.cfg`. See
+  `docs/qemu-spice-status.md` for the full plan and status.
 
 ## Getting started
 

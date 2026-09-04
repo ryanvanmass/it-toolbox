@@ -17,6 +17,7 @@ dependencies = [
     "pyte",
     "ptyprocess; sys_platform != 'win32'",
     "pywinpty; sys_platform == 'win32'",
+    "PyGObject; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
