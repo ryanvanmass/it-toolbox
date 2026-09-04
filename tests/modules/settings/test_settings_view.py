@@ -1,4 +1,5 @@
 from it_toolbox.core import rclone_client, settings, update_checker
+from it_toolbox.core.auth import gcp_auth
 from it_toolbox.modules.settings.ui.main_view import SettingsView
 
 
@@ -8,11 +9,20 @@ def _make_view(
     installed_version="1.0.0",
     rclone_available=False,
     rclone_override=None,
+    gcloud_available=False,
 ):
+    # Keep tests hermetic — exercising Settings-page wiring, not real
+    # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
+    # background subprocess check against) whatever's actually installed
+    # on the machine running the test. A real gcp_auth.is_available()
+    # here would fire a genuine background `gcloud` subprocess call via
+    # run_in_background, which has been observed to interfere with other
+    # tests' forkpty-based terminal tests when run in the same session.
     monkeypatch.setattr(update_checker, "get_installed_version", lambda: installed_version)
     monkeypatch.setattr(rclone_client, "is_available", lambda: rclone_available)
     monkeypatch.setattr(rclone_client, "rclone_executable", lambda: "/usr/bin/rclone")
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
+    monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
     view = SettingsView()
     qtbot.addWidget(view)
     return view
@@ -147,3 +157,65 @@ def test_download_rclone_shows_error_on_failure(qtbot, monkeypatch):
 
     qtbot.waitUntil(lambda: "Couldn't download rclone" in view._rclone_status_label.text())
     assert view._rclone_download_button.isEnabled()
+
+
+def test_gcloud_section_shows_not_found_when_gcloud_missing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, gcloud_available=False)
+
+    assert "not found" in view._gcloud_status_label.text()
+    assert not view._gcloud_sign_in_button.isEnabled()
+    assert not view._gcloud_sign_out_button.isEnabled()
+
+
+def test_gcloud_section_shows_signed_in_account(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: "someone@example.com")
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+
+    qtbot.waitUntil(lambda: "someone@example.com" in view._gcloud_status_label.text())
+    assert view._gcloud_sign_out_button.isEnabled()
+
+
+def test_gcloud_section_shows_not_signed_in(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: None)
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+
+    qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+    assert not view._gcloud_sign_out_button.isEnabled()
+
+
+def test_gcloud_sign_in_updates_status_on_success(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: None)
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+    monkeypatch.setattr(gcp_auth, "sign_in", lambda: "someone@example.com")
+    view._on_gcloud_sign_in_clicked()
+
+    qtbot.waitUntil(lambda: "someone@example.com" in view._gcloud_status_label.text())
+    assert view._gcloud_sign_out_button.isEnabled()
+
+
+def test_gcloud_sign_in_error_shows_message(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: None)
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+    def _raise():
+        raise RuntimeError("login failed")
+
+    monkeypatch.setattr(gcp_auth, "sign_in", _raise)
+    view._on_gcloud_sign_in_clicked()
+
+    qtbot.waitUntil(lambda: "gcloud error" in view._gcloud_status_label.text())
+    assert view._gcloud_sign_in_button.isEnabled()
+
+
+def test_gcloud_sign_out_updates_status(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: "someone@example.com")
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "someone@example.com" in view._gcloud_status_label.text())
+
+    monkeypatch.setattr(gcp_auth, "sign_out", lambda: None)
+    view._on_gcloud_sign_out_clicked()
+
+    qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())

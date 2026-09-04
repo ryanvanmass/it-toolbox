@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
+from it_toolbox.core.auth import gcp_auth
 from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
 
 
@@ -34,6 +35,7 @@ class SettingsView(QWidget):
         self._content_layout = QVBoxLayout(content)
         self._content_layout.addWidget(self._build_updates_section())
         self._content_layout.addWidget(self._build_rclone_section())
+        self._content_layout.addWidget(self._build_gcloud_section())
         self._content_layout.addStretch(1)
         scroll_area.setWidget(content)
 
@@ -168,3 +170,74 @@ class SettingsView(QWidget):
     def _on_rclone_download_error(self, error: Exception) -> None:
         self._rclone_download_button.setEnabled(True)
         self._rclone_status_label.setText(f"Couldn't download rclone: {error}")
+
+    # -- gcloud -------------------------------------------------------------
+
+    def _build_gcloud_section(self) -> QGroupBox:
+        box = QGroupBox("gcloud")
+        layout = QVBoxLayout(box)
+
+        self._gcloud_status_label = QLabel()
+
+        self._gcloud_sign_in_button = QPushButton("Sign In…")
+        self._gcloud_sign_in_button.clicked.connect(self._on_gcloud_sign_in_clicked)
+
+        self._gcloud_sign_out_button = QPushButton("Sign Out")
+        self._gcloud_sign_out_button.clicked.connect(self._on_gcloud_sign_out_clicked)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self._gcloud_sign_in_button)
+        button_row.addWidget(self._gcloud_sign_out_button)
+        button_row.addStretch(1)
+
+        layout.addWidget(self._gcloud_status_label)
+        layout.addLayout(button_row)
+
+        if gcp_auth.is_available():
+            self._gcloud_status_label.setText("Checking sign-in status…")
+            self._gcloud_sign_in_button.setEnabled(False)
+            self._gcloud_sign_out_button.setEnabled(False)
+            run_in_background(
+                gcp_auth.get_active_account,
+                on_result=self._set_gcloud_account,
+                on_error=lambda error: self._set_gcloud_account(None),
+            )
+        else:
+            self._gcloud_status_label.setText(
+                f"gcloud CLI not found. Install it from {gcp_auth.INSTALL_URL} and relaunch."
+            )
+            self._gcloud_sign_in_button.setEnabled(False)
+            self._gcloud_sign_out_button.setEnabled(False)
+
+        return box
+
+    def _set_gcloud_account(self, account: str | None) -> None:
+        self._gcloud_sign_in_button.setEnabled(True)
+        self._gcloud_sign_out_button.setEnabled(account is not None)
+        if account is not None:
+            self._gcloud_status_label.setText(f"Signed in as {account}")
+        else:
+            self._gcloud_status_label.setText("Not signed in")
+
+    def _on_gcloud_sign_in_clicked(self) -> None:
+        self._gcloud_sign_in_button.setEnabled(False)
+        self._gcloud_status_label.setText("Signing in…")
+        run_in_background(
+            gcp_auth.sign_in,
+            on_result=self._set_gcloud_account,
+            on_error=self._on_gcloud_error,
+        )
+
+    def _on_gcloud_sign_out_clicked(self) -> None:
+        self._gcloud_sign_out_button.setEnabled(False)
+        self._gcloud_status_label.setText("Signing out…")
+        run_in_background(
+            gcp_auth.sign_out,
+            on_result=lambda _: self._set_gcloud_account(None),
+            on_error=self._on_gcloud_error,
+        )
+
+    def _on_gcloud_error(self, error: Exception) -> None:
+        self._gcloud_sign_in_button.setEnabled(True)
+        self._gcloud_sign_out_button.setEnabled(True)
+        self._gcloud_status_label.setText(f"gcloud error: {error}")
