@@ -422,6 +422,7 @@ class FreeRdpSession:
         local framebuffer to match. Call only from the thread driving the
         connection (see rdp_session_worker.py's _drain_input_queue)."""
         if self._context is None:
+            print(f"[RDP-DEBUG] request_resize({width}x{height}): no context, ignored", flush=True)
             return
         if self.display._context is None:
             # "disp" hasn't bound yet (see _on_channel_connected) — no
@@ -432,13 +433,24 @@ class FreeRdpSession:
             # cropped/corrupted display instead of just not resizing yet.
             # Remember the request and replay it once the channel binds,
             # rather than dropping it on the floor.
+            print(f"[RDP-DEBUG] request_resize({width}x{height}): disp not bound yet, deferring", flush=True)
             self._pending_resize = (width, height)
             return
+        print(f"[RDP-DEBUG] request_resize({width}x{height}): applying now", flush=True)
         self._apply_resize(width, height)
 
     def _apply_resize(self, width: int, height: int) -> None:
         gdi = self._context.contents.gdi
+        print(
+            f"[RDP-DEBUG] _apply_resize({width}x{height}): gdi before = "
+            f"{gdi.contents.width}x{gdi.contents.height}",
+            flush=True,
+        )
         _core_lib.gdi_resize(gdi, width, height)
+        print(
+            f"[RDP-DEBUG] _apply_resize: gdi after = {gdi.contents.width}x{gdi.contents.height}",
+            flush=True,
+        )
         self.display.request_resize(width, height)
 
     def connect(
