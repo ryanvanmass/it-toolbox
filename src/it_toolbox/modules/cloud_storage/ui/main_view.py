@@ -1,6 +1,5 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFileDialog,
     QMenu,
     QMessageBox,
     QTabWidget,
@@ -14,6 +13,7 @@ from it_toolbox.core import async_utils, rclone_client, settings
 from it_toolbox.modules.cloud_storage.models import RemoteConfig
 from it_toolbox.modules.cloud_storage.ui.add_remote_dialog import AddRemoteDialog
 from it_toolbox.widgets.rclone_browser_widget import RcloneBrowserWidget
+from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
 
 REMOTE_ROLE = Qt.ItemDataRole.UserRole
 IS_REMOTES_ROOT_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -82,15 +82,11 @@ class CloudStorageView(QWidget):
         return menu
 
     def _on_set_rclone_path_clicked(self) -> None:
-        current = settings.load_rclone_path() or ""
-        path, _ = QFileDialog.getOpenFileName(self, "Locate the rclone executable", current)
-        if not path:
-            return
-        settings.save_rclone_path(path)
-        self.refresh_remotes()
+        if prompt_for_rclone_path(self) is not None:
+            self.refresh_remotes()
 
     def _on_clear_rclone_path_clicked(self) -> None:
-        settings.save_rclone_path(None)
+        clear_rclone_path()
         self.refresh_remotes()
 
     # -- Remotes tree ---------------------------------------------------

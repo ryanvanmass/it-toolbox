@@ -14,8 +14,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import update_checker
+from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
+from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
 
 
 class SettingsView(QWidget):
@@ -32,6 +33,7 @@ class SettingsView(QWidget):
         content = QWidget()
         self._content_layout = QVBoxLayout(content)
         self._content_layout.addWidget(self._build_updates_section())
+        self._content_layout.addWidget(self._build_rclone_section())
         self._content_layout.addStretch(1)
         scroll_area.setWidget(content)
 
@@ -95,3 +97,74 @@ class SettingsView(QWidget):
     def _open_latest_release(self) -> None:
         if self._latest_release_url is not None:
             QDesktopServices.openUrl(QUrl(self._latest_release_url))
+
+    # -- rclone -----------------------------------------------------------
+
+    def _build_rclone_section(self) -> QGroupBox:
+        box = QGroupBox("rclone")
+        layout = QVBoxLayout(box)
+
+        self._rclone_status_label = QLabel()
+
+        self._rclone_location_button = QPushButton()
+        self._rclone_location_button.clicked.connect(self._on_rclone_location_clicked)
+
+        self._rclone_use_path_button = QPushButton("Use rclone from PATH")
+        self._rclone_use_path_button.clicked.connect(self._on_use_rclone_from_path_clicked)
+
+        self._rclone_download_button = QPushButton("Download rclone…")
+        self._rclone_download_button.clicked.connect(self._on_download_rclone_clicked)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self._rclone_location_button)
+        button_row.addWidget(self._rclone_use_path_button)
+        button_row.addWidget(self._rclone_download_button)
+        button_row.addStretch(1)
+
+        layout.addWidget(self._rclone_status_label)
+        layout.addLayout(button_row)
+
+        self._refresh_rclone_status()
+        return box
+
+    def _refresh_rclone_status(self) -> None:
+        override = settings.load_rclone_path()
+        if rclone_client.is_available():
+            exe = rclone_client.rclone_executable()
+            self._rclone_status_label.setText(f"Found at {exe}")
+        else:
+            self._rclone_status_label.setText(
+                f"rclone not found. Install it from {rclone_client.INSTALL_URL}, "
+                "point at an existing copy, or download one below."
+            )
+
+        self._rclone_location_button.setText(
+            "Change rclone Location…" if override else "Set rclone Location…"
+        )
+        self._rclone_use_path_button.setVisible(override is not None)
+
+    def _on_rclone_location_clicked(self) -> None:
+        if prompt_for_rclone_path(self) is not None:
+            self._refresh_rclone_status()
+
+    def _on_use_rclone_from_path_clicked(self) -> None:
+        clear_rclone_path()
+        self._refresh_rclone_status()
+
+    def _on_download_rclone_clicked(self) -> None:
+        self._rclone_download_button.setEnabled(False)
+        self._rclone_status_label.setText("Downloading rclone…")
+        dest_dir = settings.data_dir() / "rclone"
+        run_in_background(
+            lambda: rclone_client.download_latest(dest_dir),
+            on_result=self._on_rclone_downloaded,
+            on_error=self._on_rclone_download_error,
+        )
+
+    def _on_rclone_downloaded(self, path) -> None:
+        self._rclone_download_button.setEnabled(True)
+        self._refresh_rclone_status()
+
+    def _on_rclone_download_error(self, error: Exception) -> None:
+        self._rclone_download_button.setEnabled(True)
+        self._rclone_status_label.setText(f"Couldn't download rclone: {error}")

@@ -397,3 +397,82 @@ def test_delete_directory_invokes_purge(monkeypatch):
     rclone_client.delete_directory("myRemote", "some/dir")
 
     assert captured["cmd"] == ["rclone", "purge", "myRemote:some/dir"]
+
+
+# -- download_latest -------------------------------------------------------
+
+
+def _fake_rclone_zip(exe_name="rclone", contents=b"#!/bin/sh\necho fake-rclone\n"):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(f"rclone-v1.99.0-linux-amd64/{exe_name}", contents)
+        z.writestr("rclone-v1.99.0-linux-amd64/README.txt", "readme")
+    return buf.getvalue()
+
+
+class _FakeDownloadResponse:
+    def __init__(self, content):
+        self.content = content
+
+    def raise_for_status(self):
+        pass
+
+
+def test_download_latest_extracts_executable_and_saves_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(rclone_client.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(rclone_client.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        rclone_client.requests,
+        "get",
+        lambda url, timeout: _FakeDownloadResponse(_fake_rclone_zip()),
+    )
+    saved = []
+    monkeypatch.setattr(rclone_client.settings, "save_rclone_path", lambda path: saved.append(path))
+
+    dest_dir = tmp_path / "rclone"
+    result = rclone_client.download_latest(dest_dir)
+
+    assert result == dest_dir / "rclone"
+    assert result.read_bytes() == b"#!/bin/sh\necho fake-rclone\n"
+    assert result.stat().st_mode & 0o111  # executable bit set
+    assert saved == [str(result)]
+
+
+def test_download_latest_uses_exe_suffix_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(rclone_client.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(rclone_client.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(
+        rclone_client.requests,
+        "get",
+        lambda url, timeout: _FakeDownloadResponse(_fake_rclone_zip(exe_name="rclone.exe")),
+    )
+    monkeypatch.setattr(rclone_client.settings, "save_rclone_path", lambda path: None)
+
+    dest_dir = tmp_path / "rclone"
+    result = rclone_client.download_latest(dest_dir)
+
+    assert result == dest_dir / "rclone.exe"
+
+
+def test_download_latest_raises_on_unsupported_platform(monkeypatch, tmp_path):
+    monkeypatch.setattr(rclone_client.platform, "system", lambda: "Plan9")
+    monkeypatch.setattr(rclone_client.platform, "machine", lambda: "x86_64")
+
+    with pytest.raises(rclone_client.UnsupportedPlatformError):
+        rclone_client.download_latest(tmp_path / "rclone")
+
+
+def test_download_latest_raises_when_archive_missing_executable(monkeypatch, tmp_path):
+    monkeypatch.setattr(rclone_client.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(rclone_client.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        rclone_client.requests,
+        "get",
+        lambda url, timeout: _FakeDownloadResponse(_fake_rclone_zip(exe_name="not-rclone")),
+    )
+
+    with pytest.raises(rclone_client.RcloneApiError, match="didn't contain"):
+        rclone_client.download_latest(tmp_path / "rclone")
