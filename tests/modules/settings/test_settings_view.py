@@ -1,5 +1,9 @@
+import subprocess
+
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.auth import gcp_auth
+from it_toolbox.modules.connection_manager import qemu_client
+from it_toolbox.modules.settings.ui import main_view as settings_main_view
 from it_toolbox.modules.settings.ui.main_view import SettingsView
 
 
@@ -10,6 +14,8 @@ def _make_view(
     rclone_available=False,
     rclone_override=None,
     gcloud_available=False,
+    platform_system="Linux",
+    qemu_available=False,
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
     # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
@@ -23,6 +29,8 @@ def _make_view(
     monkeypatch.setattr(rclone_client, "rclone_executable", lambda: "/usr/bin/rclone")
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
+    monkeypatch.setattr(qemu_client, "is_available", lambda: qemu_available)
+    monkeypatch.setattr(settings_main_view.platform, "system", lambda: platform_system)
     view = SettingsView()
     qtbot.addWidget(view)
     return view
@@ -219,3 +227,99 @@ def test_gcloud_sign_out_updates_status(qtbot, monkeypatch):
     view._on_gcloud_sign_out_clicked()
 
     qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+
+def test_qemu_section_not_applicable_off_linux(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, platform_system="Windows")
+
+    assert "Not applicable" in view._qemu_status_label.text()
+
+
+def test_qemu_section_shows_found_when_virsh_available(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, platform_system="Linux", qemu_available=True)
+
+    assert "virsh found" in view._qemu_status_label.text()
+
+
+def test_qemu_section_shows_install_instructions_when_missing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, platform_system="Linux", qemu_available=False)
+
+    assert "virsh not found" in view._qemu_status_label.text()
+    assert "apt install libvirt-clients" in view._qemu_status_label.text()
+
+
+def test_freerdp_section_not_applicable_off_windows(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, platform_system="Linux")
+
+    assert "Not applicable" in view._freerdp_status_label.text()
+    assert not hasattr(view, "_freerdp_fetch_button")
+
+
+def test_freerdp_section_shows_loaded_status_on_windows(qtbot, monkeypatch):
+    monkeypatch.setattr(settings_main_view, "freerdp_client", object())
+
+    view = _make_view(qtbot, monkeypatch, platform_system="Windows")
+
+    assert "loaded" in view._freerdp_status_label.text()
+
+
+def test_freerdp_section_shows_not_found_status_on_windows(qtbot, monkeypatch):
+    monkeypatch.setattr(settings_main_view, "freerdp_client", None)
+
+    view = _make_view(qtbot, monkeypatch, platform_system="Windows")
+
+    assert "not found" in view._freerdp_status_label.text()
+
+
+def test_fetch_freerdp_shows_error_when_script_missing(qtbot, monkeypatch):
+    monkeypatch.setattr(settings_main_view, "freerdp_client", None)
+    monkeypatch.setattr(
+        settings_main_view, "_FREERDP_FETCH_SCRIPT", settings_main_view.Path("/no/such/script.ps1")
+    )
+    view = _make_view(qtbot, monkeypatch, platform_system="Windows")
+
+    view._on_fetch_freerdp_clicked()
+
+    assert "Fetch script not found" in view._freerdp_status_label.text()
+
+
+def test_fetch_freerdp_runs_script_and_re_checks_status_on_success(qtbot, monkeypatch, tmp_path):
+    # freerdp_client is genuinely importable on this dev machine (real
+    # libfreerdp3 was installed for the embedded-RDP work) — so a real
+    # re-import after a successful fetch naturally succeeds here without
+    # needing to fake the module itself, only the script run + env var.
+    monkeypatch.setattr(settings_main_view, "freerdp_client", None)
+    script = tmp_path / "fetch.ps1"
+    script.write_text("")
+    monkeypatch.setattr(settings_main_view, "_FREERDP_FETCH_SCRIPT", script)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(
+        settings_main_view.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], returncode=0, stdout="", stderr=""),
+    )
+    view = _make_view(qtbot, monkeypatch, platform_system="Windows")
+
+    view._on_fetch_freerdp_clicked()
+
+    qtbot.waitUntil(lambda: view._freerdp_fetch_button.isEnabled())
+    assert "loaded" in view._freerdp_status_label.text()
+    assert settings_main_view.freerdp_client is not None
+
+
+def test_fetch_freerdp_shows_error_on_script_failure(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(settings_main_view, "freerdp_client", None)
+    script = tmp_path / "fetch.ps1"
+    script.write_text("")
+    monkeypatch.setattr(settings_main_view, "_FREERDP_FETCH_SCRIPT", script)
+    monkeypatch.setattr(
+        settings_main_view.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], returncode=1, stdout="", stderr="boom"),
+    )
+    view = _make_view(qtbot, monkeypatch, platform_system="Windows")
+
+    view._on_fetch_freerdp_clicked()
+
+    qtbot.waitUntil(lambda: "Couldn't fetch FreeRDP DLLs" in view._freerdp_status_label.text())
+    assert view._freerdp_fetch_button.isEnabled()

@@ -31,6 +31,10 @@ connection manager for RDP, SSH, and Cloud Storage.
   form built from rclone's own config schema rather than one form per
   backend. See `docs/cloud-storage-status.md` for its current
   verification status.
+- **Settings** — a single page consolidating app-update checks (against
+  GitHub Releases — see `docs/releasing.md`) and status/setup for
+  rclone, gcloud, QEMU/libvirt, and FreeRDP. See
+  `docs/app-settings-status.md` for its current verification status.
 
 ## Requirements
 
@@ -77,8 +81,8 @@ Project layout:
   without any UI.
 - `widgets/` — the Qt-aware layer built on top of `core/`.
 - `modules/` — top-level app features (Connection Manager, Shell
-  Launcher, Cloud Storage), each registered with the app shell in
-  `modules/registry.py`.
+  Launcher, Cloud Storage, Settings), each registered with the app shell
+  in `modules/registry.py`.
 
 See `docs/` for deeper write-ups of specific subsystems (currently:
 the embedded RDP client's status and the Windows FreeRDP build steps).
