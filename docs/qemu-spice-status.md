@@ -3,8 +3,9 @@
 Branch: `feature/qemu-spice-connections`. Read this file first if you're
 picking this work up in a new session (e.g. on a different machine) —
 it's written so a fresh session with no prior conversation history can
-get oriented from the repo alone. Nothing on this branch has been
-written yet; this is a plan, not a status report on working code.
+get oriented from the repo alone. Milestones 1-4 (below) are done and
+verified against a real libvirt/QEMU host; the rest is still the
+original plan.
 
 ## What this branch is
 
@@ -35,17 +36,56 @@ does **not** have, because it delegates the whole connection to
 that's the new work here, and it mirrors the embedded-RDP architecture
 closely enough to use as a template throughout.
 
-## Environment note — why nothing is verified yet
+## What's done and verified (Milestones 1-4)
 
-This plan was written on a Windows dev machine with no Linux box, no
-libvirt/QEMU host, and no way to install PyGObject/spice-glib to test
-against. Every milestone below needs verifying against a real libvirt
-host once on Linux — same "verify against a real target, not just
-against the header/docs" discipline that caught a real heap-corruption
-bug and a channel-naming bug on the RDP branch. **Treat nothing here as
-confirmed working until it's actually been run.** If you're starting
-this session on Linux with libvirt/QEMU access, that's exactly the gap
-to close first.
+All of this has been tested against a real local libvirt/QEMU host
+(`qemu:///system`, a running VM called "WorkPC") — not mocked, not just
+checked against docs:
+
+1. **VM discovery** (`modules/connection_manager/qemu_client.py`:
+   `list_vms`/`get_vm_spice_port`/`power_action`, all via `virsh`).
+   Confirmed listing a real running VM and parsing its SPICE port
+   straight out of `dumpxml`, matching the raw XML.
+2. **SSH tunnel** (`core/qemu_tunnel.py`: `QemuTunnel`). Verified against
+   a real (throwaway, non-privileged, no sudo) local `sshd` instance: a
+   real `ssh -L` subprocess forwarding a real TCP connection end-to-end.
+3. **SPICE connect/disconnect** (`core/spice/spice_session.py`:
+   `SpiceSession.connect`/`disconnect`). Verified against the real VM's
+   SPICE server: a real connect + main-channel-open + clean disconnect,
+   and a real connect-failure path against a closed port.
+4. **Frame capture** (`SpiceSession.get_frame`/`on_frame`,
+   `capture_one_frame`). Pixel format confirmed empirically, not
+   assumed: SPICE surface format 32 is BGRX byte order, byte-for-byte
+   matching `QImage.Format_RGB32` (same as FreeRDP) — confirmed by
+   diffing a captured frame against `virsh screenshot`'s independent
+   capture, 0 pixels different across a full-frame sample with real
+   (non-black) content. Two binding quirks found the hard way, not from
+   docs: (a) both `Session` and every `Channel` subclass have native
+   `connect()`/`disconnect()` methods that shadow GObject's signal
+   `.connect()` — signals must be wired via
+   `GObject.Object.connect(obj, signal, cb)` instead; (b)
+   `DisplayChannel.display_channel_get_primary()` (the "pull" API)
+   returns garbage/misaligned fields through this binding, so frame data
+   is cached from the `display-primary-create` *signal* instead. Also
+   found: capturing on the very first `on_frame` call can grab a
+   still-blank/stale surface before the guest's display has actually
+   woken up — fixed with the same "wait for a settle period with no new
+   frames" approach `freerdp_client.capture_one_frame` already used.
+
+See the git log on this branch for the full detail behind each of these.
+
+## Environment note — updated
+
+The original plan (below) was written on a Windows dev machine with no
+Linux box, no libvirt/QEMU host, and no way to install PyGObject/
+spice-glib to test against. That gap is now closed: PyGObject/spice-glib
+were already present as system (rpm) packages, made importable in the
+project's venv via `include-system-site-packages = true` in
+`.venv/pyvenv.cfg` (see the README's Requirements section) rather than a
+from-source pip build, since the devel headers for that aren't installed
+and there's no need to fight that when the distro package already works.
+Milestones 5-7 below still need the same "verify against a real target"
+treatment as 1-4 got.
 
 ## Architecture — mirrors the embedded-RDP three-layer split
 
