@@ -103,13 +103,26 @@ class SpiceSession:
         # available to read via get_frame() — on the initial full-frame
         # primary-create, and on every subsequent display-invalidate.
         self.on_frame: Callable[[], None] | None = None
+        # Callback counterparts to connect()'s blocking wait, for a caller
+        # (SpiceSessionWorker) that runs the GLib.MainLoop itself and so
+        # can't block-and-wait on this same thread without deadlocking —
+        # see start_connecting()'s docstring.
+        self.on_connected: Callable[[], None] | None = None
+        self.on_error: Callable[[SpiceError], None] | None = None
+        self.on_disconnected: Callable[[], None] | None = None
 
         GObject.Object.connect(self._session, "channel-new", self._on_channel_new)
-        GObject.Object.connect(self._session, "disconnected", self._on_disconnected)
+        GObject.Object.connect(self._session, "disconnected", self._on_session_disconnected)
 
-    def connect(self, host: str, port: int, password: str = "", timeout: float = 15) -> None:
-        """Start connecting and block until the main channel comes up (or
-        the connection fails, or `timeout` elapses).
+    def start_connecting(self, host: str, port: int, password: str = "") -> None:
+        """Kick off connecting and return immediately — spice_session_connect()
+        itself is non-blocking; it just starts the process, whose outcome
+        arrives later as signals (delivered to on_connected/on_error, and
+        to connect()'s own internal wait). Use this (not connect()) from a
+        thread that itself will drive the GLib main loop, e.g.
+        SpiceSessionWorker — calling the blocking connect() there would
+        deadlock, since the signals it waits on only ever get dispatched
+        while a loop is actually running.
         """
         self._session.set_property("host", host)
         self._session.set_property("port", str(port))
@@ -118,6 +131,15 @@ class SpiceSession:
 
         if not self._session.connect():
             raise SpiceError(f"spice_session_connect failed for {host}:{port}")
+
+    def connect(self, host: str, port: int, password: str = "", timeout: float = 15) -> None:
+        """Start connecting and block until the main channel comes up (or
+        the connection fails, or `timeout` elapses). Requires a
+        GLib.MainLoop already running on a *different* thread (true of
+        every CLI/smoke-test entry point below) — see start_connecting()'s
+        docstring for why this can't be called from the loop's own thread.
+        """
+        self.start_connecting(host, port, password)
 
         if not self._connected.wait(timeout):
             raise SpiceError(f"Timed out connecting to {host}:{port}")
@@ -156,12 +178,19 @@ class SpiceSession:
     def _on_main_channel_event(self, channel: SpiceClientGLib.Channel, event: int) -> None:
         if event == SpiceClientGLib.ChannelEvent.OPENED:
             self._connected.set()
+            if self.on_connected is not None:
+                self.on_connected()
         elif event in _ERROR_EVENTS:
-            self._error = SpiceError(f"SPICE main channel error: {SpiceClientGLib.ChannelEvent(event).value_name}")
+            error = SpiceError(f"SPICE main channel error: {SpiceClientGLib.ChannelEvent(event).value_name}")
+            self._error = error
             self._connected.set()
+            if self.on_error is not None:
+                self.on_error(error)
 
-    def _on_disconnected(self, session: SpiceClientGLib.Session) -> None:
+    def _on_session_disconnected(self, session: SpiceClientGLib.Session) -> None:
         self._connected.set()
+        if self.on_disconnected is not None:
+            self.on_disconnected()
 
     def _on_primary_create(
         self,

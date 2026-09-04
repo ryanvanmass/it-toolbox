@@ -36,7 +36,7 @@ does **not** have, because it delegates the whole connection to
 that's the new work here, and it mirrors the embedded-RDP architecture
 closely enough to use as a template throughout.
 
-## What's done and verified (Milestones 1-4)
+## What's done and verified (Milestones 1-5)
 
 All of this has been tested against a real local libvirt/QEMU host
 (`qemu:///system`, a running VM called "WorkPC") — not mocked, not just
@@ -71,6 +71,20 @@ checked against docs:
    still-blank/stale surface before the guest's display has actually
    woken up — fixed with the same "wait for a settle period with no new
    frames" approach `freerdp_client.capture_one_frame` already used.
+5. **Qt widget** (`src/it_toolbox/widgets/spice_widget.py` +
+   `core/spice/spice_session_worker.py`, the thread/signal bridge —
+   mirrors `core/rdp/rdp_session_worker.py`'s split). Renders live in an
+   actual `QWidget`, confirmed via `grab()` against the real VM. Building
+   the worker surfaced that `SpiceSession.connect()`'s blocking wait
+   can't be called from the same thread that runs the `GLib.MainLoop`
+   driving it (that thread must be free to dispatch the very signals the
+   wait depends on) — split into a non-blocking `start_connecting()` +
+   `on_connected`/`on_error`/`on_disconnected` callbacks (alongside the
+   existing `on_frame`) for the worker to use instead, keeping
+   `connect()` itself as the blocking convenience wrapper the CLI smoke
+   tests use (where a loop already runs on a separate thread). Rendering
+   only, mirroring RDP's own Milestone 3 scope — mouse/keyboard input and
+   resize are still Milestone 6.
 
 See the git log on this branch for the full detail behind each of these.
 
