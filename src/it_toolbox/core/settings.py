@@ -102,3 +102,26 @@ def save_default_username(username: str | None) -> None:
         path.write_text(username.strip())
     else:
         path.unlink(missing_ok=True)
+
+
+def rclone_path_path() -> Path:
+    return data_dir() / "rclone_path.txt"
+
+
+def load_rclone_path() -> str | None:
+    """An explicit path to the rclone executable, for machines where it
+    isn't on PATH (e.g. a portable rclone.exe on Windows). None means
+    fall back to looking it up on PATH.
+    """
+    path = rclone_path_path()
+    if not path.is_file():
+        return None
+    return path.read_text().strip() or None
+
+
+def save_rclone_path(rclone_path: str | None) -> None:
+    path = rclone_path_path()
+    if rclone_path and rclone_path.strip():
+        path.write_text(rclone_path.strip())
+    else:
+        path.unlink(missing_ok=True)

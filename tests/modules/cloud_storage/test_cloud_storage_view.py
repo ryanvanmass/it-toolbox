@@ -63,12 +63,81 @@ def test_unavailable_rclone_shows_no_remotes_without_erroring(qtbot, monkeypatch
     assert "rclone CLI not found" in root.child(0).text(0)
 
 
-def test_context_menu_on_root_offers_refresh(qtbot, monkeypatch):
+def test_sidebar_entry_menu_offers_set_rclone_location_and_refresh(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.settings.load_rclone_path", lambda: None
+    )
     view = _make_view(qtbot, monkeypatch)
 
     menu = view.build_context_menu(view)
 
-    assert [action.text() for action in menu.actions()] == ["Refresh"]
+    assert [action.text() for action in menu.actions()] == [
+        "Set rclone Location…",
+        "Refresh",
+    ]
+
+
+def test_sidebar_entry_menu_offers_change_and_clear_when_override_is_set(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.settings.load_rclone_path",
+        lambda: "/opt/rclone/rclone",
+    )
+    view = _make_view(qtbot, monkeypatch)
+
+    menu = view.build_context_menu(view)
+
+    assert [action.text() for action in menu.actions()] == [
+        "Change rclone Location…",
+        "Use rclone from PATH",
+        "Refresh",
+    ]
+
+
+def test_set_rclone_path_saves_chosen_path_and_refreshes(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.settings.save_rclone_path",
+        lambda path: saved.append(path),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.QFileDialog.getOpenFileName",
+        lambda *a, **k: ("/opt/rclone/rclone", ""),
+    )
+
+    view._on_set_rclone_path_clicked()
+
+    assert saved == ["/opt/rclone/rclone"]
+
+
+def test_set_rclone_path_does_nothing_on_cancel(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.settings.save_rclone_path",
+        lambda path: saved.append(path),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.QFileDialog.getOpenFileName",
+        lambda *a, **k: ("", ""),
+    )
+
+    view._on_set_rclone_path_clicked()
+
+    assert saved == []
+
+
+def test_clear_rclone_path_saves_none_and_refreshes(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.settings.save_rclone_path",
+        lambda path: saved.append(path),
+    )
+
+    view._on_clear_rclone_path_clicked()
+
+    assert saved == [None]
 
 
 def test_double_clicking_a_remote_opens_a_browser_tab(qtbot, monkeypatch):

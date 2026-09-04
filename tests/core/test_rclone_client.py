@@ -14,6 +14,9 @@ def _completed(stdout="", returncode=0, stderr=""):
 @pytest.fixture(autouse=True)
 def _rclone_on_path(monkeypatch):
     monkeypatch.setattr(rclone_client.shutil, "which", lambda name: "/usr/bin/rclone")
+    # Hermetic by default — a real rclone_path.txt on the machine running
+    # this suite (from actually using the app) must not leak into tests.
+    monkeypatch.setattr(rclone_client.settings, "load_rclone_path", lambda: None)
 
 
 # -- Availability ---------------------------------------------------------
@@ -38,6 +41,41 @@ def test_run_raises_on_nonzero_exit(monkeypatch):
     )
     with pytest.raises(rclone_client.RcloneApiError, match="boom"):
         rclone_client.list_remotes()
+
+
+def test_is_available_true_when_override_path_exists(monkeypatch, tmp_path):
+    monkeypatch.setattr(rclone_client.shutil, "which", lambda name: None)
+    fake_exe = tmp_path / "rclone.exe"
+    fake_exe.write_text("")
+    monkeypatch.setattr(rclone_client.settings, "load_rclone_path", lambda: str(fake_exe))
+
+    assert rclone_client.is_available() is True
+
+
+def test_is_available_false_when_override_path_does_not_exist(monkeypatch, tmp_path):
+    monkeypatch.setattr(rclone_client.shutil, "which", lambda name: "/usr/bin/rclone")
+    monkeypatch.setattr(
+        rclone_client.settings, "load_rclone_path", lambda: str(tmp_path / "missing.exe")
+    )
+
+    assert rclone_client.is_available() is False
+
+
+def test_run_uses_override_path_as_the_executable(monkeypatch, tmp_path):
+    fake_exe = tmp_path / "rclone.exe"
+    fake_exe.write_text("")
+    monkeypatch.setattr(rclone_client.settings, "load_rclone_path", lambda: str(fake_exe))
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        captured["cmd"] = cmd
+        return _completed(stdout="{}")
+
+    monkeypatch.setattr(rclone_client.subprocess, "run", fake_run)
+
+    rclone_client.list_remotes()
+
+    assert captured["cmd"][0] == str(fake_exe)
 
 
 def test_run_raises_on_timeout(monkeypatch):

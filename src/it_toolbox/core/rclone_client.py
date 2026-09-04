@@ -17,7 +17,9 @@ possibly several times in a row, until done.
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
+from it_toolbox.core import settings
 from it_toolbox.modules.cloud_storage.models import (
     ConfigStep,
     Provider,
@@ -39,18 +41,31 @@ class RcloneApiError(Exception):
     pass
 
 
+def _rclone_executable() -> str:
+    """The rclone binary to invoke — an explicit override path if one's
+    been configured (settings.save_rclone_path; needed on machines where
+    rclone isn't on PATH, e.g. a portable rclone.exe on Windows), else
+    just "rclone", relying on PATH.
+    """
+    return settings.load_rclone_path() or RCLONE_CMD
+
+
 def is_available() -> bool:
-    return shutil.which(RCLONE_CMD) is not None
+    exe = _rclone_executable()
+    if exe == RCLONE_CMD:
+        return shutil.which(RCLONE_CMD) is not None
+    return Path(exe).is_file()
 
 
 def _run(*args: str, timeout: int = RCLONE_TIMEOUT_SEC) -> str:
     if not is_available():
         raise RcloneApiError(
-            f"rclone CLI not found on PATH. Install it from {INSTALL_URL} and relaunch."
+            f"rclone CLI not found. Install it from {INSTALL_URL}, or set its location "
+            "from the Cloud Storage sidebar entry's right-click menu, and relaunch."
         )
     try:
         result = subprocess.run(
-            [RCLONE_CMD, *args],
+            [_rclone_executable(), *args],
             capture_output=True,
             text=True,
             timeout=timeout,

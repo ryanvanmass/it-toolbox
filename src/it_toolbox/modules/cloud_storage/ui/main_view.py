@@ -1,5 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QMenu,
     QMessageBox,
     QTabWidget,
@@ -9,7 +10,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, rclone_client
+from it_toolbox.core import async_utils, rclone_client, settings
 from it_toolbox.modules.cloud_storage.models import RemoteConfig
 from it_toolbox.modules.cloud_storage.ui.add_remote_dialog import AddRemoteDialog
 from it_toolbox.widgets.rclone_browser_widget import RcloneBrowserWidget
@@ -70,8 +71,27 @@ class CloudStorageView(QWidget):
         sidebar — see CloudStorageModule.build_context_menu().
         """
         menu = QMenu(parent)
+        override = settings.load_rclone_path()
+        label = "Change rclone Location…" if override else "Set rclone Location…"
+        menu.addAction(label).triggered.connect(self._on_set_rclone_path_clicked)
+        if override:
+            menu.addAction("Use rclone from PATH").triggered.connect(
+                self._on_clear_rclone_path_clicked
+            )
         menu.addAction("Refresh").triggered.connect(self.refresh_remotes)
         return menu
+
+    def _on_set_rclone_path_clicked(self) -> None:
+        current = settings.load_rclone_path() or ""
+        path, _ = QFileDialog.getOpenFileName(self, "Locate the rclone executable", current)
+        if not path:
+            return
+        settings.save_rclone_path(path)
+        self.refresh_remotes()
+
+    def _on_clear_rclone_path_clicked(self) -> None:
+        settings.save_rclone_path(None)
+        self.refresh_remotes()
 
     # -- Remotes tree ---------------------------------------------------
 
