@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -68,9 +68,12 @@ HOST_ROLE = Qt.ItemDataRole.UserRole + 7
 VM_ROLE = Qt.ItemDataRole.UserRole + 8
 IS_MANUAL_ROOT_ROLE = Qt.ItemDataRole.UserRole + 9
 MANUAL_CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 10
+IS_LOADING_ROLE = Qt.ItemDataRole.UserRole + 11
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
+
+GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it sooner"
 
 
 class ConnectionManagerView(QWidget):
@@ -82,6 +85,7 @@ class ConnectionManagerView(QWidget):
         self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget] = {}
         self._next_session_id = 1
         self._all_projects: list[GcpProject] = []
+        self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
         self._manual_root_item: QTreeWidgetItem | None = None
 
@@ -117,6 +121,15 @@ class ConnectionManagerView(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._stop_all_sessions)
+
+        # Keeps selected projects' VMs/buckets from going stale between
+        # visits — runs regardless of sign-in state (no-ops via
+        # _refresh_all_gcp_data's own guard until there's data to refresh)
+        # so it's already running by the time there is.
+        self._gcp_refresh_timer = QTimer(self)
+        self._gcp_refresh_timer.setInterval(GCP_REFRESH_INTERVAL_MS)
+        self._gcp_refresh_timer.timeout.connect(self._refresh_all_gcp_data)
+        self._gcp_refresh_timer.start()
 
         # QEMU hosts and manually-configured connections are independent
         # connection families — shown regardless of GCP sign-in state,
@@ -242,6 +255,7 @@ class ConnectionManagerView(QWidget):
         gcp_category = QTreeWidgetItem(["GCP"])
         gcp_category.setData(0, IS_GCP_ROOT_ROLE, True)
         self._tree.addTopLevelItem(gcp_category)
+        self._gcp_root_item = gcp_category
         for project in visible:
             item = QTreeWidgetItem([project.display_name or project.project_id])
             item.setData(0, PROJECT_ID_ROLE, project.project_id)
@@ -254,6 +268,10 @@ class ConnectionManagerView(QWidget):
                 category_item.setData(0, CHILDREN_LOADED_ROLE, False)
                 category_item.addChild(QTreeWidgetItem(["Loading…"]))
                 item.addChild(category_item)
+                # Pre-load in the background so the data is already there
+                # (or visibly loading) the first time the user expands it,
+                # rather than waiting for that expand to even start fetching.
+                self._load_category(category_item, project.project_id, category)
         gcp_category.setExpanded(True)
         self._populate_qemu_hosts()
         self._populate_manual_connections()
@@ -315,19 +333,67 @@ class ConnectionManagerView(QWidget):
         if project_id is None or category is None or already_loaded or self._account is None:
             return
 
+        self._load_category(item, project_id, category)
+
+    def _load_category(self, item: QTreeWidgetItem, project_id: str, category: str) -> None:
+        """Fetch one project's VMs or buckets and populate `item` with the
+        result. The single entry point for that fetch regardless of what
+        triggered it — first expand, background pre-load, a periodic
+        refresh, or a manual "Refresh" — so all four naturally share the
+        same in-flight guard (IS_LOADING_ROLE) instead of each needing
+        their own bookkeeping.
+        """
+        if item.data(0, IS_LOADING_ROLE):
+            # Already loading (or still loading from a previous trigger) —
+            # letting a second call through here risks a slow stale
+            # request's error arriving *after* a fresh success and
+            # clobbering good data with an error message.
+            return
         item.setData(0, CHILDREN_LOADED_ROLE, True)
+        item.setData(0, IS_LOADING_ROLE, True)
+
         if category == CATEGORY_VMS:
             async_utils.run_in_background(
                 lambda: gcp_client.list_instances(gcp_auth.get_credentials(), project_id),
-                on_result=lambda instances: self._populate_instances(item, instances),
-                on_error=lambda error: self._populate_category_error(item, error),
+                on_result=lambda instances: self._on_category_loaded(
+                    item, self._populate_instances, instances
+                ),
+                on_error=lambda error: self._on_category_load_failed(item, error),
             )
         elif category == CATEGORY_BUCKETS:
             async_utils.run_in_background(
                 lambda: gcp_client.list_buckets(gcp_auth.get_credentials(), project_id),
-                on_result=lambda buckets: self._populate_buckets(item, buckets),
-                on_error=lambda error: self._populate_category_error(item, error),
+                on_result=lambda buckets: self._on_category_loaded(
+                    item, self._populate_buckets, buckets
+                ),
+                on_error=lambda error: self._on_category_load_failed(item, error),
             )
+
+    def _on_category_loaded(self, item: QTreeWidgetItem, populate, data) -> None:
+        item.setData(0, IS_LOADING_ROLE, False)
+        populate(item, data)
+
+    def _on_category_load_failed(self, item: QTreeWidgetItem, error: Exception) -> None:
+        item.setData(0, IS_LOADING_ROLE, False)
+        self._populate_category_error(item, error)
+
+    def _refresh_project(self, project_item: QTreeWidgetItem) -> None:
+        """Re-fetch both of a project's categories — used by the manual
+        "Refresh" context-menu action and, per-project, by the periodic
+        refresh timer.
+        """
+        project_id = project_item.data(0, PROJECT_ID_ROLE)
+        for i in range(project_item.childCount()):
+            category_item = project_item.child(i)
+            category = category_item.data(0, CATEGORY_ROLE)
+            if category is not None:
+                self._load_category(category_item, project_id, category)
+
+    def _refresh_all_gcp_data(self) -> None:
+        if self._account is None or self._gcp_root_item is None:
+            return
+        for i in range(self._gcp_root_item.childCount()):
+            self._refresh_project(self._gcp_root_item.child(i))
 
     def _populate_instances(self, category_item: QTreeWidgetItem, instances: list[Instance]) -> None:
         category_item.takeChildren()
@@ -502,6 +568,19 @@ class ConnectionManagerView(QWidget):
         manual_connection = item.data(0, MANUAL_CONNECTION_ROLE)
         if manual_connection is not None:
             self._show_manual_connection_context_menu(pos, manual_connection)
+            return
+
+        # A GCP project node — PROJECT_ID_ROLE set, but neither a VMs/
+        # Buckets category (CATEGORY_ROLE) nor an instance leaf
+        # (INSTANCE_ROLE).
+        if (
+            item.data(0, PROJECT_ID_ROLE) is not None
+            and item.data(0, CATEGORY_ROLE) is None
+            and item.data(0, INSTANCE_ROLE) is None
+        ):
+            menu = QMenu(self)
+            menu.addAction("Refresh").triggered.connect(lambda: self._refresh_project(item))
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
             return
 
         instance = item.data(0, INSTANCE_ROLE)

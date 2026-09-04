@@ -26,7 +26,9 @@ class _FakeTunnel:
         self.stopped = True
 
 
-def _make_view(qtbot, monkeypatch, qemu_hosts=(), manual_connections=()):
+def _make_view(
+    qtbot, monkeypatch, qemu_hosts=(), manual_connections=(), instances=(), buckets=()
+):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
@@ -41,6 +43,24 @@ def _make_view(qtbot, monkeypatch, qemu_hosts=(), manual_connections=()):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.settings.load_manual_connections",
         lambda: list(manual_connections),
+    )
+    # _apply_project_selection now pre-loads every project's VMs/buckets
+    # in the background immediately (not just on first expand) — stub
+    # these out (get_credentials included: list_instances/list_buckets
+    # are mocked below, but the lambda that calls them still evaluates a
+    # real gcp_auth.get_credentials() first, which fails fast without a
+    # real gcloud on PATH) so tests don't fire real, un-mocked API calls.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.get_credentials",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_client.list_instances",
+        lambda creds, project_id: list(instances),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_client.list_buckets",
+        lambda creds, project_id: list(buckets),
     )
     view = ConnectionManagerView()
     qtbot.addWidget(view)
@@ -90,32 +110,40 @@ def test_project_has_vms_and_buckets_categories(qtbot, monkeypatch):
 
 
 def test_expanding_buckets_category_populates_bucket_items(qtbot, monkeypatch):
+    # "Expanding" is a misnomer now that categories pre-load in the
+    # background regardless of expand state — this exercises that real
+    # pre-load pipeline end-to-end (mocked gcp_client, real async
+    # round-trip) rather than calling _populate_buckets directly.
     from it_toolbox.modules.connection_manager.ui.main_view import BUCKET_ROLE
 
-    view = _make_view(qtbot, monkeypatch)
+    bucket = GcsBucket(name="my-bucket", project_id="p1")
+    view = _make_view(qtbot, monkeypatch, buckets=[bucket])
     view._account = "me@example.com"
     view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
     view._apply_project_selection({"p1"})
     buckets_item = view._tree.topLevelItem(0).child(0).child(1)
 
-    bucket = GcsBucket(name="my-bucket", project_id="p1")
-    view._populate_buckets(buckets_item, [bucket])
-
+    # childCount() == 1 is true both before (the "Loading…" placeholder)
+    # and after (the real bucket) the async pre-load resolves — wait for
+    # the actual text instead of just a count.
+    qtbot.waitUntil(lambda: buckets_item.child(0).text(0) != "Loading…", timeout=2000)
     assert buckets_item.childCount() == 1
     assert buckets_item.child(0).text(0) == "my-bucket"
     assert buckets_item.child(0).data(0, BUCKET_ROLE) == bucket
 
 
 def test_expanding_vms_category_populates_instance_items(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch, instances=[instance])
     view._account = "me@example.com"
     view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
     view._apply_project_selection({"p1"})
     vms_item = view._tree.topLevelItem(0).child(0).child(0)
 
-    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
-    view._populate_instances(vms_item, [instance])
-
+    # childCount() == 1 is true both before (the "Loading…" placeholder)
+    # and after (the real instance) the async pre-load resolves — wait
+    # for the actual text instead of just a count.
+    qtbot.waitUntil(lambda: vms_item.child(0).text(0) != "Loading…", timeout=2000)
     assert vms_item.childCount() == 1
     assert vms_item.child(0).text(0) == "vm-1"
 
@@ -176,6 +204,98 @@ def test_gcp_root_item_is_marked_with_is_gcp_root_role(qtbot, monkeypatch):
 
     root = view._tree.topLevelItem(0)
     assert root.data(0, IS_GCP_ROOT_ROLE) is True
+
+
+def test_selecting_projects_preloads_vms_and_buckets_without_expanding(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    # _make_view's own default gcp_client stubs must be set up first —
+    # applying our call-counting mocks before it would just get
+    # overwritten by _make_view's own monkeypatch.setattr calls.
+    view = _make_view(qtbot, monkeypatch)
+
+    calls = {"instances": 0, "buckets": 0}
+    monkeypatch.setattr(main_view_module.gcp_auth, "get_credentials", lambda: None)
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "list_instances",
+        lambda creds, project_id: (calls.__setitem__("instances", calls["instances"] + 1), [])[1],
+    )
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "list_buckets",
+        lambda creds, project_id: (calls.__setitem__("buckets", calls["buckets"] + 1), [])[1],
+    )
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+
+    view._apply_project_selection({"p1"})
+
+    # No itemExpanded signal ever fired — this is pre-loaded purely from
+    # applying the selection.
+    qtbot.waitUntil(lambda: calls == {"instances": 1, "buckets": 1}, timeout=2000)
+
+
+def test_load_category_skips_a_second_call_while_already_loading(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(main_view_module.gcp_auth, "get_credentials", lambda: None)
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "list_instances",
+        lambda creds, project_id: (calls.append(project_id), [])[1],
+    )
+    item = QTreeWidgetItem(["VMs"])
+
+    # Fire twice back-to-back, synchronously, before either has a chance
+    # to resolve — the second call must be a no-op given the guard.
+    view._load_category(item, "p1", main_view_module.CATEGORY_VMS)
+    view._load_category(item, "p1", main_view_module.CATEGORY_VMS)
+
+    qtbot.waitUntil(lambda: len(calls) >= 1, timeout=2000)
+    qtbot.wait(50)  # give a wrongly-unguarded second call a chance to land too
+    assert calls == ["p1"]
+
+
+def test_refresh_project_reloads_both_categories(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    instance_calls = []
+    bucket_calls = []
+    monkeypatch.setattr(main_view_module.gcp_auth, "get_credentials", lambda: None)
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "list_instances",
+        lambda creds, project_id: (instance_calls.append(project_id), [])[1],
+    )
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "list_buckets",
+        lambda creds, project_id: (bucket_calls.append(project_id), [])[1],
+    )
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    project_item = view._tree.topLevelItem(0).child(0)
+
+    qtbot.waitUntil(lambda: instance_calls == ["p1"] and bucket_calls == ["p1"], timeout=2000)
+
+    # A manual refresh re-triggers both, even though they're already loaded.
+    view._refresh_project(project_item)
+
+    qtbot.waitUntil(lambda: instance_calls == ["p1", "p1"] and bucket_calls == ["p1", "p1"], timeout=2000)
+
+
+def test_refresh_all_gcp_data_noops_when_signed_out(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._account = None
+
+    view._refresh_all_gcp_data()  # must not raise despite no tree/account
 
 
 def test_ssh_connect_embeds_terminal_and_registers_session(qtbot, monkeypatch):
