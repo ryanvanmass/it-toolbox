@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, session_launcher, settings
+from it_toolbox.core import async_utils, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.tunnel_session import BackgroundTunnel
@@ -31,6 +32,7 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
+from it_toolbox.widgets.rdp_widget import RdpWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
@@ -358,6 +360,21 @@ class ConnectionManagerView(QWidget):
                 return
             username = username.strip() or None
 
+        password = None
+        if kind == "rdp":
+            # Not persisted anywhere (no keyring integration in this app) —
+            # the embedded RDP client needs it upfront for the NLA
+            # handshake, unlike external mstsc/xfreerdp which prompt in
+            # their own window.
+            password, ok = QInputDialog.getText(
+                self,
+                "Password",
+                f"Password for {username or 'RDP'}@{instance.name}:",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok:
+                return
+
         self._connect(
             display_name=instance.name,
             project_id=instance.project_id,
@@ -366,6 +383,7 @@ class ConnectionManagerView(QWidget):
             network_interface=instance.network_interface,
             kind=kind,
             username=username,
+            password=password,
         )
 
     # -- Connect: tunnel, then embed SSH or launch external RDP ---------------
@@ -379,6 +397,7 @@ class ConnectionManagerView(QWidget):
         network_interface: str,
         kind: str,
         username: str | None,
+        password: str | None = None,
     ) -> None:
         target = IapTunnelTarget(
             project=project_id,
@@ -391,7 +410,9 @@ class ConnectionManagerView(QWidget):
         self._status_label.setText(f"Connecting to {display_name} via {kind.upper()}…")
         async_utils.run_in_background(
             lambda: self._start_tunnel(target),
-            on_result=lambda tunnel: self._on_tunnel_ready(tunnel, display_name, kind, username),
+            on_result=lambda tunnel: self._on_tunnel_ready(
+                tunnel, display_name, kind, username, password
+            ),
             on_error=self._on_session_error,
         )
 
@@ -404,7 +425,12 @@ class ConnectionManagerView(QWidget):
         return tunnel
 
     def _on_tunnel_ready(
-        self, tunnel: BackgroundTunnel, display_name: str, kind: str, username: str | None
+        self,
+        tunnel: BackgroundTunnel,
+        display_name: str,
+        kind: str,
+        username: str | None,
+        password: str | None = None,
     ) -> None:
         self._status_label.setText(f"Signed in as {self._account}")
 
@@ -415,13 +441,7 @@ class ConnectionManagerView(QWidget):
         if kind == "ssh":
             self._embed_ssh(session_id, display_name, tunnel.port, username)
         else:
-            try:
-                session_launcher.launch_rdp("127.0.0.1", tunnel.port, username)
-            except session_launcher.SessionLaunchError as exc:
-                self._active_sessions.pop(session_id, None)
-                tunnel.stop()
-                QMessageBox.warning(self, "Connection failed", str(exc))
-                return
+            self._embed_rdp(session_id, display_name, tunnel.port, username, password)
 
         label = f"{display_name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}"
         self._active_sessions_dialog.add_session(session_id, label)
@@ -434,6 +454,16 @@ class ConnectionManagerView(QWidget):
         index = self._tabs.addTab(terminal, display_name)
         self._tabs.setCurrentIndex(index)
         terminal.setFocus()
+
+    def _embed_rdp(
+        self, session_id: int, display_name: str, port: int, username: str | None, password: str | None
+    ) -> None:
+        rdp = RdpWidget("127.0.0.1", port, username or "", password or "")
+        rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
+        self._session_tab_widgets[session_id] = rdp
+        index = self._tabs.addTab(rdp, display_name)
+        self._tabs.setCurrentIndex(index)
+        rdp.setFocus()
 
     def _on_session_tab_changed(self, index: int) -> None:
         widget = self._tabs.widget(index)
