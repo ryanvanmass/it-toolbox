@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -54,17 +53,20 @@ class RcloneBrowserWidget(QWidget):
         self._breadcrumb_layout = QHBoxLayout()
         self._breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
         self._breadcrumb_layout.setSpacing(2)
-        self._upload_button = QToolButton()
-        self._upload_button.setText("Upload")
-        self._upload_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._upload_menu = QMenu(self._upload_button)
+        # A plain QPushButton (not QToolButton) popping the menu itself on
+        # click — QToolButton's default style renders noticeably smaller/
+        # flatter than QPushButton in most styles, which looked out of
+        # place next to Refresh; this way "Upload" matches every other
+        # button in the bar exactly.
+        self._upload_button = QPushButton("Upload ▾")
+        self._upload_button.clicked.connect(self._on_upload_button_clicked)
+        self._upload_menu = QMenu(self)
         self._upload_menu.addAction("Upload Files…").triggered.connect(
             self._on_upload_files_clicked
         )
         self._upload_menu.addAction("Upload Folder…").triggered.connect(
             self._on_upload_folder_clicked
         )
-        self._upload_button.setMenu(self._upload_menu)
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self._reload)
 
@@ -181,6 +183,9 @@ class RcloneBrowserWidget(QWidget):
             self._set_status("")
         except RuntimeError:
             pass  # tab was closed before the download finished
+
+    def _on_upload_button_clicked(self) -> None:
+        self._upload_menu.exec(self._upload_button.mapToGlobal(self._upload_button.rect().bottomLeft()))
 
     def _on_upload_files_clicked(self) -> None:
         local_paths, _ = QFileDialog.getOpenFileNames(self, "Upload Files")

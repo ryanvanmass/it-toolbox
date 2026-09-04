@@ -134,7 +134,7 @@ def test_close_session_is_a_harmless_noop(qtbot, monkeypatch):
 def test_upload_button_offers_files_and_folder_in_one_dropdown(qtbot, monkeypatch):
     browser = _make_browser(qtbot, monkeypatch, {"": []})
 
-    assert browser._upload_button.text() == "Upload"
+    assert browser._upload_button.text() == "Upload ▾"
     assert [action.text() for action in browser._upload_menu.actions()] == [
         "Upload Files…",
         "Upload Folder…",
