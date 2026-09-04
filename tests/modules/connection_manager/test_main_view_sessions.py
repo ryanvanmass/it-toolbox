@@ -6,6 +6,7 @@ from it_toolbox.modules.connection_manager.models import (
     GcpProject,
     GcsBucket,
     Instance,
+    ManualConnection,
     QemuHost,
     QemuVm,
 )
@@ -25,17 +26,21 @@ class _FakeTunnel:
         self.stopped = True
 
 
-def _make_view(qtbot, monkeypatch, qemu_hosts=()):
+def _make_view(qtbot, monkeypatch, qemu_hosts=(), manual_connections=()):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
     )
-    # QEMU hosts are loaded unconditionally (independent of GCP sign-in) —
-    # stub this out so tests don't depend on this machine's real
-    # qemu_hosts.json.
+    # QEMU hosts and manual connections are loaded unconditionally
+    # (independent of GCP sign-in) — stub both out so tests don't depend
+    # on this machine's real qemu_hosts.json/manual_connections.json.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.settings.load_qemu_hosts",
         lambda: list(qemu_hosts),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings.load_manual_connections",
+        lambda: list(manual_connections),
     )
     view = ConnectionManagerView()
     qtbot.addWidget(view)
@@ -48,9 +53,9 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
 
     view._apply_project_selection({"p1"})
 
-    # GCP and QEMU are independent top-level roots (QEMU host list is
-    # empty here, but the root itself is always present).
-    assert view._tree.topLevelItemCount() == 2
+    # GCP, QEMU, and Manual are independent top-level roots (QEMU/Manual
+    # lists are empty here, but the roots themselves are always present).
+    assert view._tree.topLevelItemCount() == 3
     gcp_category = view._tree.topLevelItem(0)
     assert gcp_category.text(0) == "GCP"
     assert gcp_category.isExpanded()
@@ -60,6 +65,9 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
 
     qemu_category = view._tree.topLevelItem(1)
     assert qemu_category.text(0) == "QEMU"
+
+    manual_category = view._tree.topLevelItem(2)
+    assert manual_category.text(0) == "Manual"
 
 
 def test_project_has_vms_and_buckets_categories(qtbot, monkeypatch):
@@ -288,7 +296,7 @@ def test_populate_qemu_hosts_creates_lazy_loading_host_items(qtbot, monkeypatch)
     host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
     view = _make_view(qtbot, monkeypatch, qemu_hosts=[{"name": host.name, "uri": host.uri}])
 
-    assert view._tree.topLevelItemCount() == 1  # gcloud unavailable, so only QEMU
+    assert view._tree.topLevelItemCount() == 2  # gcloud unavailable, so QEMU + Manual only
     qemu_root = view._tree.topLevelItem(0)
     assert qemu_root.text(0) == "QEMU"
     assert qemu_root.childCount() == 1
@@ -451,3 +459,86 @@ def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
     view._save_qemu_hosts([host])
 
     assert saved["hosts"] == [{"name": "lab", "uri": "qemu+ssh://user@lab-host/system"}]
+
+
+# -- Manually-configured RDP/SSH connections --------------------------------
+
+
+def test_populate_manual_connections_creates_items(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import MANUAL_CONNECTION_ROLE
+
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=3389, kind="rdp")
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        manual_connections=[
+            {"name": connection.name, "host": connection.host, "port": connection.port, "kind": connection.kind}
+        ],
+    )
+
+    manual_root = None
+    for i in range(view._tree.topLevelItemCount()):
+        if view._tree.topLevelItem(i).text(0) == "Manual":
+            manual_root = view._tree.topLevelItem(i)
+    assert manual_root is not None
+    assert manual_root.childCount() == 1
+    item = manual_root.child(0)
+    assert item.text(0) == "my-box"
+    assert item.data(0, MANUAL_CONNECTION_ROLE) == connection
+
+
+def test_manual_ssh_connect_embeds_terminal_without_tunnel(qtbot, monkeypatch):
+    # No tunnel is involved for a manual connection — it dials host:port
+    # directly, so _active_sessions must stay empty (nothing to stop on
+    # disconnect) while _session_tab_widgets still tracks the tab.
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=2222, kind="ssh", username="alice")
+
+    view._start_session_from_manual_connection(connection)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "my-box"
+    assert view._active_sessions == {}
+    assert len(view._session_tab_widgets) == 1
+
+
+def test_manual_rdp_connect_embeds_widget_without_tunnel(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("secret", True))
+    )
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=3389, kind="rdp", username="alice")
+
+    view._start_session_from_manual_connection(connection)
+
+    assert view._tabs.count() == 1
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port, widget.username, widget.password) == (
+        "10.0.0.5",
+        3389,
+        "alice",
+        "secret",
+    )
+    assert view._active_sessions == {}
+
+
+def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_manual_connections",
+        lambda connections: saved.setdefault("connections", connections),
+    )
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=3389, kind="rdp", username="alice")
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_manual_connections([connection])
+
+    assert saved["connections"] == [
+        {"name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice"}
+    ]
