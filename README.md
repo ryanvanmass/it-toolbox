@@ -20,6 +20,11 @@ connection manager for RDP, SSH, and Cloud Storage.
 - **SSH**, tunneled over IAP, with an embedded terminal (`pyte` +
   `pywinpty`/`ptyprocess`).
 - **GCS bucket browsing** per project, rclone-browser style.
+- **Shell Launcher** — a separate module (no GCP account needed) that
+  finds shells installed on the local machine (bash/zsh/fish/etc. on
+  Linux/macOS; cmd, PowerShell, Git Bash, and installed WSL distros on
+  Windows) and launches any of them in the same embedded terminal used
+  for SSH.
 
 ## Requirements
 
@@ -62,8 +67,8 @@ Project layout:
   embedded RDP client's ctypes layer), independently testable/runnable
   without any UI.
 - `widgets/` — the Qt-aware layer built on top of `core/`.
-- `modules/` — top-level app features (currently: Connection Manager),
-  each registered with the app shell in `modules/registry.py`.
+- `modules/` — top-level app features (Connection Manager, Shell
+  Launcher), each registered with the app shell in `modules/registry.py`.
 
 See `docs/` for deeper write-ups of specific subsystems (currently:
 the embedded RDP client's status and the Windows FreeRDP build steps).
