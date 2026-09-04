@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 from it_toolbox.app import MainWindow
 
 
@@ -37,3 +40,43 @@ def test_module_context_menu_has_default_username_and_active_sessions(qtbot, mon
         "Set Default Username…",
         "View Active Sessions…",
     ]
+
+
+def test_app_imports_and_constructs_without_pygobject_installed():
+    """Regression test for a real bug: main_view.py used to import
+    SpiceWidget unconditionally at module load, which pulls in PyGObject
+    (`gi`) — a dependency pyproject.toml only installs on
+    sys_platform == "linux". That crashed the *entire app* at startup on
+    Windows (confirmed there directly), not just the QEMU/SPICE feature.
+
+    Runs in a real subprocess with `gi` import blocked, mirroring exactly
+    what "gi isn't installed" looks like — isolated so the simulated
+    missing-module state can't leak from/into other tests via Python's
+    module cache.
+    """
+    script = """
+import builtins
+real_import = builtins.__import__
+def fake_import(name, *args, **kwargs):
+    if name == "gi" or name.startswith("gi."):
+        raise ImportError(f"No module named {name!r}")
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = fake_import
+
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+
+from it_toolbox.app import MainWindow
+MainWindow()
+
+import it_toolbox.modules.connection_manager.ui.main_view as mv
+assert mv.SpiceWidget is None
+print("OK")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
