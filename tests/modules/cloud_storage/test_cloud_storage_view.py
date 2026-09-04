@@ -32,15 +32,33 @@ def test_remotes_root_is_the_only_top_level_item(qtbot, monkeypatch):
     assert root.isExpanded()
 
 
-def test_configured_remotes_populate_under_the_root(qtbot, monkeypatch):
-    remotes = [RemoteConfig(name="myBucket", type="s3"), RemoteConfig(name="myLocal", type="local")]
+def test_remotes_are_grouped_by_type(qtbot, monkeypatch):
+    remotes = [
+        RemoteConfig(name="myBucket", type="s3"),
+        RemoteConfig(name="myLocal", type="local"),
+        RemoteConfig(name="otherBucket", type="s3"),
+    ]
     view = _make_view(qtbot, monkeypatch, remotes=remotes)
 
     root = view._tree.topLevelItem(0)
     qtbot.waitUntil(lambda: root.childCount() == 2, timeout=1000)
-    assert root.child(0).text(0) == "myBucket (s3)"
-    assert root.child(0).data(0, REMOTE_ROLE) == remotes[0]
-    assert root.child(1).text(0) == "myLocal (local)"
+
+    # Type categories sorted alphabetically ("local" before "s3").
+    local_category = root.child(0)
+    s3_category = root.child(1)
+    assert local_category.text(0) == "local"
+    assert s3_category.text(0) == "s3"
+    assert local_category.isExpanded()
+
+    assert local_category.childCount() == 1
+    assert local_category.child(0).text(0) == "myLocal"
+    assert local_category.child(0).data(0, REMOTE_ROLE) == remotes[1]
+
+    # Remotes within a type category keep list_remotes()'s name order.
+    assert [s3_category.child(i).text(0) for i in range(s3_category.childCount())] == [
+        "myBucket",
+        "otherBucket",
+    ]
 
 
 def test_refresh_repopulates_the_tree(qtbot, monkeypatch):
@@ -145,12 +163,14 @@ def test_double_clicking_a_remote_opens_a_browser_tab(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, remotes=remotes)
     root = view._tree.topLevelItem(0)
     qtbot.waitUntil(lambda: root.childCount() == 1, timeout=1000)
+    category = root.child(0)
+    qtbot.waitUntil(lambda: category.childCount() == 1, timeout=1000)
     monkeypatch.setattr(
         "it_toolbox.widgets.rclone_browser_widget.rclone_client.list_directory",
         lambda remote, path: [],
     )
 
-    view._on_tree_item_double_clicked(root.child(0), 0)
+    view._on_tree_item_double_clicked(category.child(0), 0)
 
     assert view._tabs.count() == 1
     assert view._tabs.tabText(0) == "myLocal"
@@ -189,6 +209,8 @@ def test_removing_a_remote_deletes_it_and_refreshes(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, remotes=remotes)
     root = view._tree.topLevelItem(0)
     qtbot.waitUntil(lambda: root.childCount() == 1, timeout=1000)
+    category = root.child(0)
+    qtbot.waitUntil(lambda: category.childCount() == 1, timeout=1000)
 
     deleted = []
     monkeypatch.setattr(
@@ -201,7 +223,7 @@ def test_removing_a_remote_deletes_it_and_refreshes(qtbot, monkeypatch):
     )
     remotes.clear()
 
-    view._remove_remote(root.child(0).data(0, REMOTE_ROLE))
+    view._remove_remote(category.child(0).data(0, REMOTE_ROLE))
 
     qtbot.waitUntil(lambda: deleted == ["myLocal"], timeout=1000)
     qtbot.waitUntil(lambda: root.childCount() == 0, timeout=1000)

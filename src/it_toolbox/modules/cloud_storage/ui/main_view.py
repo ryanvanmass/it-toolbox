@@ -111,10 +111,20 @@ class CloudStorageView(QWidget):
 
     def _populate_remotes(self, remotes: list[RemoteConfig]) -> None:
         self._remotes_root.takeChildren()
+        # list_remotes() already sorts by name case-insensitively, so
+        # grouping preserves that order within each type's children —
+        # only the type-category order below needs its own sort.
+        by_type: dict[str, list[RemoteConfig]] = {}
         for remote in remotes:
-            item = QTreeWidgetItem([f"{remote.name} ({remote.type})"])
-            item.setData(0, REMOTE_ROLE, remote)
-            self._remotes_root.addChild(item)
+            by_type.setdefault(remote.type, []).append(remote)
+        for remote_type in sorted(by_type, key=str.lower):
+            category_item = QTreeWidgetItem([remote_type])
+            self._remotes_root.addChild(category_item)
+            category_item.setExpanded(True)
+            for remote in by_type[remote_type]:
+                item = QTreeWidgetItem([remote.name])
+                item.setData(0, REMOTE_ROLE, remote)
+                category_item.addChild(item)
 
     def _on_load_error(self, error: Exception) -> None:
         QMessageBox.warning(self, "Failed to load remotes", str(error))
