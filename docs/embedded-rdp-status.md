@@ -235,42 +235,63 @@ tab-embedded `RdpWidget`) — both confirm the pending resize is now
 correctly replayed and the final frame lands at the exact requested
 size, with no manual resize needed.
 
-### Follow-up: whitespace around the (correctly-sized) image
+### Follow-up: whitespace around the (correctly-sized) image — real root cause
 
-After the fix above, the *stretching* was gone, but a real Windows
-retest turned up a new symptom: whitespace along the bottom/right of an
-otherwise correctly-rendered session — i.e. the image itself was fine,
-but `RdpWidget` was rendering smaller than the tab actually gives it.
+After the fix above, the *stretching* was gone, but a real retest (on
+this project's own Linux dev box, reproduced directly, not just on
+Windows) turned up a new symptom: whitespace along the bottom/right of
+an otherwise correctly-rendered session.
 
-Root cause: `RdpWidget.sizeHint()` returns the *live remote image's*
-native pixel size, and the widget never declared a size policy —
-QWidget's default is `Preferred`/`Preferred` in both directions, which
-lets a layout shrink a widget down to its sizeHint instead of always
-filling available space. `TerminalWidget` (SSH's tab-page widget, never
-reported to have this problem) sets no custom sizeHint and no size
-policy either, so it just takes whatever the tab gives it — `RdpWidget`
-is the one widget in this app that overrides sizeHint, and until now
-the one place that needed an explicit `Expanding` policy to stop that
-hint from ever shrinking it below the tab's real content area (the
-displayed image already stretches to fill self.rect() regardless of
-its native size — see paintEvent — so there was never a reason for the
-widget to render any smaller than its container allows).
+First hypothesis (**wrong**, kept below only as a lesson): that
+`RdpWidget.sizeHint()` returning the live image's native size, combined
+with no explicit size policy, let some container shrink the widget
+below the tab's real content area. Debug logging
+(`[RDP-DEBUG]` prints temporarily added to `resizeEvent`/
+`_send_resize_request`/`_on_frame_ready`, since removed) disproved this
+immediately: at the moment the whitespace was visible, `widget size`,
+`image size`, and the parent `QStackedWidget`'s size were all *identical*
+(2302x1285) — there was no layout shrink at all. The `Expanding` size
+policy added for this hypothesis is harmless and stays (a widget whose
+paintEvent always fills `self.rect()` regardless of image size should
+never be shrunk by its own sizeHint on principle), but it was not the
+fix for this bug.
 
-Fix: `RdpWidget.__init__` now calls
-`setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)`.
-sizeHint() is left as-is (still useful context for a layout choosing
-between competing hints) — only the "shrink to fit the hint" behavior
-is what needed to stop.
+**Real root cause**, found by then sampling actual pixel data instead
+of just geometry: the image buffer was genuinely the right size, but
+the newly-*exposed* region (the difference between the old small
+default resolution and the new, correctly-negotiated large one) was
+solid black — never actually painted. A `request_resize` only
+reallocates the local GDI buffer and tells the server (via `disp`) the
+desktop is now this size; it does not, on its own, make the server
+*resend bitmap data* for the region that resize just revealed. RDP
+servers only proactively (re)send content that has changed, and static
+desktop wallpaper the client has simply never seen before doesn't
+count as "changed" from the server's perspective — so the newly-larger
+canvas stays whatever the local buffer was zero-initialized to (black)
+until something else (e.g. minimizing/restoring the window, which
+naturally triggers a full server-side repaint for unrelated reasons)
+happens to paint over it. This is exactly why "force a dynamic
+refresh" fixed it manually.
 
-**Not yet re-verified against a real server** — the exact trigger
-condition for the shrink (almost certainly the very first, smaller
-default-resolution frame landing before the resize race above
-resolves, and some container in the real Windows app honoring that
-transient sizeHint) didn't reproduce in this environment's Linux/X11
-layout stack, so this fix is reasoned from the size-policy mismatch
-rather than a locally-reproduced before/after. Needs the same
-maximized-window retest as above, watching specifically for whitespace
-this time.
+Fix: after every successful resize, `FreeRdpSession._apply_resize` now
+also sends a **Client Refresh Rect PDU** for the full new canvas —
+`update->RefreshRect(context, 1, &rect)` (`freerdp/settings_keys.h`'s
+`FreeRDP_RefreshRect` capability, value `2306`, added to
+`_configure_settings` alongside the existing display-control bools;
+`RECTANGLE_16` is `{left, top, right, bottom}` as `uint16`s, from the
+same real FreeRDP3 headers as every other hand-written struct in this
+module) — explicitly asking the server to redraw everything, instead of
+waiting on an incidental event to do it for us.
+
+**Verified against a real server (2026-09-04)**, at the pixel level,
+not just geometry: sampled the actual BGRX buffer's bottom-right
+quadrant (the region the bug report showed as black) before and after
+the fix. Before: entirely black. After: real desktop content
+throughout — confirmed both directly against `core/rdp/` (a raw resize
+to 2302x1285, matching the real bug report's dimensions) and through
+the full real production path (`ConnectionManagerView`'s
+manual-connection flow, a real maximized `MainWindow`, a real
+tab-embedded `RdpWidget`, sampled via the actual rendered `QImage`).
 
 ## Clipboard sync — attempted, reverted, worth knowing before retrying
 
@@ -311,9 +332,12 @@ trial-and-error:
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
 - Clipboard sync (see above) — reverted, not on this branch.
-- The pending-resize race fix (2026-09-04) is now verified against a
-  real server; its whitespace follow-up fix (same date, size policy)
-  is not — needs a real Windows maximized-window retest.
+- Both 2026-09-04 fixes (pending-resize race, and the Refresh Rect PDU
+  for the whitespace bug) are now verified against a real server,
+  including at the pixel level for the whitespace one. Still worth a
+  real Windows retest of the full original repro (maximize, connect,
+  confirm no stretch and no whitespace from the first frame) since all
+  the live verification above happened on Linux.
 - Everything else verified so far has been manual smoke-testing (the
   CLI harness and throwaway Qt scripts), not automated tests — pytest
   coverage for `core/rdp/` itself is now limited to the one fix above

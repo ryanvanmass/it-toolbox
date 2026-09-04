@@ -45,6 +45,9 @@ from it_toolbox.core.rdp._freerdp3_bindings import (
 from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_s_wPubSub as WPubSub,
 )
+from it_toolbox.core.rdp._freerdp3_bindings import (
+    struct_RECTANGLE_16 as Rectangle16,
+)
 from it_toolbox.core.rdp.disp import DispClientContext, DisplayChannel
 
 RDP_CLIENT_INTERFACE_VERSION = 1  # freerdp/client.h
@@ -61,6 +64,7 @@ SETTING_NLA_SECURITY = 1089  # FreeRDP_Settings_Keys_Bool
 SETTING_RDP_SECURITY = 1090  # FreeRDP_Settings_Keys_Bool
 SETTING_IGNORE_CERTIFICATE = 1408  # FreeRDP_Settings_Keys_Bool
 SETTING_DYNAMIC_RESOLUTION_UPDATE = 1558  # FreeRDP_Settings_Keys_Bool
+SETTING_REFRESH_RECT = 2306  # FreeRDP_Settings_Keys_Bool
 SETTING_SUPPORT_DISPLAY_CONTROL = 5185  # FreeRDP_Settings_Keys_Bool
 
 # freerdp/codec/color.h — FREERDP_PIXEL_FORMAT(32, TYPE_BGRA, a=0, r=8, g=8, b=8).
@@ -307,6 +311,7 @@ def _configure_settings(
     _core_lib.freerdp_settings_set_bool(settings, SETTING_RDP_SECURITY, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_SUPPORT_DISPLAY_CONTROL, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_DYNAMIC_RESOLUTION_UPDATE, 1)
+    _core_lib.freerdp_settings_set_bool(settings, SETTING_REFRESH_RECT, 1)
 
 
 def _raise_last_error(context: ctypes.POINTER(RdpContext), prefix: str) -> None:
@@ -422,7 +427,6 @@ class FreeRdpSession:
         local framebuffer to match. Call only from the thread driving the
         connection (see rdp_session_worker.py's _drain_input_queue)."""
         if self._context is None:
-            print(f"[RDP-DEBUG] request_resize({width}x{height}): no context, ignored", flush=True)
             return
         if self.display._context is None:
             # "disp" hasn't bound yet (see _on_channel_connected) — no
@@ -433,25 +437,36 @@ class FreeRdpSession:
             # cropped/corrupted display instead of just not resizing yet.
             # Remember the request and replay it once the channel binds,
             # rather than dropping it on the floor.
-            print(f"[RDP-DEBUG] request_resize({width}x{height}): disp not bound yet, deferring", flush=True)
             self._pending_resize = (width, height)
             return
-        print(f"[RDP-DEBUG] request_resize({width}x{height}): applying now", flush=True)
         self._apply_resize(width, height)
 
     def _apply_resize(self, width: int, height: int) -> None:
         gdi = self._context.contents.gdi
-        print(
-            f"[RDP-DEBUG] _apply_resize({width}x{height}): gdi before = "
-            f"{gdi.contents.width}x{gdi.contents.height}",
-            flush=True,
-        )
         _core_lib.gdi_resize(gdi, width, height)
-        print(
-            f"[RDP-DEBUG] _apply_resize: gdi after = {gdi.contents.width}x{gdi.contents.height}",
-            flush=True,
-        )
         self.display.request_resize(width, height)
+        self._request_full_refresh(width, height)
+
+    def _request_full_refresh(self, width: int, height: int) -> None:
+        """Explicitly asks the server to redraw the entire visible area.
+
+        A resize only reallocates the *local* framebuffer and tells the
+        server the desktop is now this size — it does not, on its own,
+        make the server resend bitmap data for the newly-exposed region.
+        RDP servers only proactively (re)send content that has actually
+        changed, and the area a resize just revealed was never visible to
+        this client before, so nothing there has "changed" from the
+        server's point of view: left alone, it stays whatever the local
+        buffer was zero-initialized to (black) until something else
+        happens to trigger a full repaint. Sending a Client Refresh Rect
+        PDU (`update->RefreshRect`, `freerdp/settings_keys.h`'s
+        FreeRDP_RefreshRect capability, set in _configure_settings) for
+        the whole new canvas is the documented way to ask for that
+        repaint explicitly, instead of waiting on incidental server-side
+        events (e.g. minimizing/restoring the window) to do it for us.
+        """
+        rect = Rectangle16(left=0, top=0, right=width, bottom=height)
+        self._context.contents.update.contents.RefreshRect(self._context, 1, ctypes.byref(rect))
 
     def connect(
         self,

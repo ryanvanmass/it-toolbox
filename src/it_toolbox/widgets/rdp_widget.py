@@ -86,15 +86,6 @@ class RdpWidget(QWidget):
         self._frame_bytes = pixels  # QImage below wraps this buffer without copying it
         self._image = QImage(self._frame_bytes, width, height, stride, QImage.Format.Format_RGB32)
         self.update()
-        parent = self.parentWidget()
-        print(
-            f"[RDP-DEBUG] frame_ready: image={width}x{height} widget={self.width()}x{self.height()} "
-            f"sizeHint={self.sizeHint().width()}x{self.sizeHint().height()} "
-            f"devicePixelRatio={self.devicePixelRatioF()} "
-            f"parent={type(parent).__name__ if parent else None}"
-            f"{f' {parent.width()}x{parent.height()}' if parent else ''}",
-            flush=True,
-        )
 
     def _emit_finished_once(self) -> None:
         if not self._closing and not self._finished_emitted:
@@ -126,20 +117,9 @@ class RdpWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        print(
-            f"[RDP-DEBUG] resizeEvent: {event.oldSize().width()}x{event.oldSize().height()} "
-            f"-> {event.size().width()}x{event.size().height()} "
-            f"(self.size() reports {self.width()}x{self.height()})",
-            flush=True,
-        )
         self._resize_debounce.start()
 
     def _send_resize_request(self) -> None:
-        print(
-            f"[RDP-DEBUG] _send_resize_request firing: widget currently "
-            f"{self.width()}x{self.height()}",
-            flush=True,
-        )
         self._worker.request_resize(self.width(), self.height())
 
     def close_session(self) -> None:

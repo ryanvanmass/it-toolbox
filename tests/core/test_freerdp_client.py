@@ -89,6 +89,43 @@ def test_resize_with_no_connection_is_a_noop():
     assert session._pending_resize is None
 
 
+def test_apply_resize_also_requests_a_full_refresh(monkeypatch):
+    """Regression test for the whitespace bug: a resize alone doesn't
+    make the server repaint the newly-exposed area, so _apply_resize
+    must also ask for a full refresh — see docs/embedded-rdp-status.md's
+    "whitespace around the (correctly-sized) image" section for the full
+    story (verified for real, at the pixel level, against a live
+    server; this test only covers that the call happens, not that
+    libfreerdp3 honors it).
+    """
+
+    class _FakeGdiContents:
+        pass
+
+    class _FakeContext:
+        class contents:
+            gdi = _FakeGdiContents()
+
+    session = freerdp_client.FreeRdpSession()
+    session._context = _FakeContext()
+    calls = []
+    monkeypatch.setattr(
+        freerdp_client._core_lib,
+        "gdi_resize",
+        lambda gdi, w, h: calls.append(("gdi_resize", w, h)),
+    )
+    session.display.request_resize = lambda w, h: calls.append(("display", w, h))
+    session._request_full_refresh = lambda w, h: calls.append(("refresh", w, h))
+
+    session._apply_resize(1920, 1080)
+
+    assert calls == [
+        ("gdi_resize", 1920, 1080),
+        ("display", 1920, 1080),
+        ("refresh", 1920, 1080),
+    ]
+
+
 def test_unrelated_channel_connecting_does_not_bind_display_or_apply_resize():
     session = freerdp_client.FreeRdpSession()
     session._context = object()
