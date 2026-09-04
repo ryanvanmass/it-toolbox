@@ -60,6 +60,18 @@ from gi.repository import GObject, SpiceClientGLib  # noqa: E402 - gi.require_ve
 # DisplayChannels with higher channel-ids, which are ignored here.
 PRIMARY_DISPLAY_CHANNEL_ID = 0
 
+# SPICE wire-protocol constants (spice/enums.h's SpiceMouseButton /
+# SpiceMouseButtonMask) — verified against the upstream spice-protocol
+# header (github.com/flexVDI/spice-protocol, a mirror of the canonical
+# freedesktop.org source), not recalled from memory: button identifiers
+# are LEFT=1/MIDDLE=2/RIGHT=3/UP=4(wheel up)/DOWN=5(wheel down); the
+# button_state bitmask uses LEFT=1<<0/MIDDLE=1<<1/RIGHT=1<<2 (no mask
+# bits exist for the wheel "buttons" — they're momentary, not held).
+_MOUSE_BUTTON = {"left": 1, "middle": 2, "right": 3}
+_MOUSE_BUTTON_MASK = {"left": 1 << 0, "middle": 1 << 1, "right": 1 << 2}
+_WHEEL_UP_BUTTON = 4
+_WHEEL_DOWN_BUTTON = 5
+
 _ERROR_EVENTS = {
     SpiceClientGLib.ChannelEvent.ERROR_CONNECT,
     SpiceClientGLib.ChannelEvent.ERROR_TLS,
@@ -87,8 +99,13 @@ class SpiceSession:
         self._session = SpiceClientGLib.Session()
         self._main_channel: SpiceClientGLib.MainChannel | None = None
         self._display_channel: SpiceClientGLib.DisplayChannel | None = None
+        self._inputs_channel: SpiceClientGLib.InputsChannel | None = None
         self._connected = threading.Event()
         self._error: SpiceError | None = None
+        # Bitmask of currently-held mouse buttons — SPICE's position()/
+        # motion() calls always carry the full current button state
+        # alongside the coordinates, not just "which button changed".
+        self._button_mask: int = 0
 
         # Cached from the display-primary-create signal — see module
         # docstring for why this is read from the signal, not pulled via
@@ -160,6 +177,53 @@ class SpiceSession:
         pixels = ctypes.string_at(self._imgdata, size)
         return pixels, self._width, self._height, self._stride
 
+    # --- input: absolute position + scancode-based keyboard -------------
+    #
+    # Unlike FreeRDP, SPICE's InputsChannel has no separate "unicode text"
+    # fast path — every key goes through key_press/key_release's PC/AT
+    # scancode. A character with no entry in core/rdp/scancodes.SCANCODES
+    # (reused as-is here — same PC/AT Set 1 table, not RDP-specific) has
+    # no way to reach the guest through this channel at all; that's a real
+    # SPICE limitation, not an oversight here.
+
+    def send_mouse_move(self, x: int, y: int) -> None:
+        if self._inputs_channel is None:
+            return
+        self._inputs_channel.position(x, y, PRIMARY_DISPLAY_CHANNEL_ID, self._button_mask)
+
+    def send_mouse_button(self, button: str, down: bool) -> None:
+        if self._inputs_channel is None:
+            return
+        spice_button = _MOUSE_BUTTON.get(button)
+        mask_bit = _MOUSE_BUTTON_MASK.get(button)
+        if spice_button is None or mask_bit is None:
+            return
+        self._button_mask = (self._button_mask | mask_bit) if down else (self._button_mask & ~mask_bit)
+        if down:
+            self._inputs_channel.button_press(spice_button, self._button_mask)
+        else:
+            self._inputs_channel.button_release(spice_button, self._button_mask)
+
+    def send_mouse_wheel(self, steps: int) -> None:
+        """`steps` > 0 scrolls up, < 0 scrolls down — each step is sent as
+        an immediate press+release, matching the wheel's momentary nature
+        (there's no wheel bit in the button_state mask to hold)."""
+        if self._inputs_channel is None or steps == 0:
+            return
+        button = _WHEEL_UP_BUTTON if steps > 0 else _WHEEL_DOWN_BUTTON
+        for _ in range(abs(steps)):
+            self._inputs_channel.button_press(button, self._button_mask)
+            self._inputs_channel.button_release(button, self._button_mask)
+
+    def send_key_scancode(self, code: int, extended: bool, down: bool) -> None:
+        if self._inputs_channel is None:
+            return
+        scancode = (code | 0x100) if extended else code
+        if down:
+            self._inputs_channel.key_press(scancode)
+        else:
+            self._inputs_channel.key_release(scancode)
+
     def _on_channel_new(
         self, session: SpiceClientGLib.Session, channel: SpiceClientGLib.Channel
     ) -> None:
@@ -173,6 +237,9 @@ class SpiceSession:
             GObject.Object.connect(channel, "display-primary-create", self._on_primary_create)
             GObject.Object.connect(channel, "display-primary-destroy", self._on_primary_destroy)
             GObject.Object.connect(channel, "display-invalidate", self._on_invalidate)
+            channel.connect()
+        elif isinstance(channel, SpiceClientGLib.InputsChannel):
+            self._inputs_channel = channel
             channel.connect()
 
     def _on_main_channel_event(self, channel: SpiceClientGLib.Channel, event: int) -> None:

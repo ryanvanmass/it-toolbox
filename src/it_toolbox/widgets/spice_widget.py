@@ -4,18 +4,30 @@ docs/qemu-spice-status.md for why: SPICE has no native Qt widget, and the
 GTK one would mean embedding a foreign toolkit's window, which the
 embedded-RDP branch already ruled out doing for a similar reason).
 
-Milestone 5 scope: rendering only, mirroring RdpWidget's paintEvent/
-frame_ready/finished/close_session shape. Mouse/keyboard input forwarding
-(mirroring RdpWidget's mouse*Event/key*Event handlers) and resize support
-land in later milestones — see docs/qemu-spice-status.md's milestone
-list. Until then this is a read-only view of the VM's screen.
+Milestones 5-6 scope: rendering and mouse/keyboard input, mirroring
+RdpWidget's paintEvent/mouse*Event/key*Event/frame_ready/finished/
+close_session shape. Resize support isn't implemented yet — see
+docs/qemu-spice-status.md's milestone list.
+
+Unlike RDP, SPICE's InputsChannel has no unicode-text fast path — every
+key goes through core/rdp/scancodes.SCANCODES (reused as-is; same PC/AT
+Set 1 table), and a character with no entry there (e.g. non-US-layout
+symbols) simply can't be forwarded through this widget. See
+SpiceSession's input methods for the underlying reasoning.
 """
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from it_toolbox.core.rdp.scancodes import SCANCODES
 from it_toolbox.core.spice.spice_session_worker import SpiceSessionWorker
+
+_BUTTON_NAMES = {
+    Qt.MouseButton.LeftButton: "left",
+    Qt.MouseButton.RightButton: "right",
+    Qt.MouseButton.MiddleButton: "middle",
+}
 
 
 class SpiceWidget(QWidget):
@@ -37,6 +49,7 @@ class SpiceWidget(QWidget):
         self._closing = False  # set by close_session(); suppresses finished re-emission
         self._finished_emitted = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
 
         self._status_label = QLabel("Connecting…")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -92,3 +105,53 @@ class SpiceWidget(QWidget):
         down any session tab (terminal, RDP, ...) uniformly."""
         self._closing = True
         self._worker.stop()
+
+    # --- input: widget-space -> remote desktop-space, then forwarded ----
+
+    def _remote_pos(self, widget_pos) -> tuple[int, int]:
+        if self._image is None or self.width() == 0 or self.height() == 0:
+            return int(widget_pos.x()), int(widget_pos.y())
+        scale_x = self._image.width() / self.width()
+        scale_y = self._image.height() / self.height()
+        return int(widget_pos.x() * scale_x), int(widget_pos.y() * scale_y)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        x, y = self._remote_pos(event.position())
+        self._worker.send_mouse_move(x, y)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        button = _BUTTON_NAMES.get(event.button())
+        if button is None:
+            return
+        x, y = self._remote_pos(event.position())
+        self._worker.send_mouse_move(x, y)
+        self._worker.send_mouse_button(button, True)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        button = _BUTTON_NAMES.get(event.button())
+        if button is None:
+            return
+        x, y = self._remote_pos(event.position())
+        self._worker.send_mouse_move(x, y)
+        self._worker.send_mouse_button(button, False)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        x, y = self._remote_pos(event.position())
+        steps = event.angleDelta().y() // 120
+        if steps:
+            self._worker.send_mouse_move(x, y)
+            self._worker.send_mouse_wheel(steps)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        self._forward_key_event(event, down=True)
+
+    def keyReleaseEvent(self, event) -> None:  # noqa: N802
+        self._forward_key_event(event, down=False)
+
+    def _forward_key_event(self, event, down: bool) -> None:
+        key = Qt.Key(event.key())
+        scancode = SCANCODES.get(key)
+        if scancode is not None:
+            code, extended = scancode
+            self._worker.send_key_scancode(code, extended, down)

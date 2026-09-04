@@ -15,6 +15,13 @@ non-blocking call), not the blocking SpiceSession.connect() convenience
 wrapper the CLI smoke tests use — this thread is about to become the one
 running the loop that SpiceSession's own blocking wait depends on, so
 calling connect() here would deadlock (see its docstring).
+
+Input (send_mouse_*/send_key_scancode) is safe to call from the Qt
+thread — each call is marshaled onto the loop thread via GLib.idle_add(),
+which is thread-safe by design (unlike RdpSessionWorker's hand-rolled
+queue-plus-polling approach, needed there because FreeRDP's pump loop has
+no built-in cross-thread scheduling primitive of its own; spice-glib's
+GLib main loop already does).
 """
 
 import threading
@@ -58,6 +65,20 @@ class SpiceSessionWorker:
             self._loop.quit()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+
+    # --- input — safe to call from the Qt thread ------------------------
+
+    def send_mouse_move(self, x: int, y: int) -> None:
+        GLib.idle_add(self._session.send_mouse_move, x, y)
+
+    def send_mouse_button(self, button: str, down: bool) -> None:
+        GLib.idle_add(self._session.send_mouse_button, button, down)
+
+    def send_mouse_wheel(self, steps: int) -> None:
+        GLib.idle_add(self._session.send_mouse_wheel, steps)
+
+    def send_key_scancode(self, code: int, extended: bool, down: bool) -> None:
+        GLib.idle_add(self._session.send_key_scancode, code, extended, down)
 
     def _run(self) -> None:
         self._loop = GLib.MainLoop()

@@ -36,7 +36,7 @@ does **not** have, because it delegates the whole connection to
 that's the new work here, and it mirrors the embedded-RDP architecture
 closely enough to use as a template throughout.
 
-## What's done and verified (Milestones 1-5)
+## What's done and verified (Milestones 1-6)
 
 All of this has been tested against a real local libvirt/QEMU host
 (`qemu:///system`, a running VM called "WorkPC") — not mocked, not just
@@ -85,6 +85,26 @@ checked against docs:
    tests use (where a loop already runs on a separate thread). Rendering
    only, mirroring RDP's own Milestone 3 scope — mouse/keyboard input and
    resize are still Milestone 6.
+6. **Input** (`SpiceSession.send_mouse_*`/`send_key_scancode` +
+   `SpiceWidget` mouse/key event handlers, reusing `core/rdp/
+   scancodes.SCANCODES` as-is — same PC/AT Set 1 table). SPICE protocol
+   constants (mouse button ids and the button_state bitmask) were
+   verified against the upstream spice-protocol header, not recalled
+   from memory, and the scancode encoding for extended (0xe0-prefixed)
+   keys — drop the prefix, OR with `0x100` — against spice-glib's own
+   API reference docs. Confirmed with real, unambiguous guest-visible
+   effects, not just "the call returned success": a real right-click
+   sent through the widget opened an actual context menu at the correct
+   position, and a real Meta/Windows key press opened the guest's Start
+   Menu (proving the extended-scancode encoding specifically, since
+   getting that wrong would silently do nothing or send the wrong key).
+   Also found: `InputsChannel.motion()` takes *relative* deltas, not
+   absolute coordinates — `position()` is the absolute-coordinate call
+   `SpiceWidget` actually needs, and unlike RDP's button events SPICE's
+   `button_press`/`button_release` carry no x/y at all (position and
+   buttons are reported as separate messages), so a `position()` call is
+   sent immediately before every button/wheel event to guarantee the
+   click lands where the widget last knew the cursor to be.
 
 See the git log on this branch for the full detail behind each of these.
 
