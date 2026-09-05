@@ -1,9 +1,18 @@
 import json
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
 from platformdirs import user_data_dir
+from pyrage import IdentityError, decrypt, encrypt, ssh
 
 APP_NAME = "it-toolbox"
+
+
+class SecretDecryptionError(Exception):
+    """Raised when an encrypted-to-SSH-key secret (currently just the
+    JumpCloud API key) can't be decrypted — missing/wrong SSH key, or a
+    passphrase-protected key with no passphrase supplied.
+    """
 
 
 def data_dir() -> Path:
@@ -125,3 +134,117 @@ def save_rclone_path(rclone_path: str | None) -> None:
         path.write_text(rclone_path.strip())
     else:
         path.unlink(missing_ok=True)
+
+
+def jumpcloud_ssh_key_path_path() -> Path:
+    return data_dir() / "jumpcloud_ssh_key_path.txt"
+
+
+def load_jumpcloud_ssh_key_path() -> Path | None:
+    """An explicit SSH private key to use for the JumpCloud API key's
+    encryption, for users who don't keep one at the default locations
+    default_ssh_key_path() checks. None means fall back to that default.
+    """
+    path = jumpcloud_ssh_key_path_path()
+    if not path.is_file():
+        return None
+    text = path.read_text().strip()
+    return Path(text) if text else None
+
+
+def save_jumpcloud_ssh_key_path(ssh_key_path: str | None) -> None:
+    path = jumpcloud_ssh_key_path_path()
+    if ssh_key_path and ssh_key_path.strip():
+        path.write_text(ssh_key_path.strip())
+    else:
+        path.unlink(missing_ok=True)
+
+
+def default_ssh_key_path() -> Path | None:
+    """Where ssh/git tooling itself looks first — ed25519 preferred, RSA
+    as a fallback for older keypairs.
+    """
+    for name in ("id_ed25519", "id_rsa"):
+        candidate = Path.home() / ".ssh" / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def resolve_jumpcloud_ssh_key_path() -> Path | None:
+    return load_jumpcloud_ssh_key_path() or default_ssh_key_path()
+
+
+def jumpcloud_api_key_path() -> Path:
+    return data_dir() / "jumpcloud_api_key.age"
+
+
+def _load_ssh_identity(key_path: Path, passphrase: str | None) -> ssh.Identity:
+    raw = key_path.read_bytes()
+    try:
+        return ssh.Identity.from_buffer(raw)
+    except IdentityError as exc:
+        if passphrase is None:
+            raise SecretDecryptionError(
+                f"{key_path} appears to be passphrase-protected — pass its passphrase to decrypt "
+                "the stored JumpCloud API key."
+            ) from exc
+        # age itself has no notion of an SSH key's own passphrase — decrypt
+        # the OpenSSH private key ourselves first, then hand age the
+        # decrypted-in-memory buffer (never written back to disk).
+        private_key = serialization.load_ssh_private_key(raw, password=passphrase.encode())
+        decrypted = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.OpenSSH,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        return ssh.Identity.from_buffer(decrypted)
+
+
+def load_jumpcloud_api_key(passphrase: str | None = None) -> str | None:
+    """The JumpCloud API key, decrypted with the resolved SSH private key.
+
+    None means never configured. Raises SecretDecryptionError if a key is
+    stored but can't be decrypted (missing SSH key, wrong key, or a
+    passphrase-protected key with no/wrong passphrase supplied).
+    """
+    path = jumpcloud_api_key_path()
+    if not path.is_file():
+        return None
+    key_path = resolve_jumpcloud_ssh_key_path()
+    if key_path is None or not key_path.is_file():
+        raise SecretDecryptionError(
+            "No SSH private key found to decrypt the stored JumpCloud API key "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa, and any explicitly configured path)."
+        )
+    identity = _load_ssh_identity(key_path, passphrase)
+    try:
+        return decrypt(path.read_bytes(), [identity]).decode()
+    except Exception as exc:  # noqa: BLE001 - age's own DecryptError, wrong-key case
+        raise SecretDecryptionError(
+            f"Couldn't decrypt the stored JumpCloud API key with {key_path} — "
+            "it may have been encrypted with a different SSH key."
+        ) from exc
+
+
+def save_jumpcloud_api_key(api_key: str | None) -> None:
+    """Encrypts api_key to the resolved SSH *public* key and stores it.
+    Pass None (or an empty/whitespace string) to remove the stored key.
+    """
+    path = jumpcloud_api_key_path()
+    if not api_key or not api_key.strip():
+        path.unlink(missing_ok=True)
+        return
+
+    key_path = resolve_jumpcloud_ssh_key_path()
+    if key_path is None:
+        raise SecretDecryptionError(
+            "No SSH key found to encrypt the JumpCloud API key with "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa, and any explicitly configured path)."
+        )
+    public_key_path = key_path.parent / f"{key_path.name}.pub"
+    if not public_key_path.is_file():
+        raise SecretDecryptionError(f"No matching public key found at {public_key_path}.")
+
+    recipient = ssh.Recipient.from_str(public_key_path.read_text().strip())
+    path.write_bytes(encrypt(api_key.strip().encode(), [recipient]))

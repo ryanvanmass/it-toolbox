@@ -35,6 +35,16 @@ connection manager for RDP, SSH, and Cloud Storage.
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, and FreeRDP. See
   `docs/app-settings-status.md` for its current verification status.
+- **Identity Management** — a separate module (no GCP account needed)
+  browsing JumpCloud devices and users, with a detail panel and a
+  Remote Assist deep link per device; the first of what's meant to grow
+  into a small collection of identity-management integrations. The
+  JumpCloud API key is stored encrypted to your SSH key (via `age`/
+  `pyrage`) rather than in plaintext. See
+  `docs/identity-management-status.md` for its current verification
+  status and what's explicitly out of scope (password reset, account
+  unlock, and MFA settings — no confirmed public JumpCloud API for any
+  of the three).
 
 ## Requirements
 
@@ -81,8 +91,8 @@ Project layout:
   without any UI.
 - `widgets/` — the Qt-aware layer built on top of `core/`.
 - `modules/` — top-level app features (Connection Manager, Shell
-  Launcher, Cloud Storage, Settings), each registered with the app shell
-  in `modules/registry.py`.
+  Launcher, Cloud Storage, Identity Management, Settings), each
+  registered with the app shell in `modules/registry.py`.
 
 See `docs/` for deeper write-ups of specific subsystems (currently:
 the embedded RDP client's status and the Windows FreeRDP build steps).
