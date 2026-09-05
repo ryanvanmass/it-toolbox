@@ -267,6 +267,17 @@ class ConnectionManagerView(QWidget):
         self._populate_manual_connections()
 
     def _on_select_projects_clicked(self) -> None:
+        # Re-fetch rather than reusing self._all_projects (populated once at
+        # sign-in) so projects created since then show up without having to
+        # sign out and back in.
+        async_utils.run_in_background(
+            lambda: gcp_client.list_projects(gcp_auth.get_credentials()),
+            on_result=self._open_project_selection_dialog,
+            on_error=self._on_load_error,
+        )
+
+    def _open_project_selection_dialog(self, projects: list[GcpProject]) -> None:
+        self._all_projects = projects
         current_ids = settings.load_selected_project_ids() or set()
         dialog = ProjectSelectionDialog(self._all_projects, selected_ids=current_ids, parent=self)
         if dialog.exec() != ProjectSelectionDialog.DialogCode.Accepted:

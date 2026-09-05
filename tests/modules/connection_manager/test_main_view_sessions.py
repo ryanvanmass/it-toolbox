@@ -262,6 +262,47 @@ def test_gcp_root_context_menu_offers_select_projects_and_sign_out(qtbot, monkey
     assert [action.text() for action in menu.actions()] == ["Select Projects…", "Sign out"]
 
 
+def test_select_projects_refetches_project_list_before_opening_dialog(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import ProjectSelectionDialog
+
+    view = _make_view(qtbot, monkeypatch)
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._account = "me@example.com"
+
+    # Simulates a project created in the GCP console after the app's initial
+    # sign-in fetch — the stale self._all_projects list doesn't have it.
+    fresh_projects = [
+        GcpProject(project_id="p1", display_name="Project One"),
+        GcpProject(project_id="p2", display_name="Newly Created Project"),
+    ]
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_client.list_projects",
+        lambda creds: fresh_projects,
+    )
+
+    captured = {}
+
+    class _FakeDialog:
+        DialogCode = ProjectSelectionDialog.DialogCode
+
+        def __init__(self, projects, selected_ids, parent=None):
+            captured["projects"] = projects
+
+        def exec(self):
+            return self.DialogCode.Rejected
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.ProjectSelectionDialog",
+        _FakeDialog,
+    )
+
+    view._on_select_projects_clicked()
+    qtbot.waitUntil(lambda: "projects" in captured, timeout=2000)
+
+    assert captured["projects"] == fresh_projects
+    assert view._all_projects == fresh_projects
+
+
 def test_gcp_root_context_menu_is_none_when_not_signed_in(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
     view._account = None
