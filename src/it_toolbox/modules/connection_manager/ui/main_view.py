@@ -587,11 +587,22 @@ class ConnectionManagerView(QWidget):
         menu = QMenu(self)
         rdp_action = menu.addAction("Connect via RDP")
         ssh_action = menu.addAction("Connect via SSH")
+        menu.addSeparator()
+        turn_on_action = menu.addAction("Turn On")
+        turn_off_action = menu.addAction("Turn Off")
+        menu.addSeparator()
+        set_password_action = menu.addAction("Set Password…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
         elif chosen is ssh_action:
             self._start_session_from_instance(instance, "ssh")
+        elif chosen is turn_on_action:
+            self._run_instance_power_action(instance, "start")
+        elif chosen is turn_off_action:
+            self._run_instance_power_action(instance, "stop")
+        elif chosen is set_password_action:
+            self._on_set_instance_password_clicked(instance)
 
     def _show_qemu_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -697,6 +708,61 @@ class ConnectionManagerView(QWidget):
             username=username,
             password=password,
         )
+
+    def _run_instance_power_action(self, instance: Instance, action: str) -> None:
+        if action == "stop":
+            reply = QMessageBox.question(
+                self,
+                "Turn Off Instance",
+                f"Turn off {instance.name}? Any unsaved work on the instance will be lost "
+                "as it shuts down.",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        fn = gcp_client.start_instance if action == "start" else gcp_client.stop_instance
+        async_utils.run_in_background(
+            lambda: fn(gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name),
+            on_result=lambda _: self._on_instance_power_action_done(instance),
+            on_error=self._on_instance_action_error,
+        )
+
+    def _on_instance_power_action_done(self, instance: Instance) -> None:
+        # The instance won't have reached its final state yet (start/stop
+        # only submits the request) but this reflects the transitional
+        # status (e.g. STOPPING) rather than leaving a stale one displayed.
+        project_item = self._find_project_item(instance.project_id)
+        if project_item is not None:
+            self._refresh_project(project_item)
+
+    def _find_project_item(self, project_id: str) -> QTreeWidgetItem | None:
+        if self._gcp_root_item is None:
+            return None
+        for i in range(self._gcp_root_item.childCount()):
+            child = self._gcp_root_item.child(i)
+            if child.data(0, PROJECT_ID_ROLE) == project_id:
+                return child
+        return None
+
+    def _on_set_instance_password_clicked(self, instance: Instance) -> None:
+        async_utils.run_in_background(
+            lambda: gcp_client.reset_windows_password(
+                gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name
+            ),
+            on_result=lambda credential: self._on_password_reset(instance, credential),
+            on_error=self._on_instance_action_error,
+        )
+
+    def _on_password_reset(self, instance: Instance, credential: tuple[str, str]) -> None:
+        username, password = credential
+        QMessageBox.information(
+            self,
+            "Password Reset",
+            f"New login for {instance.name} — shown once, not stored anywhere:\n\n"
+            f"Username: {username}\nPassword: {password}",
+        )
+
+    def _on_instance_action_error(self, error: Exception) -> None:
+        QMessageBox.warning(self, "Instance action failed", str(error))
 
     # -- Connect: tunnel, then embed SSH or launch external RDP ---------------
 

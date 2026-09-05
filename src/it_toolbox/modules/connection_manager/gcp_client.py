@@ -41,6 +41,18 @@ def _get(url: str, token: str, params: dict | None = None, extra_headers: dict |
     return response.json()
 
 
+def _post(
+    url: str, token: str, json_body: dict | None = None, extra_headers: dict | None = None
+) -> dict:
+    headers = {"Authorization": f"Bearer {token}"}
+    if extra_headers:
+        headers.update(extra_headers)
+    response = requests.post(url, headers=headers, json=json_body, timeout=REQUEST_TIMEOUT_SEC)
+    if response.status_code >= 400:
+        raise GcpApiError(f"{response.status_code} {url}: {response.text[:500]}")
+    return response.json()
+
+
 def list_projects(credentials: Credentials) -> list[GcpProject]:
     projects: list[GcpProject] = []
     page_token = None
@@ -98,6 +110,44 @@ def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
             break
 
     return sorted(instances, key=lambda i: i.name.lower())
+
+
+def start_instance(credentials: Credentials, project_id: str, zone: str, name: str) -> None:
+    _post(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/start",
+        credentials.token,
+        extra_headers={"X-Goog-User-Project": project_id},
+    )
+
+
+def stop_instance(credentials: Credentials, project_id: str, zone: str, name: str) -> None:
+    _post(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/stop",
+        credentials.token,
+        extra_headers={"X-Goog-User-Project": project_id},
+    )
+
+
+def reset_windows_password(
+    credentials: Credentials,
+    project_id: str,
+    zone: str,
+    name: str,
+    username: str = "Administrator",
+) -> tuple[str, str]:
+    """Creates (or resets) a local Windows account on the instance and
+    returns its new (username, password) — same operation `gcloud compute
+    reset-windows-password` performs. Unlike start/stop this call responds
+    with the credential directly rather than a long-running Operation.
+    Only meaningful for Windows instances; the API rejects it otherwise.
+    """
+    data = _post(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/resetWindowsPassword",
+        credentials.token,
+        json_body={"email": username},
+        extra_headers={"X-Goog-User-Project": project_id},
+    )
+    return data["userName"], data["password"]
 
 
 def list_buckets(credentials: Credentials, project_id: str) -> list[GcsBucket]:

@@ -222,6 +222,111 @@ def test_expanding_vms_category_populates_instance_items(qtbot, monkeypatch):
     assert vms_item.child(0).text(0) == "vm-1"
 
 
+def test_turn_on_instance_calls_start_and_refreshes_project(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="TERMINATED")
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "start_instance",
+        lambda creds, project_id, zone, name: calls.append((project_id, zone, name)),
+    )
+    refreshed = []
+    monkeypatch.setattr(view, "_refresh_project", lambda item: refreshed.append(item))
+
+    view._run_instance_power_action(instance, "start")
+
+    qtbot.waitUntil(lambda: calls == [("p1", "us-central1-a", "vm-1")], timeout=2000)
+    qtbot.waitUntil(lambda: len(refreshed) == 1, timeout=2000)
+
+
+def test_turn_off_instance_asks_for_confirmation_first(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "stop_instance",
+        lambda creds, project_id, zone, name: calls.append((project_id, zone, name)),
+    )
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.No,
+    )
+
+    view._run_instance_power_action(instance, "stop")
+
+    assert calls == []  # declining the confirmation must not call the API
+
+
+def test_turn_off_instance_calls_stop_once_confirmed(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "stop_instance",
+        lambda creds, project_id, zone, name: calls.append((project_id, zone, name)),
+    )
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    view._run_instance_power_action(instance, "stop")
+
+    qtbot.waitUntil(lambda: calls == [("p1", "us-central1-a", "vm-1")], timeout=2000)
+
+
+def test_set_instance_password_shows_returned_credentials(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "reset_windows_password",
+        lambda creds, project_id, zone, name: ("Administrator", "s3cr3t!"),
+    )
+    shown = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "information",
+        lambda parent, title, text: shown.append((title, text)),
+    )
+
+    view._on_set_instance_password_clicked(instance)
+
+    qtbot.waitUntil(lambda: len(shown) == 1, timeout=2000)
+    title, text = shown[0]
+    assert "Administrator" in text
+    assert "s3cr3t!" in text
+
+
 def test_double_clicking_a_bucket_opens_a_browser_tab(qtbot, monkeypatch):
     import it_toolbox.widgets.bucket_browser_widget as browser_module
 
