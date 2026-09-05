@@ -18,6 +18,10 @@ def _disable_external_tools(monkeypatch):
         "it_toolbox.modules.cloud_storage.ui.main_view.rclone_client.is_available",
         lambda: False,
     )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.settings.load_jumpcloud_api_key",
+        lambda: None,
+    )
 
 
 def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
@@ -26,11 +30,12 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window._module_list.count() == 4
+    assert window._module_list.count() == 5
     assert window._module_list.item(0).text() == "Connection Manager"
     assert window._module_list.item(1).text() == "Shell Launcher"
     assert window._module_list.item(2).text() == "Cloud Storage"
-    assert window._module_list.item(3).text() == "Settings"
+    assert window._module_list.item(3).text() == "Identity Management"
+    assert window._module_list.item(4).text() == "Settings"
     assert window._module_list.currentRow() == 0
 
     # The GCP browser tree is nested under the module in the sidebar now,
