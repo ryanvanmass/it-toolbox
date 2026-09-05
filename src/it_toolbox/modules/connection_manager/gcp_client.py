@@ -42,12 +42,18 @@ def _get(url: str, token: str, params: dict | None = None, extra_headers: dict |
 
 
 def _post(
-    url: str, token: str, json_body: dict | None = None, extra_headers: dict | None = None
+    url: str,
+    token: str,
+    params: dict | None = None,
+    json_body: dict | None = None,
+    extra_headers: dict | None = None,
 ) -> dict:
     headers = {"Authorization": f"Bearer {token}"}
     if extra_headers:
         headers.update(extra_headers)
-    response = requests.post(url, headers=headers, json=json_body, timeout=REQUEST_TIMEOUT_SEC)
+    response = requests.post(
+        url, headers=headers, params=params, json=json_body, timeout=REQUEST_TIMEOUT_SEC
+    )
     if response.status_code >= 400:
         raise GcpApiError(f"{response.status_code} {url}: {response.text[:500]}")
     return response.json()
@@ -120,10 +126,21 @@ def start_instance(credentials: Credentials, project_id: str, zone: str, name: s
     )
 
 
-def stop_instance(credentials: Credentials, project_id: str, zone: str, name: str) -> None:
+def stop_instance(
+    credentials: Credentials, project_id: str, zone: str, name: str, force: bool = False
+) -> None:
+    """Stops the instance. By default this is a graceful stop — Compute
+    Engine sends the guest OS an ACPI shutdown signal and gives it up to
+    ~120s to shut down cleanly before forcing it off regardless. `force`
+    sets `noGracefulShutdown`, skipping that guest shutdown attempt
+    entirely and cutting power immediately (same risk as pulling the plug
+    on a physical machine — unflushed disk writes can be lost).
+    """
+    params = {"noGracefulShutdown": "true"} if force else None
     _post(
         f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/stop",
         credentials.token,
+        params=params,
         extra_headers={"X-Goog-User-Project": project_id},
     )
 

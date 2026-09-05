@@ -298,6 +298,62 @@ def test_turn_off_instance_calls_stop_once_confirmed(qtbot, monkeypatch):
     qtbot.waitUntil(lambda: calls == [("p1", "us-central1-a", "vm-1")], timeout=2000)
 
 
+def test_force_shutdown_asks_for_confirmation_first(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "stop_instance",
+        lambda creds, project_id, zone, name, force=False: calls.append(
+            (project_id, zone, name, force)
+        ),
+    )
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.No,
+    )
+
+    view._run_instance_power_action(instance, "force_stop")
+
+    assert calls == []  # declining the confirmation must not call the API
+
+
+def test_force_shutdown_calls_stop_with_force_once_confirmed(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "stop_instance",
+        lambda creds, project_id, zone, name, force=False: calls.append(
+            (project_id, zone, name, force)
+        ),
+    )
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    view._run_instance_power_action(instance, "force_stop")
+
+    qtbot.waitUntil(lambda: calls == [("p1", "us-central1-a", "vm-1", True)], timeout=2000)
+
+
 def test_set_instance_password_prompt_is_prefilled_with_default_username(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 

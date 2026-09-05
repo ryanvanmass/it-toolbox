@@ -18,7 +18,7 @@ class _FakeResponse:
 def test_start_instance_posts_to_start_endpoint(monkeypatch):
     calls = []
 
-    def fake_post(url, headers, json, timeout):
+    def fake_post(url, headers, params, json, timeout):
         calls.append((url, headers, json))
         return _FakeResponse(json_data={"status": "RUNNING"})
 
@@ -36,7 +36,7 @@ def test_start_instance_posts_to_start_endpoint(monkeypatch):
 def test_stop_instance_posts_to_stop_endpoint(monkeypatch):
     calls = []
 
-    def fake_post(url, headers, json, timeout):
+    def fake_post(url, headers, params, json, timeout):
         calls.append(url)
         return _FakeResponse(json_data={"status": "STOPPING"})
 
@@ -47,11 +47,43 @@ def test_stop_instance_posts_to_stop_endpoint(monkeypatch):
     assert calls[0].endswith("/projects/proj/zones/us-central1-a/instances/my-vm/stop")
 
 
+def test_stop_instance_force_sets_no_graceful_shutdown_param(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, params, json, timeout):
+        calls.append((url, params))
+        return _FakeResponse(json_data={"status": "STOPPING"})
+
+    monkeypatch.setattr(gcp_client.requests, "post", fake_post)
+
+    gcp_client.stop_instance(_FakeCredentials(), "proj", "us-central1-a", "my-vm", force=True)
+
+    (url, params) = calls[0]
+    assert url.endswith("/projects/proj/zones/us-central1-a/instances/my-vm/stop")
+    assert params == {"noGracefulShutdown": "true"}
+
+
+def test_stop_instance_without_force_sends_no_params(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, params, json, timeout):
+        calls.append(params)
+        return _FakeResponse(json_data={"status": "STOPPING"})
+
+    monkeypatch.setattr(gcp_client.requests, "post", fake_post)
+
+    gcp_client.stop_instance(_FakeCredentials(), "proj", "us-central1-a", "my-vm")
+
+    assert calls == [None]
+
+
 def test_start_instance_raises_on_http_error(monkeypatch):
     monkeypatch.setattr(
-        gcp_client.requests, "post", lambda url, headers, json, timeout: _FakeResponse(
+        gcp_client.requests,
+        "post",
+        lambda url, headers, params, json, timeout: _FakeResponse(
             status_code=400, text="bad request"
-        )
+        ),
     )
 
     try:
@@ -64,7 +96,7 @@ def test_start_instance_raises_on_http_error(monkeypatch):
 def test_reset_windows_password_returns_username_and_password(monkeypatch):
     calls = []
 
-    def fake_post(url, headers, json, timeout):
+    def fake_post(url, headers, params, json, timeout):
         calls.append((url, json))
         return _FakeResponse(json_data={"userName": "alice", "password": "s3cr3t!"})
 

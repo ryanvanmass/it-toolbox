@@ -590,6 +590,7 @@ class ConnectionManagerView(QWidget):
         menu.addSeparator()
         turn_on_action = menu.addAction("Turn On")
         turn_off_action = menu.addAction("Turn Off")
+        force_shutdown_action = menu.addAction("Force Shutdown…")
         menu.addSeparator()
         set_password_action = menu.addAction("Set Password…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
@@ -601,6 +602,8 @@ class ConnectionManagerView(QWidget):
             self._run_instance_power_action(instance, "start")
         elif chosen is turn_off_action:
             self._run_instance_power_action(instance, "stop")
+        elif chosen is force_shutdown_action:
+            self._run_instance_power_action(instance, "force_stop")
         elif chosen is set_password_action:
             self._on_set_instance_password_clicked(instance)
 
@@ -714,14 +717,36 @@ class ConnectionManagerView(QWidget):
             reply = QMessageBox.question(
                 self,
                 "Turn Off Instance",
-                f"Turn off {instance.name}? Any unsaved work on the instance will be lost "
-                "as it shuts down.",
+                f"Turn off {instance.name}? Compute Engine asks the guest OS to shut down "
+                "cleanly first, so this is safe for anything currently running on it.",
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-        fn = gcp_client.start_instance if action == "start" else gcp_client.stop_instance
+        elif action == "force_stop":
+            reply = QMessageBox.question(
+                self,
+                "Force Shutdown Instance",
+                f"Force shutdown {instance.name}? This skips the guest OS's own shutdown "
+                "and cuts power immediately — the same risk as pulling the plug on a "
+                "physical machine. Unsaved work or in-flight disk writes can be lost. Use "
+                "\"Turn Off\" instead unless the instance is unresponsive.",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        def submit() -> None:
+            credentials = gcp_auth.get_credentials()
+            if action == "start":
+                gcp_client.start_instance(credentials, instance.project_id, instance.zone, instance.name)
+            elif action == "stop":
+                gcp_client.stop_instance(credentials, instance.project_id, instance.zone, instance.name)
+            else:
+                gcp_client.stop_instance(
+                    credentials, instance.project_id, instance.zone, instance.name, force=True
+                )
+
         async_utils.run_in_background(
-            lambda: fn(gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name),
+            submit,
             on_result=lambda _: self._on_instance_power_action_done(instance),
             on_error=self._on_instance_action_error,
         )
