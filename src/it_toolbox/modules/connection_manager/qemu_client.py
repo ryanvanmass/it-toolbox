@@ -11,12 +11,18 @@ copy-pasted as-is.
 """
 
 import re
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
 from it_toolbox.modules.connection_manager.models import QemuHost, QemuVm
 
+VIRSH_CMD = "virsh"
 VIRSH_TIMEOUT_SEC = 8
+
+
+def is_available() -> bool:
+    return shutil.which(VIRSH_CMD) is not None
 
 _LIST_LINE_RE = re.compile(r"^\s*(\S+)\s+(\S+)\s+(.+?)\s*$")
 
@@ -35,7 +41,7 @@ class QemuApiError(Exception):
 def _run_virsh(host: QemuHost, *args: str) -> str:
     try:
         result = subprocess.run(
-            ["virsh", "-c", host.uri, *args],
+            [VIRSH_CMD, "-c", host.uri, *args],
             capture_output=True,
             text=True,
             timeout=VIRSH_TIMEOUT_SEC,

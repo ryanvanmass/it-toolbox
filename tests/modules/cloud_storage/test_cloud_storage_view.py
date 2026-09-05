@@ -119,7 +119,7 @@ def test_set_rclone_path_saves_chosen_path_and_refreshes(qtbot, monkeypatch):
         lambda path: saved.append(path),
     )
     monkeypatch.setattr(
-        "it_toolbox.modules.cloud_storage.ui.main_view.QFileDialog.getOpenFileName",
+        "it_toolbox.widgets.rclone_location_picker.QFileDialog.getOpenFileName",
         lambda *a, **k: ("/opt/rclone/rclone", ""),
     )
 
@@ -136,7 +136,7 @@ def test_set_rclone_path_does_nothing_on_cancel(qtbot, monkeypatch):
         lambda path: saved.append(path),
     )
     monkeypatch.setattr(
-        "it_toolbox.modules.cloud_storage.ui.main_view.QFileDialog.getOpenFileName",
+        "it_toolbox.widgets.rclone_location_picker.QFileDialog.getOpenFileName",
         lambda *a, **k: ("", ""),
     )
 

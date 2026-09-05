@@ -131,3 +131,13 @@ def test_power_action_maps_to_virsh_command(monkeypatch, action, expected_virsh_
 def test_power_action_rejects_unknown_action():
     with pytest.raises(qemu_client.QemuApiError, match="Unknown power action"):
         qemu_client.power_action(HOST, "myvm", "reboot-and-eat-cookies")
+
+
+def test_is_available_true_when_virsh_on_path(monkeypatch):
+    monkeypatch.setattr(qemu_client.shutil, "which", lambda name: "/usr/bin/virsh")
+    assert qemu_client.is_available() is True
+
+
+def test_is_available_false_when_virsh_missing(monkeypatch):
+    monkeypatch.setattr(qemu_client.shutil, "which", lambda name: None)
+    assert qemu_client.is_available() is False

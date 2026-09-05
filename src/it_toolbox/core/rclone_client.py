@@ -15,9 +15,14 @@ possibly several times in a row, until done.
 """
 
 import json
+import platform
 import shutil
 import subprocess
+import zipfile
+from io import BytesIO
 from pathlib import Path
+
+import requests
 
 from it_toolbox.core import settings
 from it_toolbox.modules.cloud_storage.models import (
@@ -35,13 +40,33 @@ RCLONE_TIMEOUT_SEC = 15
 # step, which plain listing/download calls never do.
 RCLONE_CONFIG_TIMEOUT_SEC = 120
 RCLONE_TRANSFER_TIMEOUT_SEC = 300
+_DOWNLOAD_TIMEOUT_SEC = 60
+
+# rclone's documented "always latest stable" download URL — see
+# https://rclone.org/downloads/. <os>/<arch> match the tokens rclone itself
+# uses in these filenames, not Python's platform.system()/machine() values.
+_DOWNLOAD_URL = "https://downloads.rclone.org/rclone-current-{os}-{arch}.zip"
+_OS_NAMES = {"Linux": "linux", "Darwin": "osx", "Windows": "windows"}
+_ARCH_NAMES = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "AMD64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "i386": "386",
+    "i686": "386",
+}
+
+
+class UnsupportedPlatformError(Exception):
+    pass
 
 
 class RcloneApiError(Exception):
     pass
 
 
-def _rclone_executable() -> str:
+def rclone_executable() -> str:
     """The rclone binary to invoke — an explicit override path if one's
     been configured (settings.save_rclone_path; needed on machines where
     rclone isn't on PATH, e.g. a portable rclone.exe on Windows), else
@@ -51,7 +76,7 @@ def _rclone_executable() -> str:
 
 
 def is_available() -> bool:
-    exe = _rclone_executable()
+    exe = rclone_executable()
     if exe == RCLONE_CMD:
         return shutil.which(RCLONE_CMD) is not None
     return Path(exe).is_file()
@@ -65,7 +90,7 @@ def _run(*args: str, timeout: int = RCLONE_TIMEOUT_SEC) -> str:
         )
     try:
         result = subprocess.run(
-            [_rclone_executable(), *args],
+            [rclone_executable(), *args],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -196,3 +221,40 @@ def delete_directory(remote_name: str, path: str) -> None:
     purge`) — unlike `rclone rmdir`, which only removes empty ones.
     """
     _run("purge", f"{remote_name}:{path}")
+
+
+def download_latest(dest_dir: Path) -> Path:
+    """Downloads the latest stable rclone build for this platform into
+    dest_dir and points settings.rclone_path at it. Returns the path to
+    the extracted executable.
+    """
+    os_name = _OS_NAMES.get(platform.system())
+    arch_name = _ARCH_NAMES.get(platform.machine())
+    if os_name is None or arch_name is None:
+        raise UnsupportedPlatformError(
+            f"No known rclone build for {platform.system()}/{platform.machine()} — "
+            f"download it manually from {INSTALL_URL}"
+        )
+
+    url = _DOWNLOAD_URL.format(os=os_name, arch=arch_name)
+    response = requests.get(url, timeout=_DOWNLOAD_TIMEOUT_SEC)
+    response.raise_for_status()
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    exe_name = "rclone.exe" if os_name == "windows" else "rclone"
+    dest_path = dest_dir / exe_name
+
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        member = next(
+            (n for n in archive.namelist() if n.rsplit("/", 1)[-1] == exe_name), None
+        )
+        if member is None:
+            raise RcloneApiError(f"Downloaded archive from {url} didn't contain {exe_name}")
+        with archive.open(member) as source, open(dest_path, "wb") as target:
+            shutil.copyfileobj(source, target)
+
+    if os_name != "windows":
+        dest_path.chmod(dest_path.stat().st_mode | 0o111)
+
+    settings.save_rclone_path(str(dest_path))
+    return dest_path

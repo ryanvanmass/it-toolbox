@@ -26,10 +26,11 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window._module_list.count() == 3
+    assert window._module_list.count() == 4
     assert window._module_list.item(0).text() == "Connection Manager"
     assert window._module_list.item(1).text() == "Shell Launcher"
     assert window._module_list.item(2).text() == "Cloud Storage"
+    assert window._module_list.item(3).text() == "Settings"
     assert window._module_list.currentRow() == 0
 
     # The GCP browser tree is nested under the module in the sidebar now,
