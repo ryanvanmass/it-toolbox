@@ -66,32 +66,16 @@ def test_reset_windows_password_returns_username_and_password(monkeypatch):
 
     def fake_post(url, headers, json, timeout):
         calls.append((url, json))
-        return _FakeResponse(json_data={"userName": "Administrator", "password": "s3cr3t!"})
-
-    monkeypatch.setattr(gcp_client.requests, "post", fake_post)
-
-    username, password = gcp_client.reset_windows_password(
-        _FakeCredentials(), "proj", "us-central1-a", "my-vm"
-    )
-
-    assert username == "Administrator"
-    assert password == "s3cr3t!"
-    (url, body) = calls[0]
-    assert url.endswith("/projects/proj/zones/us-central1-a/instances/my-vm/resetWindowsPassword")
-    assert body == {"email": "Administrator"}
-
-
-def test_reset_windows_password_uses_given_username(monkeypatch):
-    calls = []
-
-    def fake_post(url, headers, json, timeout):
-        calls.append(json)
         return _FakeResponse(json_data={"userName": "alice", "password": "s3cr3t!"})
 
     monkeypatch.setattr(gcp_client.requests, "post", fake_post)
 
-    gcp_client.reset_windows_password(
+    username, password = gcp_client.reset_windows_password(
         _FakeCredentials(), "proj", "us-central1-a", "my-vm", username="alice"
     )
 
-    assert calls[0] == {"email": "alice"}
+    assert username == "alice"
+    assert password == "s3cr3t!"
+    (url, body) = calls[0]
+    assert url.endswith("/projects/proj/zones/us-central1-a/instances/my-vm/resetWindowsPassword")
+    assert body == {"email": "alice"}

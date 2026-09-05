@@ -744,9 +744,25 @@ class ConnectionManagerView(QWidget):
         return None
 
     def _on_set_instance_password_clicked(self, instance: Instance) -> None:
+        # Pre-filled with the app's configured default username (the same
+        # one RDP/SSH connections default to) rather than silently assuming
+        # "Administrator" — that's rarely the account anyone actually wants
+        # reset, and picking one quietly on the user's behalf is worse than
+        # just asking.
+        username, ok = QInputDialog.getText(
+            self,
+            "Set Password",
+            f"Windows account to reset on {instance.name}:",
+            QLineEdit.EchoMode.Normal,
+            settings.load_default_username() or "",
+        )
+        if not ok or not username.strip():
+            return
+        username = username.strip()
+
         async_utils.run_in_background(
             lambda: gcp_client.reset_windows_password(
-                gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name
+                gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name, username
             ),
             on_result=lambda credential: self._on_password_reset(instance, credential),
             on_error=self._on_instance_action_error,

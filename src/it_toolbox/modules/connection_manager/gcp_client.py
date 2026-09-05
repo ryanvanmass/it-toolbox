@@ -133,7 +133,7 @@ def reset_windows_password(
     project_id: str,
     zone: str,
     name: str,
-    username: str = "Administrator",
+    username: str,
 ) -> tuple[str, str]:
     """Creates (or resets) a local Windows account on the instance and
     returns its new (username, password) — same operation `gcloud compute
