@@ -12,8 +12,8 @@ import threading
 
 import pyte
 from PySide6.QtCore import QSocketNotifier, Qt, Signal
-from PySide6.QtGui import QFont, QKeyEvent, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import QPlainTextEdit, QTextEdit, QWidget
+from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
 from it_toolbox.widgets.pty_backend import PtyHandle
 
@@ -146,6 +146,15 @@ class TerminalWidget(QPlainTextEdit):
         key = event.key()
         modifiers = event.modifiers()
 
+        # Checked ahead of the Ctrl+letter branch below: on the platforms
+        # this resolves to Ctrl+V (Windows/Linux) it would otherwise be
+        # swallowed as the literal ^V control byte, which is where "can't
+        # paste into the terminal" came from — Ctrl+V never reached
+        # anything but that byte.
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self._paste_clipboard()
+            return
+
         if modifiers & Qt.KeyboardModifier.ControlModifier and Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
             self._pty.write(bytes([key - Qt.Key.Key_A + 1]))
             return
@@ -157,6 +166,31 @@ class TerminalWidget(QPlainTextEdit):
         text = event.text()
         if text:
             self._pty.write(text.encode())
+
+    def _paste_clipboard(self) -> None:
+        text = QApplication.clipboard().text()
+        if text:
+            self._pty.write(text.encode())
+
+    def contextMenuEvent(self, event) -> None:
+        # A read-only QPlainTextEdit's standard context menu offers Copy
+        # but never Paste (Qt gates it on the widget being editable) — this
+        # widget's "editing" is relaying keystrokes to the pty rather than
+        # the document, so Paste is wired up manually here instead.
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy")
+        copy_action.setEnabled(self.textCursor().hasSelection())
+        paste_action = menu.addAction("Paste")
+        paste_action.setEnabled(bool(QApplication.clipboard().text()))
+        menu.addSeparator()
+        select_all_action = menu.addAction("Select All")
+        chosen = menu.exec(event.globalPos())
+        if chosen is copy_action:
+            self.copy()
+        elif chosen is paste_action:
+            self._paste_clipboard()
+        elif chosen is select_all_action:
+            self.selectAll()
 
     def resizeTerminal(self, cols: int, rows: int) -> None:
         self._cols, self._rows = cols, rows
