@@ -189,49 +189,49 @@ re-laid-out, not a stretched or cropped old frame).
   disp" log line already visible in every session before this feature
   existed.
 
-### Manual + automatic "Refresh Resolution" (2026-09-08) — **not yet verified live**
+### Manual "Refresh Resolution" (2026-09-08)
 
-Added a manual "Refresh Resolution" action on a session tab's right-click
-menu (`RdpWidget.refresh_resolution()`, just re-sends the current size
-even though it hasn't changed), plus an automatic trigger meant to fire
-once right after connecting, for when the server's initial resolution is
-already out of sync with the widget.
+Added a "Refresh Resolution" action on a session tab's right-click menu
+(`RdpWidget.refresh_resolution()`) — re-sends the current widget size to
+the server even though it hasn't changed, for when the remote
+resolution has drifted out of sync without a real resize event to
+trigger a fix on its own.
 
-The automatic trigger went through three iterations before landing on
-what should be the actually-correct one, worth recording so nobody
-re-walks the same path:
+### Automatic post-connect trigger — attempted, reverted
+
+Also tried firing that same refresh automatically once, shortly after
+connecting, for when the server's *initial* resolution is already out
+of sync. Reverted at the user's request after it didn't visibly work in
+real usage; worth recording so a retry doesn't repeat the same path:
 
 1. First attempt: fire it a fixed N seconds after `connected` (tried 3s,
-   then 30s, then 5s at the user's request each time). Report from real
-   usage: **the resolution never visibly updated, at any of the three
-   delays** — not just occasionally late, genuinely not working.
-2. Root cause, on rereading this file's own "Dynamic resolution
-   resizing" section above: `request_resize()` is a **documented no-op**
-   until the `disp` channel finishes binding (`self.display._context is
-   None` guard in `freerdp_client.py`) — and that binding is a *separate*
-   negotiation that happens after `connected` already fired, with no
-   fixed or guaranteed timing. A flat delay from `connected` was always
-   going to be a guess, and evidently the servers tested against didn't
-   reliably finish binding within any of the three tried.
-3. Fix: `FreeRdpSession` gained `on_display_channel_ready` (mirrors the
-   existing `on_frame` hook, called from `_on_channel_connected` right
-   after `self.display.bind(...)` succeeds), threaded up through a new
-   `RdpSessionSignals.display_channel_ready` on `RdpSessionWorker`, wired
-   directly to `RdpWidget.refresh_resolution()`. This fires exactly when
-   resize calls first become possible, not a guess at when that might
-   be. `on_display_channel_ready` is set on the session *before*
-   `connect()` is called, not after — channel negotiation happens as
-   part of `connect()`'s own capability exchange, so it can legitimately
-   fire before `connected` does, and setting the hook any later risks
-   missing it the same way a fixed delay did.
+   then 30s, then 5s). Real-usage report each time: the resolution never
+   visibly updated — not occasionally late, just not working.
+2. Root cause, from this file's own "Dynamic resolution resizing"
+   section above: `request_resize()` is a **documented no-op** until the
+   `disp` channel finishes binding (`self.display._context is None`
+   guard in `freerdp_client.py`) — a *separate* negotiation that happens
+   after `connected` already fired, with no fixed or guaranteed timing.
+   A flat delay from `connected` was always going to be a guess.
+3. Fix attempted: an actual `on_display_channel_ready` hook on
+   `FreeRdpSession` (mirroring `on_frame`), threaded up through
+   `RdpSessionWorker`/`RdpWidget` and wired directly to
+   `refresh_resolution()` — event-driven instead of a guessed delay.
+   Reasoned correctly from the documented gating above, but never
+   confirmed live before being reverted.
+4. **Reverted** rather than keep debugging blind — this repo's dev
+   environment can't test against a real RDP server, and three rounds
+   of "should work" not panning out in real usage was reason enough to
+   stop guessing. The manual action above still works standalone and
+   was kept.
 
-**This has not been verified against a real server** — the three fixed-
-delay attempts *were* real-usage-tested (that's how the no-op was
-discovered), but the event-driven fix itself is reasoned from this
-file's own documented `request_resize` gating, not yet confirmed live.
-Next session picking this up: connect to a real server, confirm the
-resolution corrects itself shortly after connecting with no manual
-"Refresh Resolution" click needed, and update this note either way.
+If picking this up again: the event-driven `on_display_channel_ready`
+approach (point 3) is still the technically correct fix for the
+documented no-op gating — it just needs someone who can verify live
+against a real server, ideally adding a log line at the point
+`on_display_channel_ready` fires so a session's real console output
+confirms whether/when the channel actually binds, rather than inferring
+it indirectly from whether the resolution visibly changed.
 
 ## Clipboard sync — attempted, reverted, worth knowing before retrying
 
