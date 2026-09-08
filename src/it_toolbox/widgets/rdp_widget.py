@@ -74,7 +74,7 @@ class RdpWidget(QWidget):
         # if the tab closes before it fires -- no dangling callback.
         self._post_connect_refresh = QTimer(self)
         self._post_connect_refresh.setSingleShot(True)
-        self._post_connect_refresh.setInterval(3000)
+        self._post_connect_refresh.setInterval(30000)
         self._post_connect_refresh.timeout.connect(self.refresh_resolution)
 
         self._worker = RdpSessionWorker(host, port, username, password, domain)
