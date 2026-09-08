@@ -799,6 +799,7 @@ def test_launch_external_rdp_writes_an_rdp_file_and_opens_it(qtbot, monkeypatch)
     assert "full address:s:127.0.0.1:54321" in contents
     assert "username:s:alice" in contents
     assert "prompt for credentials:i:1" in contents
+    assert "screen mode id:i:1" in contents
 
 
 def test_launch_external_rdp_omits_username_line_when_none(qtbot, monkeypatch):

@@ -804,8 +804,17 @@ class ConnectionManagerView(QWidget):
         makes the external client ask for it in its own window instead,
         the same as it already does for manually-configured external
         connections.
+
+        "screen mode id:i:1" opts into windowed mode — mstsc's default
+        (2, full screen) would otherwise take over the whole display,
+        which is disorienting for what's meant to be a quick one-off
+        connection to a single VM.
         """
-        lines = [f"full address:s:127.0.0.1:{port}", "prompt for credentials:i:1"]
+        lines = [
+            f"full address:s:127.0.0.1:{port}",
+            "prompt for credentials:i:1",
+            "screen mode id:i:1",
+        ]
         if username:
             lines.append(f"username:s:{username}")
         fd, path = tempfile.mkstemp(suffix=".rdp", prefix="it-toolbox-")
