@@ -266,8 +266,51 @@ trial-and-error:
   `"cliprdr"` (unlike `disp`, see above) — channel binding itself
   worked fine on the first try.
 
+## Post-resize lag is specific to the GCP/IAP-tunnel path (2026-09-08)
+
+A user report of 5-10s render lag after a window drag/resize turned out
+*not* to reproduce over a direct (non-tunneled) connection — a real-RDP
+timing test against a direct host showed no stacking and no lingering
+degradation. The user then confirmed the lag only shows up on GCP VM
+connections, which route through `core/iap_tunnel.py`/
+`core/tunnel_session.py`'s `BackgroundTunnel` (a WebSocket-relayed IAP
+tunnel), not a plain TCP connection.
+
+Read through the entire tunnel path (`IapTunnelConnection`'s
+frame-encode/decode, ACK-threshold, and pump loops) looking for an
+actual defect — a missing backpressure check, a busy-loop, a double
+send — and found none; the 16KB frame size and "ACK after 32KB
+unacked" policy match gcloud's own `start-iap-tunnel` implementation
+exactly (verified against that source, per `iap_tunnel.py`'s own
+docstring), not something invented here.
+
+Decisive test: the user ran `gcloud compute start-iap-tunnel` against
+the same VM and RDP'd in with the stock Windows RDP client (mstsc)
+through *that* tunnel — no lag. Same tunnel protocol, same network
+path, different RDP client. This narrows the actual cause to something
+in this app's embedded FreeRDP/GDI rendering path (most likely: no
+bitmap codec/compression explicitly configured in
+`freerdp_client.py`'s `_configure_settings()`, so a resize-triggered
+full-desktop redraw may be sending far more data than a codec-aware
+client would over the same tunnel) — not the tunnel itself. That
+codec angle is unconfirmed and still needs to be run down.
+
+**Stopgap shipped in the meantime**: `main_view.py`'s instance context
+menu gained "Connect via RDP (External App)" for GCP instances — starts
+the same `BackgroundTunnel`, then hands the connection to whatever RDP
+client the OS has registered for `.rdp` files (mstsc on a stock Windows
+box) instead of embedding `RdpWidget`. No password is written to the
+`.rdp` file (see `_launch_external_rdp`'s docstring for why); the
+external client prompts for it itself. This doesn't fix the embedded
+viewer's GCP-tunnel performance — it's a working path around it until
+the codec question above is resolved.
+
 ## What's still open
 
+- Whether the embedded viewer's GCP/IAP-tunnel post-resize lag (see
+  above) is actually a missing bitmap codec/compression setting in
+  `_configure_settings()` — the leading theory, not yet confirmed
+  against a real GCP VM with codec settings explicitly toggled.
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
