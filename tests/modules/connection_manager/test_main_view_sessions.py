@@ -744,6 +744,99 @@ def test_rdp_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):
 # -- QEMU hosts / VMs --------------------------------------------------------
 
 
+def test_external_rdp_tunnel_ready_registers_session_without_a_tab(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    launched = []
+    monkeypatch.setattr(
+        main_view_module.ConnectionManagerView,
+        "_launch_external_rdp",
+        staticmethod(lambda port, username: launched.append((port, username))),
+    )
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_external_rdp_tunnel_ready(tunnel, "test-vm", "alice")
+
+    # No tab/widget at all — the external app owns its own window — but
+    # the session is still tracked so Active Sessions can disconnect it.
+    assert view._tabs.count() == 0
+    assert view._session_tab_widgets == {}
+    assert len(view._active_sessions) == 1
+    assert launched == [(2222, "alice")]
+
+
+def test_disconnecting_an_external_rdp_session_stops_its_tunnel(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.ConnectionManagerView._launch_external_rdp",
+        staticmethod(lambda port, username: None),
+    )
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+    view._on_external_rdp_tunnel_ready(tunnel, "test-vm", "alice")
+    session_id = next(iter(view._active_sessions))
+
+    view._on_disconnect_requested(session_id)
+
+    assert view._active_sessions == {}
+    qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
+
+
+def test_launch_external_rdp_writes_an_rdp_file_and_opens_it(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    opened = []
+    monkeypatch.setattr(
+        main_view_module.QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url))
+    )
+
+    main_view_module.ConnectionManagerView._launch_external_rdp(54321, "alice")
+
+    assert len(opened) == 1
+    path = opened[0].toLocalFile()
+    assert path.endswith(".rdp")
+    contents = open(path).read()
+    assert "full address:s:127.0.0.1:54321" in contents
+    assert "username:s:alice" in contents
+    assert "prompt for credentials:i:1" in contents
+
+
+def test_launch_external_rdp_omits_username_line_when_none(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    opened = []
+    monkeypatch.setattr(
+        main_view_module.QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url))
+    )
+
+    main_view_module.ConnectionManagerView._launch_external_rdp(54321, None)
+
+    contents = open(opened[0].toLocalFile()).read()
+    assert "username:s:" not in contents
+
+
+def test_instance_context_menu_offers_external_rdp_option(qtbot, monkeypatch):
+    # _build_instance_context_menu is split out precisely so this can be
+    # checked without ever calling QMenu.exec() — see its docstring and
+    # app.py's _build_session_tab_menu, which hit the same "monkeypatching
+    # exec() hangs the test" problem this split avoids.
+    view = _make_view(qtbot, monkeypatch)
+
+    menu, actions = view._build_instance_context_menu()
+
+    labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert labels == [
+        "Connect via RDP",
+        "Connect via RDP (External App)",
+        "Connect via SSH",
+        "Turn On",
+        "Turn Off",
+        "Force Shutdown…",
+        "Set Password…",
+    ]
+    assert actions["rdp_external"].text() == "Connect via RDP (External App)"
+
+
 def test_populate_qemu_hosts_creates_lazy_loading_host_items(qtbot, monkeypatch):
     from it_toolbox.modules.connection_manager.ui.main_view import CHILDREN_LOADED_ROLE, HOST_ROLE
 

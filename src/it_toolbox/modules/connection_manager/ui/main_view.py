@@ -1,4 +1,8 @@
-from PySide6.QtCore import Qt, QTimer
+import os
+import tempfile
+
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -595,28 +599,43 @@ class ConnectionManagerView(QWidget):
         if instance is None:
             return
 
-        menu = QMenu(self)
-        rdp_action = menu.addAction("Connect via RDP")
-        ssh_action = menu.addAction("Connect via SSH")
-        menu.addSeparator()
-        turn_on_action = menu.addAction("Turn On")
-        turn_off_action = menu.addAction("Turn Off")
-        force_shutdown_action = menu.addAction("Force Shutdown…")
-        menu.addSeparator()
-        set_password_action = menu.addAction("Set Password…")
+        menu, actions = self._build_instance_context_menu()
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
-        if chosen is rdp_action:
+        if chosen is actions["rdp"]:
             self._start_session_from_instance(instance, "rdp")
-        elif chosen is ssh_action:
+        elif chosen is actions["rdp_external"]:
+            self._start_external_rdp_session_from_instance(instance)
+        elif chosen is actions["ssh"]:
             self._start_session_from_instance(instance, "ssh")
-        elif chosen is turn_on_action:
+        elif chosen is actions["turn_on"]:
             self._run_instance_power_action(instance, "start")
-        elif chosen is turn_off_action:
+        elif chosen is actions["turn_off"]:
             self._run_instance_power_action(instance, "stop")
-        elif chosen is force_shutdown_action:
+        elif chosen is actions["force_shutdown"]:
             self._run_instance_power_action(instance, "force_stop")
-        elif chosen is set_password_action:
+        elif chosen is actions["set_password"]:
             self._on_set_instance_password_clicked(instance)
+
+    def _build_instance_context_menu(self) -> tuple[QMenu, dict[str, object]]:
+        """Split out from _on_tree_context_menu so tests can check the
+        built menu's actions without ever calling QMenu.exec() (which
+        opens a real, blocking popup with nothing to dismiss it headless
+        — see app.py's _build_session_tab_menu for the same split, done
+        for the same reason).
+        """
+        menu = QMenu(self)
+        actions = {
+            "rdp": menu.addAction("Connect via RDP"),
+            "rdp_external": menu.addAction("Connect via RDP (External App)"),
+            "ssh": menu.addAction("Connect via SSH"),
+        }
+        menu.addSeparator()
+        actions["turn_on"] = menu.addAction("Turn On")
+        actions["turn_off"] = menu.addAction("Turn Off")
+        actions["force_shutdown"] = menu.addAction("Force Shutdown…")
+        menu.addSeparator()
+        actions["set_password"] = menu.addAction("Set Password…")
+        return menu, actions
 
     def _show_qemu_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -722,6 +741,77 @@ class ConnectionManagerView(QWidget):
             username=username,
             password=password,
         )
+
+    def _start_external_rdp_session_from_instance(self, instance: Instance) -> None:
+        # No password prompt here (unlike _start_session_from_instance's
+        # "rdp" branch) — the external client owns its own credential
+        # prompt, the same way it already does for manually-configured
+        # external connections.
+        username = settings.load_default_username()
+        if username is None:
+            username, ok = QInputDialog.getText(
+                self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
+            )
+            if not ok:
+                return
+            username = username.strip() or None
+
+        target = IapTunnelTarget(
+            project=instance.project_id,
+            zone=instance.zone,
+            instance=instance.name,
+            interface=instance.network_interface,
+            port=RDP_PORT,
+        )
+        async_utils.run_in_background(
+            lambda: self._start_tunnel(target),
+            on_result=lambda tunnel: self._on_external_rdp_tunnel_ready(
+                tunnel, instance.name, username
+            ),
+            on_error=self._on_session_error,
+        )
+
+    def _on_external_rdp_tunnel_ready(
+        self, tunnel: BackgroundTunnel, display_name: str, username: str | None
+    ) -> None:
+        # Registered in _active_sessions (so "Disconnect" in Active
+        # Sessions tears the tunnel down, same as any other session) but
+        # deliberately not in _session_tab_widgets — there's no tab or
+        # widget for this session, the external app owns its own window.
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._active_sessions[session_id] = ("rdp", tunnel)
+
+        self._launch_external_rdp(tunnel.port, username)
+
+        label = f"{display_name} (RDP, external) — 127.0.0.1:{tunnel.port}"
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    @staticmethod
+    def _launch_external_rdp(port: int, username: str | None) -> None:
+        """Hands the connection off to whatever RDP client the OS has
+        registered for .rdp files (mstsc on a stock Windows machine)
+        instead of our embedded FreeRDP widget — a stopgap while
+        docs/embedded-rdp-status.md's open GCP-tunnel performance
+        question is unresolved: the same tunnel performs fine end-to-end
+        with mstsc on the other end of it (confirmed against a real GCP
+        VM), so this gives a working path today without waiting on that
+        investigation.
+
+        No password is written to the file — RDP files store one only as
+        a DPAPI blob tied to the *creating* machine/user, not a portable
+        secret worth trying to reproduce here. "prompt for credentials"
+        makes the external client ask for it in its own window instead,
+        the same as it already does for manually-configured external
+        connections.
+        """
+        lines = [f"full address:s:127.0.0.1:{port}", "prompt for credentials:i:1"]
+        if username:
+            lines.append(f"username:s:{username}")
+        fd, path = tempfile.mkstemp(suffix=".rdp", prefix="it-toolbox-")
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _run_instance_power_action(self, instance: Instance, action: str) -> None:
         if action == "stop":
