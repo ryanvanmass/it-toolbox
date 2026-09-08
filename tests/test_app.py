@@ -38,6 +38,84 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     assert window._sidebar_extras.currentWidget() is window._stack.widget(0).sidebar_tree
 
 
+def test_module_list_height_is_capped_to_fit_its_rows(qtbot, monkeypatch):
+    # Regression test: QListWidget.sizeHint() is a fixed Qt default
+    # (256x192) that ignores actual row count, which left a large dead
+    # gap between the module list and self._sidebar_extras below it.
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    row_height = window._module_list.sizeHintForRow(0)
+    frame = 2 * window._module_list.frameWidth()
+    expected = row_height * window._module_list.count() + frame
+
+    assert window._module_list.maximumHeight() == expected
+    assert window._module_list.maximumHeight() < window._module_list.sizeHint().height()
+
+
+def test_session_tabs_hidden_and_stack_stretched_for_a_module_without_tabs(qtbot, monkeypatch):
+    # Regression test: self._session_tabs stayed visible (and kept its
+    # layout stretch) even for Settings, which never puts anything into
+    # it -- leaving a large empty pane instead of giving that space to
+    # the module's own view.
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    settings_row = window._module_list.count() - 1
+    assert window._modules[settings_row].display_name == "Settings"
+    window._module_list.setCurrentRow(settings_row)
+
+    assert window._session_tabs.isHidden() is True
+    assert window._content_layout.stretch(0) == 1  # self._stack
+    assert window._content_layout.stretch(1) == 0  # self._session_tabs
+
+
+def test_session_tabs_stays_visible_and_stretched_for_a_module_with_tabs(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    # Switch away and back, so this doesn't just pass by never having
+    # left the default state.
+    window._module_list.setCurrentRow(window._module_list.count() - 1)
+    window._module_list.setCurrentRow(0)
+
+    assert window._session_tabs.isHidden() is False
+    assert window._content_layout.stretch(0) == 0  # self._stack
+    assert window._content_layout.stretch(1) == 1  # self._session_tabs
+
+
+def test_stack_size_hint_reflects_only_the_current_page(qtbot, monkeypatch):
+    # Regression test: QStackedWidget.sizeHint() defaults to the *largest*
+    # size among all its pages (via its internal QStackedLayout), not just
+    # the current one. self._stack holds every module's view, and
+    # Settings' is by far the tallest -- so every other module's thin
+    # toolbar-sized page was still allocated Settings-sized space in the
+    # layout, starving self._session_tabs below it even though the fixes
+    # above already made self._session_tabs visible/stretched correctly.
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    settings_row = window._module_list.count() - 1
+    assert window._modules[settings_row].display_name == "Settings"
+    settings_page_height = window._stack.widget(settings_row).sizeHint().height()
+
+    window._module_list.setCurrentRow(0)  # Connection Manager
+
+    connection_manager_page_height = window._stack.currentWidget().sizeHint().height()
+    assert window._stack.sizeHint().height() == connection_manager_page_height
+    # The actual bug: without the fix, this was Settings' height instead.
+    assert window._stack.sizeHint().height() != settings_page_height
+    assert connection_manager_page_height < settings_page_height
+
+
 def test_connection_manager_and_shell_launcher_share_one_tab_pane(qtbot, monkeypatch):
     _disable_external_tools(monkeypatch)
 

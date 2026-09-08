@@ -7,6 +7,7 @@ from it_toolbox.modules.settings.ui.main_view import SettingsView
 class SettingsModule(ToolModule):
     id = "settings"
     display_name = "Settings"
+    uses_shared_tabs = False
 
     def __init__(self) -> None:
         self._widget: SettingsView | None = None
