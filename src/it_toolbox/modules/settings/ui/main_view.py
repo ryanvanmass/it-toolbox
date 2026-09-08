@@ -309,15 +309,15 @@ class SettingsView(QWidget):
         box = QGroupBox("RDP Display")
         layout = QVBoxLayout(box)
 
-        layout.addWidget(
-            QLabel(
-                "Resolution requested for embedded RDP sessions (Connect via RDP). A "
-                "fixed size is requested once at connect and never changes with the "
-                "window — the display just stretches to fit — instead of matching the "
-                "window size on every resize, which can be slow to redraw over a slow "
-                "connection."
-            )
+        description = QLabel(
+            "Resolution requested for embedded RDP sessions (Connect via RDP). A "
+            "fixed size is requested once at connect and never changes with the "
+            "window — the display just stretches to fit — instead of matching the "
+            "window size on every resize, which can be slow to redraw over a slow "
+            "connection."
         )
+        description.setWordWrap(True)
+        layout.addWidget(description)
 
         self._rdp_resolution_combo = QComboBox()
         for label, _ in RDP_RESOLUTION_PRESETS:
