@@ -809,11 +809,21 @@ class ConnectionManagerView(QWidget):
         (2, full screen) would otherwise take over the whole display,
         which is disorienting for what's meant to be a quick one-off
         connection to a single VM.
+
+        "dynamic resolution:i:1" asks mstsc to renegotiate the server's
+        resolution live as the window is resized (the RDP 8+ Display
+        Control channel — the same mechanism the embedded widget drives
+        manually via refresh_resolution()) rather than requiring a fixed
+        size upfront. "smart sizing:i:1" is the client-side-scaling
+        fallback for servers that don't support that channel, so resizing
+        still does *something* reasonable either way.
         """
         lines = [
             f"full address:s:127.0.0.1:{port}",
             "prompt for credentials:i:1",
             "screen mode id:i:1",
+            "dynamic resolution:i:1",
+            "smart sizing:i:1",
         ]
         if username:
             lines.append(f"username:s:{username}")
