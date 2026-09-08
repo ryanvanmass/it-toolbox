@@ -35,8 +35,8 @@ def rdp_widget(qtbot, monkeypatch):
     return widget
 
 
-def test_post_connect_refresh_timer_is_a_single_thirty_second_shot(rdp_widget):
-    assert rdp_widget._post_connect_refresh.interval() == 30000
+def test_post_connect_refresh_timer_is_a_single_five_second_shot(rdp_widget):
+    assert rdp_widget._post_connect_refresh.interval() == 5000
     assert rdp_widget._post_connect_refresh.isSingleShot() is True
     assert not rdp_widget._post_connect_refresh.isActive()  # not started until connected
 
