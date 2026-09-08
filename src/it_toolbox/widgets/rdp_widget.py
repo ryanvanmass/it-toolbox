@@ -65,6 +65,18 @@ class RdpWidget(QWidget):
         self._resize_debounce.setInterval(250)
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
+        # A one-off nudge shortly after connecting: the server's initial
+        # negotiated resolution can be out of sync with the widget's
+        # actual size (e.g. it assumed a default before the window was
+        # ever laid out), and no real resizeEvent fires to correct it on
+        # its own since the widget's size hasn't changed. Parented to
+        # self (like _resize_debounce above) so it's torn down for free
+        # if the tab closes before it fires -- no dangling callback.
+        self._post_connect_refresh = QTimer(self)
+        self._post_connect_refresh.setSingleShot(True)
+        self._post_connect_refresh.setInterval(3000)
+        self._post_connect_refresh.timeout.connect(self.refresh_resolution)
+
         self._worker = RdpSessionWorker(host, port, username, password, domain)
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
@@ -74,6 +86,7 @@ class RdpWidget(QWidget):
 
     def _on_connected(self) -> None:
         self._status_label.hide()
+        self._post_connect_refresh.start()
 
     def _on_frame_ready(self, pixels: bytes, width: int, height: int, stride: int) -> None:
         self._frame_bytes = pixels  # QImage below wraps this buffer without copying it
