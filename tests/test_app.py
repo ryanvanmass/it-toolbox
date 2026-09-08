@@ -1,6 +1,8 @@
 import subprocess
 import sys
 
+from PySide6.QtWidgets import QMenu, QWidget
+
 from it_toolbox.app import MainWindow
 from it_toolbox.core.shell_discovery import Shell
 
@@ -168,6 +170,63 @@ def test_module_context_menu_has_default_username_and_active_sessions(qtbot, mon
         "Set Default Username…",
         "View Active Sessions…",
     ]
+
+
+class _FakeRdpWidget(QWidget):
+    """Stands in for the real RdpWidget — the real one starts a background
+    connection attempt in __init__, same reason connection_manager's own
+    tests use an equivalent stand-in for it."""
+
+    def __init__(self):
+        super().__init__()
+        self.refresh_calls = 0
+
+    def refresh_resolution(self):
+        self.refresh_calls += 1
+
+
+def test_rdp_tab_menu_offers_refresh_resolution_and_triggers_it(qtbot, monkeypatch):
+    import it_toolbox.app as app_module
+
+    _disable_external_tools(monkeypatch)
+    monkeypatch.setattr(app_module, "RdpWidget", _FakeRdpWidget)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    rdp_widget = _FakeRdpWidget()
+    qtbot.addWidget(rdp_widget)
+    index = window._session_tabs.addTab(rdp_widget, "myserver")
+
+    # _build_session_tab_menu() is exercised directly, never
+    # _on_session_tab_context_menu()/QMenu.exec() — exec() opens a real,
+    # blocking popup with nothing to dismiss it in a headless test.
+    menu = window._build_session_tab_menu(index)
+
+    assert menu is not None
+    assert [action.text() for action in menu.actions()] == ["Refresh Resolution"]
+    menu.actions()[0].trigger()
+    assert rdp_widget.refresh_calls == 1
+
+
+def test_non_rdp_tab_menu_is_none(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    plain_widget = QWidget()
+    qtbot.addWidget(plain_widget)
+    index = window._session_tabs.addTab(plain_widget, "a terminal")
+
+    assert window._build_session_tab_menu(index) is None
+
+
+def test_no_tab_at_click_position_gives_no_menu(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._build_session_tab_menu(-1) is None
 
 
 def test_app_imports_and_constructs_without_pygobject_installed():

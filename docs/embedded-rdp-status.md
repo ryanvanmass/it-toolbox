@@ -189,6 +189,50 @@ re-laid-out, not a stretched or cropped old frame).
   disp" log line already visible in every session before this feature
   existed.
 
+### Manual "Refresh Resolution" (2026-09-08)
+
+Added a "Refresh Resolution" action on a session tab's right-click menu
+(`RdpWidget.refresh_resolution()`) — re-sends the current widget size to
+the server even though it hasn't changed, for when the remote
+resolution has drifted out of sync without a real resize event to
+trigger a fix on its own.
+
+### Automatic post-connect trigger — attempted, reverted
+
+Also tried firing that same refresh automatically once, shortly after
+connecting, for when the server's *initial* resolution is already out
+of sync. Reverted at the user's request after it didn't visibly work in
+real usage; worth recording so a retry doesn't repeat the same path:
+
+1. First attempt: fire it a fixed N seconds after `connected` (tried 3s,
+   then 30s, then 5s). Real-usage report each time: the resolution never
+   visibly updated — not occasionally late, just not working.
+2. Root cause, from this file's own "Dynamic resolution resizing"
+   section above: `request_resize()` is a **documented no-op** until the
+   `disp` channel finishes binding (`self.display._context is None`
+   guard in `freerdp_client.py`) — a *separate* negotiation that happens
+   after `connected` already fired, with no fixed or guaranteed timing.
+   A flat delay from `connected` was always going to be a guess.
+3. Fix attempted: an actual `on_display_channel_ready` hook on
+   `FreeRdpSession` (mirroring `on_frame`), threaded up through
+   `RdpSessionWorker`/`RdpWidget` and wired directly to
+   `refresh_resolution()` — event-driven instead of a guessed delay.
+   Reasoned correctly from the documented gating above, but never
+   confirmed live before being reverted.
+4. **Reverted** rather than keep debugging blind — this repo's dev
+   environment can't test against a real RDP server, and three rounds
+   of "should work" not panning out in real usage was reason enough to
+   stop guessing. The manual action above still works standalone and
+   was kept.
+
+If picking this up again: the event-driven `on_display_channel_ready`
+approach (point 3) is still the technically correct fix for the
+documented no-op gating — it just needs someone who can verify live
+against a real server, ideally adding a log line at the point
+`on_display_channel_ready` fires so a session's real console output
+confirms whether/when the channel actually binds, rather than inferring
+it indirectly from whether the resolution visibly changed.
+
 ## Clipboard sync — attempted, reverted, worth knowing before retrying
 
 A full bidirectional clipboard bridge (`core/rdp/cliprdr.py`,

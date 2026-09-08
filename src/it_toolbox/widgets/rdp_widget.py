@@ -115,6 +115,18 @@ class RdpWidget(QWidget):
     def _send_resize_request(self) -> None:
         self._worker.request_resize(self.width(), self.height())
 
+    def refresh_resolution(self) -> None:
+        """Re-sends the current widget size to the server even though it
+        hasn't changed -- for when the remote desktop's resolution has
+        drifted out of sync with the window without a real resize event
+        to trigger a fix (e.g. after the server's own display state
+        changed, like a UAC prompt or a lock-screen transition). Exposed
+        as a manual "Refresh Resolution" action on the session tab's
+        context menu; request_resize() has no deduplication of its own,
+        so this always sends, unlike the debounced resizeEvent path.
+        """
+        self._send_resize_request()
+
     def close_session(self) -> None:
         """Matches the close_session() convention main_view uses to tear
         down any session tab (terminal, bucket browser, ...) uniformly."""
