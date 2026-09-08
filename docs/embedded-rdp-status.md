@@ -293,66 +293,105 @@ behavior.
 
 The fixed size is applied via
 `FreeRdpSession.connect(..., desktop_size=(w, h))` →
-`freerdp_client._apply_desktop_size()`, which goes through FreeRDP's own
-command-line settings parser
-(`freerdp_client_settings_parse_command_line()`, called with just
-`["it-toolbox", "/w:N", "/h:N"]`) rather than `freerdp_settings_set_uint32()`
-with a hand-picked `FreeRDP_DesktopWidth`/`DesktopHeight` key, unlike the
-settings in `_configure_settings()`. Those two keys' numeric values
-aren't a stable literal safe to transcribe: FreeRDP's upstream
+`freerdp_client._apply_desktop_size()`, which sets
+`FreeRDP_DesktopWidth`/`FreeRDP_DesktopHeight` directly via
+`freerdp_settings_set_uint32()` — but with the numeric key for each
+looked up at runtime via `freerdp_settings_get_key_for_name()`
+(`freerdp/settings.h`, a genuine public/exported API) rather than a
+hand-picked literal, unlike the settings in `_configure_settings()`
+(`SETTING_SERVER_PORT` etc., copied from a real generated header).
+`DesktopWidth`/`DesktopHeight`'s numeric keys aren't stable literals
+safe to transcribe by hand: FreeRDP's upstream
 `include/config/settings_keys.h.in` is a bare CMake
 `@SETTINGS_KEYS_UINT32@` template with no static enum checked into the
 source tree at any version checked (3.0.0 through 3.31.1), generated at
 build time in a way this project can't reproduce without a full FreeRDP
-build.
+build. `freerdp_settings_get_key_for_name()` sidesteps that permanently
+by resolving the name against whatever the *actual running library*
+says it is — verified empirically against this machine's real installed
+`libfreerdp3.so.3` (3.31.1): looking up `"FreeRDP_ServerPort"` this way
+returns 19, matching `SETTING_SERVER_PORT` above exactly, confirming the
+lookup is trustworthy and not just plausible.
 
-**First attempt used `freerdp_client_settings_parse_connection_file_buffer()`
-instead (the `.rdp`-file parser) — broke real connections, worth
-recording so it isn't retried.** In isolation it looked right: a
-standalone check confirmed a buffer with just `desktopwidth`/`desktopheight`
-lines set exactly those two fields. But real connections with a fixed
-resolution then failed to connect with no error surfaced. Root cause,
-found by diffing a `freerdp_client_settings_write_connection_file()`
-dump of the settings object before and after calling it: that parser
-allocates a whole `rdpFile` struct with ~50 fields of its *own* defaults
-(compression, connection type, authentication level, CredSSP support,
-...) and applies **all** of them to the target settings, not just the
-two lines actually in the buffer — silently stomping the NLA/security
-settings `_configure_settings()` had already set. The one-off
-verification script that "confirmed" this approach only checked the two
-fields it cared about, not the full settings surface, which is exactly
-how this got missed initially.
+Two earlier approaches were tried and discarded before landing here —
+worth recording so neither gets retried:
 
-The command-line parser's `/w`/`/h` handlers, by contrast, are each a
-single `freerdp_settings_set_uint32()` call on the same settings object
-handed in (verified against FreeRDP's own `cmdline.c`,
-`parse_command_line_option_uint32()` — no parallel defaults struct
-involved). Re-verified against this machine's real installed
-`libfreerdp-client3.so.3` (3.31.1) with the same before/after diffing
-approach, this time checking both the `.rdp`-file-representable fields
-*and* the NLA/TLS/RDP-security bools (which aren't part of the `.rdp`
-schema, so the file dump alone can't see them): `NLA`/`TLS`/`RDP`
-security, `SupportDisplayControl`, `DynamicResolutionUpdate`,
-`Username`, `Hostname`, and `Port` all came back byte-for-byte identical
-before and after — only desktop width/height changed. There is one
-small, benign side effect worth knowing about: `prepare_default_settings()`
-(called internally when none of `/network`, `/gfx`, `/rfx`, `/bpp` are
-present) sets `ConnectionType` to auto-detect, which cascades into a few
-`allow desktop composition`/`disable full window drag`/`disable menu
-anims` performance-flag defaults changing — cosmetic/performance only,
-not security-related, and it's exactly what a real `xfreerdp /w:N /h:N`
-invocation would also do, so it's matching upstream reference behavior
-rather than diverging from it.
+1. `freerdp_client_settings_parse_connection_file_buffer()` (the
+   `.rdp`-file parser). Looked correct in isolation — a standalone check
+   confirmed a buffer with just `desktopwidth`/`desktopheight` lines set
+   exactly those two fields — but real connections with a fixed
+   resolution then failed to connect with no error surfaced. Root cause,
+   found by diffing a `freerdp_client_settings_write_connection_file()`
+   dump of the settings object before and after calling it: that parser
+   allocates a whole `rdpFile` struct with ~50 fields of its *own*
+   defaults (compression, connection type, authentication level, CredSSP
+   support, ...) and applies **all** of them to the target settings, not
+   just the two lines actually in the buffer — silently stomping the
+   NLA/security settings `_configure_settings()` had already set. The
+   one-off verification script that "confirmed" this approach only
+   checked the two fields it cared about, not the full settings surface,
+   which is exactly how this got missed initially.
+2. `freerdp_client_settings_parse_command_line()` with
+   `["it-toolbox", "/w:N", "/h:N"]` — fixed the NLA-stomping problem
+   (each `/w`/`/h` handler is a single targeted
+   `freerdp_settings_set_uint32()` call, verified against FreeRDP's own
+   `cmdline.c`), and was re-verified clean against the real library the
+   same before/after-diffing way, this time also checking the
+   NLA/TLS/RDP-security bools directly (not just the `.rdp`-representable
+   fields, which don't cover those). But it still indirectly triggers
+   `prepare_default_settings()` setting `ConnectionType` to
+   `CONNECTION_TYPE_AUTODETECT` as a side effect of no other
+   network/gfx/rfx/bpp flag being present — turned out to be harmless in
+   practice (`AUTODETECT` is FreeRDP's own compiled-in default for a
+   bare context anyway, confirmed empirically), but still an unnecessary
+   side channel to depend on when a direct settings call now does the
+   whole job with zero side effects at all.
 
 Lesson for next time: when verifying an isolated settings/protocol
-change like this, diff the *entire* observable settings surface before
-vs. after, not just the specific fields the change was meant to touch —
-a narrow check can pass while a broader side effect still breaks the
-real thing it feeds into.
+change, diff the *entire* observable settings surface before vs. after,
+not just the specific fields the change was meant to touch — a narrow
+check can pass while a broader side effect still breaks the real thing
+it feeds into.
 
-Not yet verified: an actual GCP VM connection with a fixed resolution
-selected, to confirm the lag is really gone end-to-end and not just in
-the settings-level checks above.
+## Fixed resolution connects but renders nothing (2026-09-08, open)
+
+With the `freerdp_settings_get_key_for_name()` fix above in place, a
+real GCP VM connection with a fixed resolution selected now completes
+the *protocol* handshake cleanly — TLS, `gdi_init_ex` (local
+`PIXEL_FORMAT_BGRX32`, remote `PIXEL_FORMAT_BGRA32`), all four dynamic
+virtual channels (`ainput`, `rdpgfx`, `disp`, `rdpsnd`) loading, no
+errors anywhere in the log — but the tab stays blank. No frame ever
+paints.
+
+Leading theory going in — that the server was rendering through the
+newer Graphics Pipeline extension (`rdpgfx`, which our code never reads
+from; only `update->EndPaint` is hooked) instead of the classic
+bitmap-update path — was **ruled out**: `FreeRDP_SupportGraphicsPipeline`
+defaults to `0` (confirmed via the same `freerdp_settings_get_key_for_name()`
++ `freerdp_settings_get_bool()` combination) and nothing in
+`_configure_settings()` enables it, so the server has no capability
+signal from us to switch to it regardless of what channels load
+locally.
+
+Also checked and ruled out: the `ConnectionType = CONNECTION_TYPE_AUTODETECT`
+side effect from the discarded command-line-parser approach above isn't
+the differentiator either — a bare, freshly-created context (no
+command-line parsing at all, i.e. exactly what "Match window size" mode
+uses) already reports `connection type:i:7` (`CONNECTION_TYPE_AUTODETECT`)
+as FreeRDP's own compiled-in default, confirmed via the
+`freerdp_client_settings_write_connection_file()` dump technique above.
+So both modes get `AUTODETECT` regardless of the resolution fix, ruling
+it out as something introduced by this feature specifically.
+
+**Not yet resolved.** Still open: whether "Match window size" mode
+(never calls `_apply_desktop_size` at all) also renders blank against
+this same GCP VM — if so, the blank-screen bug is unrelated to the
+resolution feature entirely and pre-dates it (this embedded RDP client
+has only ever been verified end-to-end against a LAN test server per
+the sections above, never through the actual IAP tunnel to a real GCP
+VM) — versus something specific to setting `DesktopWidth`/`DesktopHeight`
+still being the differentiator despite the settings-level checks coming
+back clean.
 
 ## What's still open
 
