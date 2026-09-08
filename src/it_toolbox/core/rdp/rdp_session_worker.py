@@ -25,6 +25,12 @@ class RdpSessionSignals(QObject):
     connected = Signal()
     error = Signal(str)
     disconnected = Signal()
+    # Fires once the disp (DisplayControl) channel finishes binding, which
+    # happens as its own, separately-timed negotiation *after* connected
+    # already fired -- request_resize() is a documented no-op before this,
+    # so this is the actual "resize calls will work now" signal, not
+    # `connected`.
+    display_channel_ready = Signal()
 
 
 class RdpSessionWorker:
@@ -110,6 +116,12 @@ class RdpSessionWorker:
 
     def _run(self) -> None:
         self._session.on_frame = self._on_frame
+        # Set before connect(), not after: channel negotiation (including
+        # disp) happens as part of the capability exchange during
+        # connect() itself, so this can fire before connect() even
+        # returns -- setting it any later risks missing that exact
+        # callback the same way a fixed post-"connected" delay can.
+        self._session.on_display_channel_ready = self._on_display_channel_ready
         try:
             self._session.connect(
                 self._host, self._port, self._username, self._password, domain=self._domain
@@ -142,3 +154,7 @@ class RdpSessionWorker:
         # across via emit(), never a raw pointer.
         pixels, width, height, stride = self._session.get_frame()
         self.signals.frame_ready.emit(pixels, width, height, stride)
+
+    def _on_display_channel_ready(self) -> None:
+        # Also runs on the background thread — see _on_frame above.
+        self.signals.display_channel_ready.emit()

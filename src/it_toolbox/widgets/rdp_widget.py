@@ -65,28 +65,23 @@ class RdpWidget(QWidget):
         self._resize_debounce.setInterval(250)
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
-        # A one-off nudge shortly after connecting: the server's initial
-        # negotiated resolution can be out of sync with the widget's
-        # actual size (e.g. it assumed a default before the window was
-        # ever laid out), and no real resizeEvent fires to correct it on
-        # its own since the widget's size hasn't changed. Parented to
-        # self (like _resize_debounce above) so it's torn down for free
-        # if the tab closes before it fires -- no dangling callback.
-        self._post_connect_refresh = QTimer(self)
-        self._post_connect_refresh.setSingleShot(True)
-        self._post_connect_refresh.setInterval(5000)
-        self._post_connect_refresh.timeout.connect(self.refresh_resolution)
-
         self._worker = RdpSessionWorker(host, port, username, password, domain)
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
+        # request_resize() is a documented no-op until the disp
+        # (DisplayControl) channel finishes binding -- a separate
+        # negotiation that happens *after* "connected" already fired,
+        # with no fixed/guaranteed timing (a flat "wait N seconds" guess
+        # was tried here and turned out unreliable: the channel doesn't
+        # always finish binding within any fixed window). This fires
+        # exactly when the channel actually becomes usable instead.
+        self._worker.signals.display_channel_ready.connect(self.refresh_resolution)
         self._worker.signals.error.connect(self._on_error)
         self._worker.signals.disconnected.connect(self._on_disconnected)
         self._worker.start()
 
     def _on_connected(self) -> None:
         self._status_label.hide()
-        self._post_connect_refresh.start()
 
     def _on_frame_ready(self, pixels: bytes, width: int, height: int, stride: int) -> None:
         self._frame_bytes = pixels  # QImage below wraps this buffer without copying it
@@ -132,11 +127,15 @@ class RdpWidget(QWidget):
         """Re-sends the current widget size to the server even though it
         hasn't changed -- for when the remote desktop's resolution has
         drifted out of sync with the window without a real resize event
-        to trigger a fix (e.g. after the server's own display state
-        changed, like a UAC prompt or a lock-screen transition). Exposed
-        as a manual "Refresh Resolution" action on the session tab's
-        context menu; request_resize() has no deduplication of its own,
-        so this always sends, unlike the debounced resizeEvent path.
+        to trigger a fix on its own (e.g. after the server's own display
+        state changed, like a UAC prompt or a lock-screen transition).
+        Also connected directly to the worker's display_channel_ready
+        signal, so this fires automatically once resize calls first
+        become possible after connecting (see that signal's docstring),
+        in addition to being exposed as a manual "Refresh Resolution"
+        action on the session tab's context menu. request_resize() has no
+        deduplication of its own, so this always sends, unlike the
+        debounced resizeEvent path.
         """
         self._send_resize_request()
 

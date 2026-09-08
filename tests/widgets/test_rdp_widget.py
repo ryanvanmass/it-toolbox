@@ -35,26 +35,33 @@ def rdp_widget(qtbot, monkeypatch):
     return widget
 
 
-def test_post_connect_refresh_timer_is_a_single_five_second_shot(rdp_widget):
-    assert rdp_widget._post_connect_refresh.interval() == 5000
-    assert rdp_widget._post_connect_refresh.isSingleShot() is True
-    assert not rdp_widget._post_connect_refresh.isActive()  # not started until connected
-
-
-def test_connecting_starts_the_post_connect_refresh_timer(rdp_widget):
+def test_connecting_alone_does_not_trigger_a_resize(rdp_widget):
+    # request_resize() is a no-op until the disp channel binds, which is a
+    # separate event from "connected" -- connecting alone must not queue
+    # a resize call that would silently do nothing server-side.
     rdp_widget._worker.signals.connected.emit()
 
-    assert rdp_widget._post_connect_refresh.isActive()
+    assert rdp_widget._worker.resize_calls == []
 
 
-def test_post_connect_timer_firing_re_sends_the_current_size(qtbot, rdp_widget):
+def test_display_channel_ready_re_sends_the_current_size(rdp_widget):
     rdp_widget.resize(640, 480)
-    rdp_widget._post_connect_refresh.setInterval(10)  # don't actually wait 3s in a test
-    rdp_widget._worker.signals.connected.emit()
 
-    qtbot.waitUntil(lambda: bool(rdp_widget._worker.resize_calls), timeout=1000)
+    rdp_widget._worker.signals.display_channel_ready.emit()
 
     assert rdp_widget._worker.resize_calls[-1] == (rdp_widget.width(), rdp_widget.height())
+
+
+def test_display_channel_ready_before_connected_still_triggers(rdp_widget):
+    # Channel negotiation (including disp) happens as part of connect()'s
+    # own capability exchange, so display_channel_ready can legitimately
+    # fire before "connected" does -- must not depend on connection order.
+    rdp_widget.resize(640, 480)
+
+    rdp_widget._worker.signals.display_channel_ready.emit()
+    rdp_widget._worker.signals.connected.emit()
+
+    assert rdp_widget._worker.resize_calls == [(rdp_widget.width(), rdp_widget.height())]
 
 
 def test_refresh_resolution_sends_the_current_size_on_demand(rdp_widget):

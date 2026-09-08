@@ -370,6 +370,13 @@ class FreeRdpSession:
     def __init__(self) -> None:
         self._context: ctypes.POINTER(RdpContext) | None = None
         self.on_frame: callable | None = None  # called with no args after each EndPaint
+        # Called with no args once the disp channel finishes binding
+        # (see _on_channel_connected) -- request_resize() is a documented
+        # no-op before that, and channel binding is a separate, variably-
+        # timed negotiation *after* connect() already returned, so nothing
+        # earlier (e.g. a fixed delay from "connected") can reliably know
+        # when resize calls will actually start working.
+        self.on_display_channel_ready: callable | None = None
         self.display = DisplayChannel()
         # Kept alive for the lifetime of the session — ctypes does not keep
         # a reference to a CFUNCTYPE instance on its own, and libfreerdp
@@ -402,6 +409,8 @@ class FreeRdpSession:
         if name in (b"disp", b"Microsoft::Windows::RDS::DisplayControl"):
             disp_context = ctypes.cast(event_args.contents.pInterface, ctypes.POINTER(DispClientContext))
             self.display.bind(disp_context)
+            if self.on_display_channel_ready is not None:
+                self.on_display_channel_ready()
 
     def request_resize(self, width: int, height: int) -> None:
         """Ask the server to resize the remote desktop, and resize the
