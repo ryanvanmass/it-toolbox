@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.registry import load_modules
+from it_toolbox.widgets.rdp_widget import RdpWidget
 
 
 class _CurrentPageStackedWidget(QStackedWidget):
@@ -49,6 +51,10 @@ class MainWindow(QMainWindow):
         self._session_tabs.setTabsClosable(True)
         self._session_tabs.tabCloseRequested.connect(self._on_session_tab_close_requested)
         self._session_tabs.currentChanged.connect(self._on_session_tab_changed)
+        self._session_tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._session_tabs.tabBar().customContextMenuRequested.connect(
+            self._on_session_tab_context_menu
+        )
 
         self._modules: list[ToolModule] = load_modules(self._session_tabs)
 
@@ -144,3 +150,25 @@ class MainWindow(QMainWindow):
         widget = self._session_tabs.widget(index)
         if widget is not None:
             widget.setFocus()
+
+    def _build_session_tab_menu(self, index: int) -> QMenu | None:
+        """Split out from _on_session_tab_context_menu so tests can check
+        the built menu's actions without ever calling QMenu.exec() (which
+        opens a real, blocking popup with nothing to dismiss it headless).
+        Returns None where there's no tab at all, or the tab isn't a kind
+        with any actions to offer.
+        """
+        if index == -1:
+            return None
+        widget = self._session_tabs.widget(index)
+        if not isinstance(widget, RdpWidget):
+            return None
+        menu = QMenu(self)
+        menu.addAction("Refresh Resolution").triggered.connect(widget.refresh_resolution)
+        return menu
+
+    def _on_session_tab_context_menu(self, pos) -> None:
+        tab_bar = self._session_tabs.tabBar()
+        menu = self._build_session_tab_menu(tab_bar.tabAt(pos))
+        if menu is not None:
+            menu.exec(tab_bar.mapToGlobal(pos))
