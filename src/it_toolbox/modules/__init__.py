@@ -13,6 +13,12 @@ class ToolModule(ABC):
     #: Label shown in the sidebar.
     display_name: str
 
+    #: Whether this module ever puts anything into the shared session-tab
+    #: pane below its main view. False for modules with nothing tab-based
+    #: (e.g. Settings) — MainWindow hides the (otherwise permanently empty)
+    #: pane for those and gives the module's own view the space instead.
+    uses_shared_tabs: bool = True
+
     @property
     def icon(self) -> QIcon:
         """Sidebar icon. Defaults to no icon; override to customize."""

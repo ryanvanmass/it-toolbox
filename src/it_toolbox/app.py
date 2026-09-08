@@ -56,16 +56,26 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(module.create_widget())
             self._sidebar_extras.addWidget(module.create_sidebar_widget() or QWidget())
 
-        self._module_list.currentRowChanged.connect(self._stack.setCurrentIndex)
-        self._module_list.currentRowChanged.connect(self._sidebar_extras.setCurrentIndex)
+        # QListWidget's sizeHint() is a fixed Qt default (256x192) that
+        # ignores how many rows it actually has, so without this the list
+        # claims a chunk of the sidebar column no matter how few modules
+        # are registered, leaving a dead gap above self._sidebar_extras.
         if self._module_list.count():
-            self._module_list.setCurrentRow(0)
+            row_height = self._module_list.sizeHintForRow(0)
+            frame = 2 * self._module_list.frameWidth()
+            self._module_list.setMaximumHeight(row_height * self._module_list.count() + frame)
 
         content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.addWidget(self._stack)
-        content_layout.addWidget(self._session_tabs, 1)
+        self._content_layout = QVBoxLayout(content)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.addWidget(self._stack)
+        self._content_layout.addWidget(self._session_tabs, 1)
+
+        self._module_list.currentRowChanged.connect(self._stack.setCurrentIndex)
+        self._module_list.currentRowChanged.connect(self._sidebar_extras.setCurrentIndex)
+        self._module_list.currentRowChanged.connect(self._on_module_changed)
+        if self._module_list.count():
+            self._module_list.setCurrentRow(0)
 
         splitter = QSplitter()
         splitter.addWidget(sidebar)
@@ -75,6 +85,16 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("Ready")
+
+    def _on_module_changed(self, index: int) -> None:
+        # self._session_tabs is permanently empty for a module that never
+        # puts anything into it (e.g. Settings) -- hiding it and handing
+        # its stretch to self._stack instead lets that module's own view
+        # use the space, rather than leaving a big empty pane below it.
+        module = self._modules[index]
+        self._session_tabs.setVisible(module.uses_shared_tabs)
+        self._content_layout.setStretch(0, 0 if module.uses_shared_tabs else 1)
+        self._content_layout.setStretch(1, 1 if module.uses_shared_tabs else 0)
 
     def _on_module_context_menu(self, pos) -> None:
         item = self._module_list.itemAt(pos)
