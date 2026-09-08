@@ -197,6 +197,39 @@ the server even though it hasn't changed, for when the remote
 resolution has drifted out of sync without a real resize event to
 trigger a fix on its own.
 
+#### Fixed: stacked resize requests causing multi-second lag (2026-09-08)
+
+Real-usage report: after clicking "Refresh Resolution," dragging the
+window to resize it took 5-10s to render — a serious regression from
+this feature. Diagnosed with the user rather than guessing: **plain
+drag-to-resize alone, never touching the button, already has a ~2s
+delay** — confirmed a real, inherent cost of a resize over RDP (a round
+trip to the server plus a full-desktop redraw), not something this
+feature introduced from nothing.
+
+Root cause: `refresh_resolution()` originally called
+`_send_resize_request()` immediately, bypassing `_resize_debounce`
+entirely (the same 250ms timer `resizeEvent` itself uses to coalesce a
+drag into one request). `request_resize()` has no dedup/coalescing of
+its own further down either (`RdpSessionWorker._drain_input_queue`
+processes every queued `"resize"` entry). So clicking the button while
+a drag-triggered resize was already in flight didn't refresh anything —
+it queued a *second*, fully separate ~2s round trip on top of the
+first, and continuing to drag afterward could stack a third. Several
+stacked ~2s round trips is exactly the reported 5-10s.
+
+Fix: `refresh_resolution()` now calls `self._resize_debounce.start()`
+instead of sending immediately — a click during an in-flight resize
+just restarts the same pending timer rather than queuing an additional
+one, so it always coalesces down to at most one request in flight.
+Verified in `tests/widgets/test_rdp_widget.py` against a fake worker
+(can't test the real multi-second timing live from here), including a
+regression test that starting the debounce and then calling
+`refresh_resolution()` before it fires still produces exactly one
+resize call, not two. **Not yet reconfirmed against a real server** —
+next session picking this up should verify the button no longer
+introduces extra lag on top of the ~2s baseline.
+
 ### Automatic post-connect trigger — attempted, reverted
 
 Also tried firing that same refresh automatically once, shortly after

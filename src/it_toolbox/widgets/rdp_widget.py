@@ -122,10 +122,20 @@ class RdpWidget(QWidget):
         to trigger a fix (e.g. after the server's own display state
         changed, like a UAC prompt or a lock-screen transition). Exposed
         as a manual "Refresh Resolution" action on the session tab's
-        context menu; request_resize() has no deduplication of its own,
-        so this always sends, unlike the debounced resizeEvent path.
+        context menu.
+
+        Goes through the same debounce timer resizeEvent uses, rather
+        than calling _send_resize_request() immediately -- a real resize
+        (over RDP: a round trip to the server plus a full-desktop
+        redraw) is measurably slow on its own, confirmed in real usage.
+        Firing an *extra*, uncoordinated one on top of whatever a drag
+        already queued serialized into several stacked round trips, each
+        paying that same cost, which is what actually produced the
+        multi-second lag this was meant to fix in the first place.
+        Routing through the debounce means a click during a drag just
+        restarts the same pending request instead of adding another one.
         """
-        self._send_resize_request()
+        self._resize_debounce.start()
 
     def close_session(self) -> None:
         """Matches the close_session() convention main_view uses to tear
