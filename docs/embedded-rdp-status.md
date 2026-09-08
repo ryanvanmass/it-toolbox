@@ -294,31 +294,65 @@ behavior.
 The fixed size is applied via
 `FreeRdpSession.connect(..., desktop_size=(w, h))` →
 `freerdp_client._apply_desktop_size()`, which goes through FreeRDP's own
-`freerdp_client_settings_parse_connection_file_buffer()` (a small
-in-memory `.rdp`-file buffer with just `desktopwidth`/`desktopheight`
-lines) rather than `freerdp_settings_set_uint32()` with a hand-picked
-`FreeRDP_DesktopWidth`/`DesktopHeight` key, unlike the settings in
-`_configure_settings()`. Those two keys' numeric values aren't a stable
-literal safe to transcribe: FreeRDP's upstream
+command-line settings parser
+(`freerdp_client_settings_parse_command_line()`, called with just
+`["it-toolbox", "/w:N", "/h:N"]`) rather than `freerdp_settings_set_uint32()`
+with a hand-picked `FreeRDP_DesktopWidth`/`DesktopHeight` key, unlike the
+settings in `_configure_settings()`. Those two keys' numeric values
+aren't a stable literal safe to transcribe: FreeRDP's upstream
 `include/config/settings_keys.h.in` is a bare CMake
 `@SETTINGS_KEYS_UINT32@` template with no static enum checked into the
 source tree at any version checked (3.0.0 through 3.31.1), generated at
 build time in a way this project can't reproduce without a full FreeRDP
-build. The connection-file-buffer parser is the public, documented,
-non-generated alternative, and was verified end-to-end against this
-machine's real installed `libfreerdp-client3.so.3` (3.31.1): calling
-`_apply_desktop_size(context, 1920, 1080)` then reading the settings
-back via `freerdp_client_settings_write_connection_file()` confirmed
-`desktopwidth:i:1920`/`desktopheight:i:1080` landed correctly, with
-`username`/`password`/`full address`/`server port` (already set by
-`_configure_settings()`) completely untouched — matching what reading
-FreeRDP's own `populate_settings_from_rdp_file()` predicted (it checks
-each field against a per-field `~0`/"unset" sentinel and only touches
-settings a key is actually present for).
+build.
+
+**First attempt used `freerdp_client_settings_parse_connection_file_buffer()`
+instead (the `.rdp`-file parser) — broke real connections, worth
+recording so it isn't retried.** In isolation it looked right: a
+standalone check confirmed a buffer with just `desktopwidth`/`desktopheight`
+lines set exactly those two fields. But real connections with a fixed
+resolution then failed to connect with no error surfaced. Root cause,
+found by diffing a `freerdp_client_settings_write_connection_file()`
+dump of the settings object before and after calling it: that parser
+allocates a whole `rdpFile` struct with ~50 fields of its *own* defaults
+(compression, connection type, authentication level, CredSSP support,
+...) and applies **all** of them to the target settings, not just the
+two lines actually in the buffer — silently stomping the NLA/security
+settings `_configure_settings()` had already set. The one-off
+verification script that "confirmed" this approach only checked the two
+fields it cared about, not the full settings surface, which is exactly
+how this got missed initially.
+
+The command-line parser's `/w`/`/h` handlers, by contrast, are each a
+single `freerdp_settings_set_uint32()` call on the same settings object
+handed in (verified against FreeRDP's own `cmdline.c`,
+`parse_command_line_option_uint32()` — no parallel defaults struct
+involved). Re-verified against this machine's real installed
+`libfreerdp-client3.so.3` (3.31.1) with the same before/after diffing
+approach, this time checking both the `.rdp`-file-representable fields
+*and* the NLA/TLS/RDP-security bools (which aren't part of the `.rdp`
+schema, so the file dump alone can't see them): `NLA`/`TLS`/`RDP`
+security, `SupportDisplayControl`, `DynamicResolutionUpdate`,
+`Username`, `Hostname`, and `Port` all came back byte-for-byte identical
+before and after — only desktop width/height changed. There is one
+small, benign side effect worth knowing about: `prepare_default_settings()`
+(called internally when none of `/network`, `/gfx`, `/rfx`, `/bpp` are
+present) sets `ConnectionType` to auto-detect, which cascades into a few
+`allow desktop composition`/`disable full window drag`/`disable menu
+anims` performance-flag defaults changing — cosmetic/performance only,
+not security-related, and it's exactly what a real `xfreerdp /w:N /h:N`
+invocation would also do, so it's matching upstream reference behavior
+rather than diverging from it.
+
+Lesson for next time: when verifying an isolated settings/protocol
+change like this, diff the *entire* observable settings surface before
+vs. after, not just the specific fields the change was meant to touch —
+a narrow check can pass while a broader side effect still breaks the
+real thing it feeds into.
 
 Not yet verified: an actual GCP VM connection with a fixed resolution
 selected, to confirm the lag is really gone end-to-end and not just in
-the settings-level unit test above.
+the settings-level checks above.
 
 ## What's still open
 

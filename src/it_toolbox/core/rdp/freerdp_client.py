@@ -140,30 +140,42 @@ _client_lib.freerdp_client_context_new.restype = ctypes.POINTER(RdpContext)
 _client_lib.freerdp_client_context_free.argtypes = [ctypes.POINTER(RdpContext)]
 _client_lib.freerdp_client_context_free.restype = None
 
-# int freerdp_client_settings_parse_connection_file_buffer(rdpSettings* settings,
-#     const BYTE* buffer, size_t size);   (freerdp/client.h)
+# int freerdp_client_settings_parse_command_line(rdpSettings* settings, int argc,
+#     char** argv, BOOL allowUnknown);   (freerdp/client.h)
 # Used only to set a fixed initial desktop size (see _apply_desktop_size
-# below) via a couple of "desktopwidth:i:N"/"desktopheight:i:N" .rdp-file
-# lines rather than freerdp_settings_set_uint32() with a hand-picked
-# FreeRDP_DesktopWidth/DesktopHeight key — unlike the settings keys used
+# below) via "/w:N /h:N" — the same flags xfreerdp's own CLI takes —
+# rather than freerdp_settings_set_uint32() with a hand-picked
+# FreeRDP_DesktopWidth/DesktopHeight key: unlike the settings keys used
 # in _configure_settings() below (SETTING_SERVER_PORT etc., copied from a
 # real generated header), DesktopWidth/DesktopHeight's numeric key isn't a
-# stable literal safe to transcribe: FreeRDP's upstream
+# stable literal safe to transcribe — FreeRDP's upstream
 # include/config/settings_keys.h.in is a bare CMake @SETTINGS_KEYS_UINT32@
 # template with no static enum anywhere in the source tree, generated at
 # build time in a way this project can't reproduce without a full FreeRDP
-# build. This connection-file-buffer parser is the public, documented,
-# non-generated alternative — and confirmed (via FreeRDP's own
-# populate_settings_from_rdp_file, which checks each field against a
-# per-field ~0/"unset" sentinel) to only touch settings a key is actually
-# present for, so a buffer with just desktopwidth/desktopheight leaves
-# every other setting from _configure_settings() untouched.
-_client_lib.freerdp_client_settings_parse_connection_file_buffer.argtypes = [
+# build.
+#
+# An earlier version of this used freerdp_client_settings_parse_connection_file_buffer()
+# (the .rdp-file parser) instead — reads correct in isolation, and a
+# standalone smoke test confirmed the two fields it was given landed
+# right, but real connections then failed silently. Turned out that
+# parser allocates a whole rdpFile struct with ~50 fields of its *own*
+# defaults (compression, connection type, authentication level, CredSSP
+# support, ...) and applies all of them, not just the two lines in the
+# buffer — silently stomping the NLA/security settings
+# _configure_settings() had already set. The command-line parser's /w
+# and /h handlers, by contrast, are each a single
+# freerdp_settings_set_uint32() call on the same settings object handed
+# in — verified against cmdline.c's parse_command_line_option_uint32(),
+# no parallel defaults struct involved. allowUnknown=TRUE below since
+# argv here is deliberately just ["<argv0>", "/w:N", "/h:N"], not a full
+# command line.
+_client_lib.freerdp_client_settings_parse_command_line.argtypes = [
     ctypes.c_void_p,
-    ctypes.c_char_p,
-    ctypes.c_size_t,
+    ctypes.c_int32,
+    ctypes.POINTER(ctypes.c_char_p),
+    ctypes.c_int32,
 ]
-_client_lib.freerdp_client_settings_parse_connection_file_buffer.restype = ctypes.c_int32
+_client_lib.freerdp_client_settings_parse_command_line.restype = ctypes.c_int32
 
 # BOOL freerdp_connect(freerdp* instance);
 _core_lib.freerdp_connect.argtypes = [ctypes.POINTER(RdpFreerdp)]
@@ -336,16 +348,18 @@ def _configure_settings(
 
 def _apply_desktop_size(context: ctypes.POINTER(RdpContext), width: int, height: int) -> None:
     """Requests a fixed initial desktop resolution instead of whatever
-    FreeRDP defaults to — see the freerdp_client_settings_parse_connection_file_buffer
-    binding's comment above for why this goes through the .rdp
-    connection-file parser rather than a hand-picked settings key.
+    FreeRDP defaults to — see the freerdp_client_settings_parse_command_line
+    binding's comment above for why this goes through the command-line
+    parser (the same "/w:"/"/h:" flags xfreerdp itself takes) rather than
+    a hand-picked settings key or the .rdp connection-file parser.
     """
     settings = context.contents.settings
-    buffer = f"desktopwidth:i:{width}\ndesktopheight:i:{height}\n".encode()
-    result = _client_lib.freerdp_client_settings_parse_connection_file_buffer(
-        settings, buffer, len(buffer)
+    args = [b"it-toolbox", f"/w:{width}".encode(), f"/h:{height}".encode()]
+    argv = (ctypes.c_char_p * len(args))(*args)
+    result = _client_lib.freerdp_client_settings_parse_command_line(
+        settings, len(args), argv, 1
     )
-    if result != 0:
+    if result < 0:
         raise FreeRdpError(f"failed to set desktop size {width}x{height} (code {result})")
 
 
