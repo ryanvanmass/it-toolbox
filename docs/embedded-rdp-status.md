@@ -266,6 +266,60 @@ trial-and-error:
   `"cliprdr"` (unlike `disp`, see above) — channel binding itself
   worked fine on the first try.
 
+## Fixed resolution option, for GCP/IAP-tunnel connections (2026-09-08)
+
+A user report of 5-10s render lag after a window drag/resize turned out
+to be specific to GCP VM connections — these route through
+`core/iap_tunnel.py`/`core/tunnel_session.py`'s `BackgroundTunnel` (a
+WebSocket-relayed IAP tunnel), not a plain TCP connection, and every
+resize (match-window-size mode restarts a request on every
+`resizeEvent`) pays that tunnel's round trip. A direct connection
+doesn't show the lag; a real GCP VM does.
+
+Rather than trying to make that round trip faster (its own investigation
+— the tunnel's frame/ACK protocol was read through and matches gcloud's
+own `start-iap-tunnel` implementation, so there's no obvious protocol
+bug to fix there), Settings now offers a **fixed resolution** option for
+embedded RDP sessions (`core/settings.py`'s
+`load_default_rdp_resolution()`/`save_default_rdp_resolution()`,
+Settings page's new "RDP Display" section). Picking one of the presets
+(1280×720 through 3840×2160) requests that resolution once at connect
+and never again — `RdpWidget.resizeEvent` skips the resize-debounce
+entirely when a fixed size is configured, since `paintEvent` already
+stretches the image to fill the widget regardless of its native
+resolution. This sidesteps the round trip for the common case rather
+than fixing it. "Match window size" (`None`) keeps today's default
+behavior.
+
+The fixed size is applied via
+`FreeRdpSession.connect(..., desktop_size=(w, h))` →
+`freerdp_client._apply_desktop_size()`, which goes through FreeRDP's own
+`freerdp_client_settings_parse_connection_file_buffer()` (a small
+in-memory `.rdp`-file buffer with just `desktopwidth`/`desktopheight`
+lines) rather than `freerdp_settings_set_uint32()` with a hand-picked
+`FreeRDP_DesktopWidth`/`DesktopHeight` key, unlike the settings in
+`_configure_settings()`. Those two keys' numeric values aren't a stable
+literal safe to transcribe: FreeRDP's upstream
+`include/config/settings_keys.h.in` is a bare CMake
+`@SETTINGS_KEYS_UINT32@` template with no static enum checked into the
+source tree at any version checked (3.0.0 through 3.31.1), generated at
+build time in a way this project can't reproduce without a full FreeRDP
+build. The connection-file-buffer parser is the public, documented,
+non-generated alternative, and was verified end-to-end against this
+machine's real installed `libfreerdp-client3.so.3` (3.31.1): calling
+`_apply_desktop_size(context, 1920, 1080)` then reading the settings
+back via `freerdp_client_settings_write_connection_file()` confirmed
+`desktopwidth:i:1920`/`desktopheight:i:1080` landed correctly, with
+`username`/`password`/`full address`/`server port` (already set by
+`_configure_settings()`) completely untouched — matching what reading
+FreeRDP's own `populate_settings_from_rdp_file()` predicted (it checks
+each field against a per-field `~0`/"unset" sentinel and only touches
+settings a key is actually present for).
+
+Not yet verified: an actual GCP VM connection with a fixed resolution
+selected, to confirm the lag is really gone end-to-end and not just in
+the settings-level unit test above.
+
 ## What's still open
 
 - The MD4/legacy-provider gap noted above, if it turns out to matter

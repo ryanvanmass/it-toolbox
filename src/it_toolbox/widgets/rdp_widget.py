@@ -41,9 +41,18 @@ class RdpWidget(QWidget):
         username: str,
         password: str,
         domain: str = "",
+        desktop_size: tuple[int, int] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # None means "match window size" (today's default: every resize
+        # requests a matching server resolution). A fixed size instead
+        # means the server resolution is requested once at connect and
+        # never again from a resize — the displayed image is stretched to
+        # fit the widget regardless (see paintEvent), so a window resize
+        # doesn't need a round trip to look right. See settings.py's
+        # load_default_rdp_resolution() docstring for why this exists.
+        self._desktop_size = desktop_size
         self._image: QImage | None = None
         self._frame_bytes: bytes | None = None  # keeps QImage's backing buffer alive
         self._closing = False  # set by close_session(); suppresses finished re-emission
@@ -65,7 +74,7 @@ class RdpWidget(QWidget):
         self._resize_debounce.setInterval(250)
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
-        self._worker = RdpSessionWorker(host, port, username, password, domain)
+        self._worker = RdpSessionWorker(host, port, username, password, domain, desktop_size)
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
         self._worker.signals.error.connect(self._on_error)
@@ -110,20 +119,27 @@ class RdpWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._resize_debounce.start()
+        # A fixed desktop_size never changes after connect — window
+        # resizes just restretch the existing image (see paintEvent), no
+        # server round trip needed or wanted.
+        if self._desktop_size is None:
+            self._resize_debounce.start()
+
+    def _target_size(self) -> tuple[int, int]:
+        return self._desktop_size if self._desktop_size is not None else (self.width(), self.height())
 
     def _send_resize_request(self) -> None:
-        self._worker.request_resize(self.width(), self.height())
+        self._worker.request_resize(*self._target_size())
 
     def refresh_resolution(self) -> None:
-        """Re-sends the current widget size to the server even though it
+        """Re-sends the current target size to the server even though it
         hasn't changed -- for when the remote desktop's resolution has
-        drifted out of sync with the window without a real resize event
-        to trigger a fix (e.g. after the server's own display state
-        changed, like a UAC prompt or a lock-screen transition). Exposed
-        as a manual "Refresh Resolution" action on the session tab's
-        context menu; request_resize() has no deduplication of its own,
-        so this always sends, unlike the debounced resizeEvent path.
+        drifted out of sync without a real resize event to trigger a fix
+        (e.g. after the server's own display state changed, like a UAC
+        prompt or a lock-screen transition). Exposed as a manual "Refresh
+        Resolution" action on the session tab's context menu;
+        request_resize() has no deduplication of its own, so this always
+        sends, unlike the debounced resizeEvent path.
         """
         self._send_resize_request()
 

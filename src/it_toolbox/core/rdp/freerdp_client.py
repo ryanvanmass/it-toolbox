@@ -140,6 +140,31 @@ _client_lib.freerdp_client_context_new.restype = ctypes.POINTER(RdpContext)
 _client_lib.freerdp_client_context_free.argtypes = [ctypes.POINTER(RdpContext)]
 _client_lib.freerdp_client_context_free.restype = None
 
+# int freerdp_client_settings_parse_connection_file_buffer(rdpSettings* settings,
+#     const BYTE* buffer, size_t size);   (freerdp/client.h)
+# Used only to set a fixed initial desktop size (see _apply_desktop_size
+# below) via a couple of "desktopwidth:i:N"/"desktopheight:i:N" .rdp-file
+# lines rather than freerdp_settings_set_uint32() with a hand-picked
+# FreeRDP_DesktopWidth/DesktopHeight key — unlike the settings keys used
+# in _configure_settings() below (SETTING_SERVER_PORT etc., copied from a
+# real generated header), DesktopWidth/DesktopHeight's numeric key isn't a
+# stable literal safe to transcribe: FreeRDP's upstream
+# include/config/settings_keys.h.in is a bare CMake @SETTINGS_KEYS_UINT32@
+# template with no static enum anywhere in the source tree, generated at
+# build time in a way this project can't reproduce without a full FreeRDP
+# build. This connection-file-buffer parser is the public, documented,
+# non-generated alternative — and confirmed (via FreeRDP's own
+# populate_settings_from_rdp_file, which checks each field against a
+# per-field ~0/"unset" sentinel) to only touch settings a key is actually
+# present for, so a buffer with just desktopwidth/desktopheight leaves
+# every other setting from _configure_settings() untouched.
+_client_lib.freerdp_client_settings_parse_connection_file_buffer.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+    ctypes.c_size_t,
+]
+_client_lib.freerdp_client_settings_parse_connection_file_buffer.restype = ctypes.c_int32
+
 # BOOL freerdp_connect(freerdp* instance);
 _core_lib.freerdp_connect.argtypes = [ctypes.POINTER(RdpFreerdp)]
 _core_lib.freerdp_connect.restype = ctypes.c_int32
@@ -309,6 +334,21 @@ def _configure_settings(
     _core_lib.freerdp_settings_set_bool(settings, SETTING_DYNAMIC_RESOLUTION_UPDATE, 1)
 
 
+def _apply_desktop_size(context: ctypes.POINTER(RdpContext), width: int, height: int) -> None:
+    """Requests a fixed initial desktop resolution instead of whatever
+    FreeRDP defaults to — see the freerdp_client_settings_parse_connection_file_buffer
+    binding's comment above for why this goes through the .rdp
+    connection-file parser rather than a hand-picked settings key.
+    """
+    settings = context.contents.settings
+    buffer = f"desktopwidth:i:{width}\ndesktopheight:i:{height}\n".encode()
+    result = _client_lib.freerdp_client_settings_parse_connection_file_buffer(
+        settings, buffer, len(buffer)
+    )
+    if result != 0:
+        raise FreeRdpError(f"failed to set desktop size {width}x{height} (code {result})")
+
+
 def _raise_last_error(context: ctypes.POINTER(RdpContext), prefix: str) -> None:
     code = _core_lib.freerdp_get_last_error(context)
     message = _core_lib.freerdp_get_last_error_string(code)
@@ -426,10 +466,13 @@ class FreeRdpSession:
         password: str,
         domain: str = "",
         ignore_certificate: bool = True,
+        desktop_size: tuple[int, int] | None = None,
     ) -> None:
         context = _new_context()
         self._context = context
         _configure_settings(context, host, port, username, password, domain, ignore_certificate)
+        if desktop_size is not None:
+            _apply_desktop_size(context, *desktop_size)
         context.contents.instance.contents.PostConnect = self._post_connect_cb
         _winpr_lib.PubSub_Subscribe(
             context.contents.pubSub,

@@ -39,12 +39,14 @@ class RdpSessionWorker:
         username: str,
         password: str,
         domain: str = "",
+        desktop_size: tuple[int, int] | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._username = username
         self._password = password
         self._domain = domain
+        self._desktop_size = desktop_size
         self.signals = RdpSessionSignals()
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
@@ -112,7 +114,12 @@ class RdpSessionWorker:
         self._session.on_frame = self._on_frame
         try:
             self._session.connect(
-                self._host, self._port, self._username, self._password, domain=self._domain
+                self._host,
+                self._port,
+                self._username,
+                self._password,
+                domain=self._domain,
+                desktop_size=self._desktop_size,
             )
         except FreeRdpError as exc:
             self.signals.error.emit(str(exc))
