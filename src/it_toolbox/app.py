@@ -14,6 +14,27 @@ from it_toolbox.modules import ToolModule
 from it_toolbox.modules.registry import load_modules
 
 
+class _CurrentPageStackedWidget(QStackedWidget):
+    """QStackedWidget.sizeHint()/minimumSizeHint() default to the largest
+    size among *all* pages (via its internal QStackedLayout), not just the
+    current one. For self._stack, whose pages are wildly different sizes
+    (Connection Manager's thin sign-in toolbar vs. Settings' full
+    scrollable content), that meant every module's layout row claimed
+    space sized for the *tallest* page regardless of which one was
+    actually showing -- e.g. Connection Manager's own page only needs
+    ~43px but the row was always ~408px, starving self._session_tabs
+    below it. Report only the current page's size instead.
+    """
+
+    def sizeHint(self):
+        widget = self.currentWidget()
+        return widget.sizeHint() if widget is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        widget = self.currentWidget()
+        return widget.minimumSizeHint() if widget is not None else super().minimumSizeHint()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -41,7 +62,7 @@ class MainWindow(QMainWindow):
         # Each module's own small header/toolbar area (e.g. Connection
         # Manager's sign-in status bar) — swaps per module, sitting above
         # the shared, never-swapped self._session_tabs below it.
-        self._stack = QStackedWidget()
+        self._stack = _CurrentPageStackedWidget()
 
         sidebar = QWidget()
         sidebar_layout = QVBoxLayout(sidebar)
@@ -95,6 +116,11 @@ class MainWindow(QMainWindow):
         self._session_tabs.setVisible(module.uses_shared_tabs)
         self._content_layout.setStretch(0, 0 if module.uses_shared_tabs else 1)
         self._content_layout.setStretch(1, 1 if module.uses_shared_tabs else 0)
+        # Qt caches sizeHint()/minimumSizeHint() and only re-queries a
+        # widget's layout on updateGeometry() -- without this, switching
+        # pages wouldn't pick up _CurrentPageStackedWidget's now-different
+        # sizeHint() for the new current page.
+        self._stack.updateGeometry()
 
     def _on_module_context_menu(self, pos) -> None:
         item = self._module_list.itemAt(pos)
