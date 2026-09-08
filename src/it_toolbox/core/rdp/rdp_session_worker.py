@@ -17,7 +17,7 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
-from it_toolbox.core.rdp.freerdp_client import FreeRdpError, FreeRdpSession
+from it_toolbox.core.rdp.freerdp_client import FreeRdpSession
 
 
 class RdpSessionSignals(QObject):
@@ -121,8 +121,16 @@ class RdpSessionWorker:
                 domain=self._domain,
                 desktop_size=self._desktop_size,
             )
-        except FreeRdpError as exc:
-            self.signals.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - see comment below
+            # Deliberately broader than FreeRdpError: an uncaught exception
+            # on this background thread has nothing to propagate to — it
+            # just kills the thread silently, leaving the widget stuck on
+            # "Connecting…" forever with no signal ever emitted and no
+            # visible error. That's a strictly worse failure mode than
+            # showing a slightly-less-tailored message for something
+            # unanticipated (e.g. a ctypes marshaling mistake), so anything
+            # unexpected here still surfaces rather than vanishing.
+            self.signals.error.emit(f"{type(exc).__name__}: {exc}")
             return
 
         self.signals.connected.emit()
@@ -137,8 +145,8 @@ class RdpSessionWorker:
                 # polling well above any useful frame rate at a small,
                 # bounded CPU cost.
                 time.sleep(0.005)
-        except FreeRdpError as exc:
-            self.signals.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - see comment above
+            self.signals.error.emit(f"{type(exc).__name__}: {exc}")
         finally:
             self._session.disconnect()
             self.signals.disconnected.emit()

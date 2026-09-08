@@ -484,9 +484,17 @@ class FreeRdpSession:
     ) -> None:
         context = _new_context()
         self._context = context
-        _configure_settings(context, host, port, username, password, domain, ignore_certificate)
-        if desktop_size is not None:
-            _apply_desktop_size(context, *desktop_size)
+        try:
+            _configure_settings(context, host, port, username, password, domain, ignore_certificate)
+            if desktop_size is not None:
+                _apply_desktop_size(context, *desktop_size)
+        except Exception:
+            # Neither of the calls above has connected anything yet — free
+            # the context now rather than leaking it, the same as the
+            # freerdp_connect failure branch below does.
+            self._context = None
+            _client_lib.freerdp_client_context_free(context)
+            raise
         context.contents.instance.contents.PostConnect = self._post_connect_cb
         _winpr_lib.PubSub_Subscribe(
             context.contents.pubSub,
