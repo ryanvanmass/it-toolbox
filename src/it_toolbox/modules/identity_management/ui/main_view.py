@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils, settings
 from it_toolbox.modules.identity_management import jumpcloud_client
 from it_toolbox.modules.identity_management.models import Device, User
-from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
 
 IS_JUMPCLOUD_ROOT_ROLE = Qt.ItemDataRole.UserRole
 CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -256,9 +255,6 @@ class IdentityManagementView(QWidget):
         split, done for the same reason).
         """
         menu = QMenu(self)
-        configured = settings.jumpcloud_api_key_path().is_file()
-        label = "Change JumpCloud API Key…" if configured else "Set JumpCloud API Key…"
-        menu.addAction(label).triggered.connect(self._on_set_api_key_clicked)
         menu.addAction("Refresh").triggered.connect(self.refresh)
         return menu
 
@@ -267,12 +263,6 @@ class IdentityManagementView(QWidget):
         if item is None or not item.data(0, IS_JUMPCLOUD_ROOT_ROLE):
             return
         self._build_jumpcloud_root_menu().exec(self._tree.viewport().mapToGlobal(pos))
-
-    def _on_set_api_key_clicked(self) -> None:
-        dialog = ApiKeyDialog(parent=self)
-        if dialog.exec() == ApiKeyDialog.DialogCode.Accepted:
-            self._cached_api_key = None
-            self.refresh()
 
     def _get_api_key(self) -> str | None:
         if self._cached_api_key is not None:
@@ -299,14 +289,18 @@ class IdentityManagementView(QWidget):
         return api_key
 
     def refresh(self) -> None:
+        # Cleared unconditionally (not just left to _get_api_key()'s own
+        # is-not-None check) so that an explicit Refresh always re-reads
+        # from disk — otherwise a key changed via Settings after this
+        # view already cached the old (or no) key would never be picked
+        # up without restarting the app.
+        self._cached_api_key = None
         api_key = self._get_api_key()
         if api_key is None:
             message = (
-                "Couldn't unlock the stored JumpCloud API key — right-click "
-                '"JumpCloud" and choose "Change JumpCloud API Key…".'
+                "Couldn't unlock the stored JumpCloud API key — set it again in Settings."
                 if settings.jumpcloud_api_key_path().is_file()
-                else 'No JumpCloud API key configured — right-click "JumpCloud" '
-                'and choose "Set JumpCloud API Key…".'
+                else "No JumpCloud API key configured — set one in Settings."
             )
             self._show_category_placeholder(self._devices_category, message)
             self._show_category_placeholder(self._users_category, message)

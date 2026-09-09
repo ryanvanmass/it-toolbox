@@ -7,6 +7,14 @@ from it_toolbox.modules.settings.ui import main_view as settings_main_view
 from it_toolbox.modules.settings.ui.main_view import SettingsView
 
 
+class _FakePath:
+    def __init__(self, exists: bool) -> None:
+        self._exists = exists
+
+    def is_file(self) -> bool:
+        return self._exists
+
+
 def _make_view(
     qtbot,
     monkeypatch,
@@ -17,6 +25,7 @@ def _make_view(
     platform_system="Linux",
     qemu_available=False,
     default_rdp_resolution=None,
+    jumpcloud_key_configured=False,
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
     # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
@@ -30,6 +39,9 @@ def _make_view(
     monkeypatch.setattr(rclone_client, "rclone_executable", lambda: "/usr/bin/rclone")
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
+    monkeypatch.setattr(
+        settings, "jumpcloud_api_key_path", lambda: _FakePath(jumpcloud_key_configured)
+    )
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
     monkeypatch.setattr(qemu_client, "is_available", lambda: qemu_available)
     monkeypatch.setattr(settings_main_view.platform, "system", lambda: platform_system)
@@ -229,6 +241,63 @@ def test_gcloud_sign_out_updates_status(qtbot, monkeypatch):
     view._on_gcloud_sign_out_clicked()
 
     qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+
+def test_jumpcloud_section_shows_unconfigured_state(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, jumpcloud_key_configured=False)
+
+    assert "No API key configured" in view._jumpcloud_status_label.text()
+    assert view._jumpcloud_key_button.text() == "Set JumpCloud API Key…"
+
+
+def test_jumpcloud_section_shows_configured_state(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, jumpcloud_key_configured=True)
+
+    assert "API key configured" in view._jumpcloud_status_label.text()
+    assert view._jumpcloud_key_button.text() == "Change JumpCloud API Key…"
+
+
+def test_setting_jumpcloud_key_refreshes_status_on_accept(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, jumpcloud_key_configured=False)
+
+    class _FakeDialog:
+        DialogCode = settings_main_view.ApiKeyDialog.DialogCode
+
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            # Simulate the key having been saved by the time the dialog
+            # closes — a real save updates the file the monkeypatched
+            # jumpcloud_api_key_path() below now reports as existing.
+            return self.DialogCode.Accepted
+
+    monkeypatch.setattr(settings_main_view, "ApiKeyDialog", _FakeDialog)
+    monkeypatch.setattr(settings, "jumpcloud_api_key_path", lambda: _FakePath(True))
+
+    view._on_set_jumpcloud_key_clicked()
+
+    assert "API key configured" in view._jumpcloud_status_label.text()
+    assert view._jumpcloud_key_button.text() == "Change JumpCloud API Key…"
+
+
+def test_dismissing_jumpcloud_key_dialog_leaves_status_unchanged(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, jumpcloud_key_configured=False)
+
+    class _FakeDialog:
+        DialogCode = settings_main_view.ApiKeyDialog.DialogCode
+
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            return self.DialogCode.Rejected
+
+    monkeypatch.setattr(settings_main_view, "ApiKeyDialog", _FakeDialog)
+
+    view._on_set_jumpcloud_key_clicked()
+
+    assert "No API key configured" in view._jumpcloud_status_label.text()
 
 
 def test_qemu_section_not_applicable_off_linux(qtbot, monkeypatch):

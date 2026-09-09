@@ -24,6 +24,7 @@ from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.modules.connection_manager import qemu_client
+from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
 from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
 
 # FreeRDP DLL loading happens as an import-time side effect in
@@ -68,6 +69,7 @@ class SettingsView(QWidget):
         self._content_layout.addWidget(self._build_updates_section())
         self._content_layout.addWidget(self._build_rclone_section())
         self._content_layout.addWidget(self._build_gcloud_section())
+        self._content_layout.addWidget(self._build_jumpcloud_section())
         self._content_layout.addWidget(self._build_qemu_section())
         self._content_layout.addWidget(self._build_rdp_display_section())
         self._content_layout.addWidget(self._build_freerdp_section())
@@ -276,6 +278,39 @@ class SettingsView(QWidget):
         self._gcloud_sign_in_button.setEnabled(True)
         self._gcloud_sign_out_button.setEnabled(True)
         self._gcloud_status_label.setText(f"gcloud error: {error}")
+
+    # -- JumpCloud ------------------------------------------------------------
+
+    def _build_jumpcloud_section(self) -> QGroupBox:
+        box = QGroupBox("JumpCloud")
+        layout = QVBoxLayout(box)
+
+        self._jumpcloud_status_label = QLabel()
+        self._jumpcloud_status_label.setWordWrap(True)
+        layout.addWidget(self._jumpcloud_status_label)
+
+        self._jumpcloud_key_button = QPushButton()
+        self._jumpcloud_key_button.clicked.connect(self._on_set_jumpcloud_key_clicked)
+        layout.addWidget(self._jumpcloud_key_button)
+
+        self._refresh_jumpcloud_status()
+        return box
+
+    def _refresh_jumpcloud_status(self) -> None:
+        configured = settings.jumpcloud_api_key_path().is_file()
+        self._jumpcloud_status_label.setText(
+            "API key configured — used by the Identity Management module."
+            if configured
+            else "No API key configured yet — needed by the Identity Management module."
+        )
+        self._jumpcloud_key_button.setText(
+            "Change JumpCloud API Key…" if configured else "Set JumpCloud API Key…"
+        )
+
+    def _on_set_jumpcloud_key_clicked(self) -> None:
+        dialog = ApiKeyDialog(parent=self)
+        if dialog.exec() == ApiKeyDialog.DialogCode.Accepted:
+            self._refresh_jumpcloud_status()
 
     # -- QEMU/libvirt ---------------------------------------------------------
 

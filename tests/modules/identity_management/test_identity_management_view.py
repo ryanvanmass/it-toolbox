@@ -195,24 +195,17 @@ def test_refresh_shows_placeholder_when_no_api_key_configured(qtbot, monkeypatch
     assert "No JumpCloud API key configured" in view._users_category.child(0).text(0)
 
 
-def test_jumpcloud_root_menu_offers_set_key_when_unconfigured(qtbot, monkeypatch):
+def test_jumpcloud_root_menu_offers_only_refresh(qtbot, monkeypatch):
     # _build_jumpcloud_root_menu is split out precisely so this can be
     # checked without ever calling QMenu.exec() — see its docstring and
     # app.py's _build_session_tab_menu, which hit the same "monkeypatching
-    # exec() hangs the test" problem this split avoids.
-    view = _make_view(qtbot, monkeypatch, api_key=None)
-
-    menu = view._build_jumpcloud_root_menu()
-
-    assert [a.text() for a in menu.actions()] == ["Set JumpCloud API Key…", "Refresh"]
-
-
-def test_jumpcloud_root_menu_offers_change_key_when_configured(qtbot, monkeypatch):
+    # exec() hangs the test" problem this split avoids. Setting the API
+    # key itself moved to the Settings page — this menu is action-only now.
     view = _make_view(qtbot, monkeypatch)
 
     menu = view._build_jumpcloud_root_menu()
 
-    assert [a.text() for a in menu.actions()] == ["Change JumpCloud API Key…", "Refresh"]
+    assert [a.text() for a in menu.actions()] == ["Refresh"]
 
 
 def test_populate_device_detail_after_teardown_does_not_raise(qtbot, monkeypatch):
