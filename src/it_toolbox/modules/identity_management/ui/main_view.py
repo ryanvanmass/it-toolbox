@@ -64,6 +64,10 @@ class IdentityManagementView(QWidget):
         self._cached_api_key: str | None = None
         self._selected_device: Device | None = None
 
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Search devices and users…")
+        self._search_box.textChanged.connect(self._on_search_text_changed)
+
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Providers"])
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -86,6 +90,12 @@ class IdentityManagementView(QWidget):
         self._devices_category.setExpanded(True)
         self._users_category.setExpanded(True)
 
+        self._sidebar_widget = QWidget()
+        sidebar_layout = QVBoxLayout(self._sidebar_widget)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.addWidget(self._search_box)
+        sidebar_layout.addWidget(self._tree, 1)
+
         self._placeholder_label = QLabel("Select a device or user to see its details.")
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -100,12 +110,13 @@ class IdentityManagementView(QWidget):
         self.refresh()
 
     @property
-    def sidebar_tree(self) -> QTreeWidget:
-        """The provider/category/item browser, hosted in the app sidebar
-        (nested under this module's entry) rather than in this view's
-        own layout — see IdentityManagementModule.create_sidebar_widget().
+    def sidebar_widget(self) -> QWidget:
+        """The provider/category/item browser (search box + tree), hosted
+        in the app sidebar (nested under this module's entry) rather than
+        in this view's own layout — see
+        IdentityManagementModule.create_sidebar_widget().
         """
-        return self._tree
+        return self._sidebar_widget
 
     # -- Device detail ----------------------------------------------------
 
@@ -229,6 +240,9 @@ class IdentityManagementView(QWidget):
                 item = QTreeWidgetItem([device.display_name])
                 item.setData(0, DEVICE_ROLE, device)
                 self._devices_category.addChild(item)
+            # Re-apply an already-typed search — a Refresh shouldn't
+            # un-filter results the user was in the middle of narrowing.
+            self._filter_category(self._devices_category, self._search_box.text())
         except RuntimeError:
             pass  # widget torn down mid-flight
 
@@ -242,8 +256,36 @@ class IdentityManagementView(QWidget):
                 item = QTreeWidgetItem([user.username])
                 item.setData(0, USER_ROLE, user)
                 self._users_category.addChild(item)
+            self._filter_category(self._users_category, self._search_box.text())
         except RuntimeError:
             pass  # widget torn down mid-flight
+
+    # -- Search -------------------------------------------------------------
+
+    def _on_search_text_changed(self, text: str) -> None:
+        self._filter_category(self._devices_category, text)
+        self._filter_category(self._users_category, text)
+
+    @staticmethod
+    def _filter_category(category: QTreeWidgetItem, query: str) -> None:
+        query = query.strip().lower()
+        visible_count = 0
+        for i in range(category.childCount()):
+            child = category.child(i)
+            is_leaf = child.data(0, DEVICE_ROLE) is not None or child.data(0, USER_ROLE) is not None
+            if not is_leaf:
+                # A "Loading…"/"No devices found." placeholder, not a real
+                # item — only worth showing when not actively searching.
+                child.setHidden(bool(query))
+                continue
+            matches = not query or query in child.text(0).lower()
+            child.setHidden(not matches)
+            if matches:
+                visible_count += 1
+        # Hide the whole category (rather than an empty, expandable
+        # "Devices"/"Users" row with nothing under it) once a search
+        # excludes everything in it.
+        category.setHidden(bool(query) and visible_count == 0)
 
     # -- Context menu / API key / refresh -------------------------------------
 

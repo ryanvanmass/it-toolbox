@@ -73,6 +73,95 @@ def test_users_populate_as_tree_children(qtbot, monkeypatch):
     assert view._users_category.child(0).data(0, USER_ROLE) == users[0]
 
 
+# -- Search -------------------------------------------------------------
+
+
+def test_search_hides_non_matching_devices(qtbot, monkeypatch):
+    devices = [
+        Device(id="d1", display_name="alpha", os="windows"),
+        Device(id="d2", display_name="beta", os="linux"),
+    ]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+
+    view._search_box.setText("alp")
+
+    assert not view._devices_category.child(0).isHidden()  # alpha
+    assert view._devices_category.child(1).isHidden()  # beta
+
+
+def test_search_hides_non_matching_users(qtbot, monkeypatch):
+    users = [
+        User(id="u1", username="alice", email="alice@example.com"),
+        User(id="u2", username="bob", email="bob@example.com"),
+    ]
+    view = _make_view(qtbot, monkeypatch, users=users)
+    qtbot.waitUntil(lambda: view._users_category.childCount() == 2, timeout=2000)
+
+    view._search_box.setText("ali")
+
+    assert not view._users_category.child(0).isHidden()  # alice
+    assert view._users_category.child(1).isHidden()  # bob
+
+
+def test_search_is_case_insensitive(qtbot, monkeypatch):
+    devices = [Device(id="d1", display_name="AlphaHost", os="windows")]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+    )
+
+    view._search_box.setText("alphahost")
+
+    assert not view._devices_category.child(0).isHidden()
+
+
+def test_search_hides_a_category_with_no_matches(qtbot, monkeypatch):
+    devices = [Device(id="d1", display_name="alpha", os="windows")]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+    )
+
+    view._search_box.setText("no-such-device")
+
+    assert view._devices_category.isHidden()
+
+
+def test_clearing_search_shows_everything_again(qtbot, monkeypatch):
+    devices = [
+        Device(id="d1", display_name="alpha", os="windows"),
+        Device(id="d2", display_name="beta", os="linux"),
+    ]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+    view._search_box.setText("alp")
+    assert view._devices_category.child(1).isHidden()
+
+    view._search_box.setText("")
+
+    assert not view._devices_category.child(0).isHidden()
+    assert not view._devices_category.child(1).isHidden()
+    assert not view._devices_category.isHidden()
+
+
+def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
+    devices = [
+        Device(id="d1", display_name="alpha", os="windows"),
+        Device(id="d2", display_name="beta", os="linux"),
+    ]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+    view._search_box.setText("alp")
+    qtbot.waitUntil(lambda: view._devices_category.child(1).isHidden())
+
+    view.refresh()
+    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+
+    assert not view._devices_category.child(0).isHidden()  # alpha
+    assert view._devices_category.child(1).isHidden()  # beta, still filtered out
+
+
 def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeypatch):
     device = Device(id="d1", display_name="alpha", os="windows", hostname="alpha-host")
     detail = Device(

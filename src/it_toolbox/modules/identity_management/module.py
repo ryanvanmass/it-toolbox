@@ -18,4 +18,4 @@ class IdentityManagementModule(ToolModule):
         return self._widget
 
     def create_sidebar_widget(self) -> QWidget | None:
-        return self.create_widget().sidebar_tree
+        return self.create_widget().sidebar_widget
