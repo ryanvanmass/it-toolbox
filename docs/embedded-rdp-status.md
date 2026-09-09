@@ -353,45 +353,61 @@ not just the specific fields the change was meant to touch — a narrow
 check can pass while a broader side effect still breaks the real thing
 it feeds into.
 
-## Fixed resolution connects but renders nothing (2026-09-08, open)
+## Fixed resolution connects but renders nothing (2026-09-08, resolved)
 
-With the `freerdp_settings_get_key_for_name()` fix above in place, a
-real GCP VM connection with a fixed resolution selected now completes
-the *protocol* handshake cleanly — TLS, `gdi_init_ex` (local
-`PIXEL_FORMAT_BGRX32`, remote `PIXEL_FORMAT_BGRA32`), all four dynamic
-virtual channels (`ainput`, `rdpgfx`, `disp`, `rdpsnd`) loading, no
-errors anywhere in the log — but the tab stays blank. No frame ever
-paints.
+Along the way to the `freerdp_settings_get_key_for_name()` fix above, an
+intermediate version (the discarded `freerdp_client_settings_parse_command_line()`
+approach) connected cleanly against a real GCP VM — TLS, `gdi_init_ex`,
+all dynamic virtual channels loading, no errors anywhere in the log —
+but rendered nothing. No frame ever painted.
 
-Leading theory going in — that the server was rendering through the
-newer Graphics Pipeline extension (`rdpgfx`, which our code never reads
-from; only `update->EndPaint` is hooked) instead of the classic
-bitmap-update path — was **ruled out**: `FreeRDP_SupportGraphicsPipeline`
-defaults to `0` (confirmed via the same `freerdp_settings_get_key_for_name()`
-+ `freerdp_settings_get_bool()` combination) and nothing in
-`_configure_settings()` enables it, so the server has no capability
-signal from us to switch to it regardless of what channels load
-locally.
+Two theories were checked and ruled out:
 
-Also checked and ruled out: the `ConnectionType = CONNECTION_TYPE_AUTODETECT`
-side effect from the discarded command-line-parser approach above isn't
-the differentiator either — a bare, freshly-created context (no
-command-line parsing at all, i.e. exactly what "Match window size" mode
-uses) already reports `connection type:i:7` (`CONNECTION_TYPE_AUTODETECT`)
-as FreeRDP's own compiled-in default, confirmed via the
-`freerdp_client_settings_write_connection_file()` dump technique above.
-So both modes get `AUTODETECT` regardless of the resolution fix, ruling
-it out as something introduced by this feature specifically.
+- That the server was rendering through the newer Graphics Pipeline
+  extension (`rdpgfx`, which our code never reads from; only
+  `update->EndPaint` is hooked) instead of the classic bitmap-update
+  path. Ruled out: `FreeRDP_SupportGraphicsPipeline` defaults to `0`
+  (confirmed via `freerdp_settings_get_key_for_name()` +
+  `freerdp_settings_get_bool()`) and nothing in `_configure_settings()`
+  enables it, so the server has no capability signal from us to switch
+  to it regardless of what channels load locally.
+- That user testing directly against this same GCP VM confirmed
+  disambiguates the scope: "Match window size" mode (never calls
+  `_apply_desktop_size()` at all) renders the real remote desktop fine
+  against this VM — so the blank-screen bug was specific to the
+  resolution feature, not a pre-existing general issue with the embedded
+  client over the IAP tunnel.
 
-**Not yet resolved.** Still open: whether "Match window size" mode
-(never calls `_apply_desktop_size` at all) also renders blank against
-this same GCP VM — if so, the blank-screen bug is unrelated to the
-resolution feature entirely and pre-dates it (this embedded RDP client
-has only ever been verified end-to-end against a LAN test server per
-the sections above, never through the actual IAP tunnel to a real GCP
-VM) — versus something specific to setting `DesktopWidth`/`DesktopHeight`
-still being the differentiator despite the settings-level checks coming
-back clean.
+That second finding narrowed it down to something specific to
+`_apply_desktop_size()` itself, and the only candidate left standing was
+the thing that had been dismissed as "harmless" one section up: the
+discarded command-line-parser approach's call to
+`prepare_default_settings()`, which explicitly invokes
+`freerdp_set_connection_type(settings, CONNECTION_TYPE_AUTODETECT)`.
+The *raw integer* `connection type` value looked identical before/after
+in the earlier `.rdp`-file-dump diff (both `7`), which is what led to
+ruling it out — but a bare, freshly-created context reporting `7` as its
+compiled-in default doesn't necessarily mean the *derived* bools
+(`NetworkAutoDetect`/`BandwidthAutoDetect`) are also set the way an
+explicit `freerdp_set_connection_type()` call would set them. The
+working theory (not independently re-verified at the settings level,
+but consistent with everything observed) is that explicitly invoking
+connection-type auto-detection put the server into a bandwidth-probing
+sequence this minimal client never responds to, stalling the first
+frame indefinitely with no error on either side — while a bare
+default's matching *integer* alone was never enough to trigger that
+sequence.
+
+**Confirmed fixed**: switching to `freerdp_settings_get_key_for_name()` +
+direct `freerdp_settings_set_uint32()` calls (zero side effects,
+verified earlier in this doc) resolved it — a real GCP VM connection
+with a fixed resolution selected now renders correctly. This is also
+the concrete lesson that motivated dropping the command-line-parser
+approach in the first place, independent of this bug: any code path
+that goes through FreeRDP's higher-level parsers (`.rdp`-file buffer,
+command line) risks additional settings changing as a side effect
+beyond what a diff of the *documented*/`.rdp`-representable fields can
+catch, even when those side effects look inert on the surface.
 
 ## What's still open
 

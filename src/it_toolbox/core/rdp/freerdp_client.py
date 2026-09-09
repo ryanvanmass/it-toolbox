@@ -433,7 +433,6 @@ class FreeRdpSession:
         self._context: ctypes.POINTER(RdpContext) | None = None
         self.on_frame: callable | None = None  # called with no args after each EndPaint
         self.display = DisplayChannel()
-        self._first_end_paint_logged = False
         # Kept alive for the lifetime of the session — ctypes does not keep
         # a reference to a CFUNCTYPE instance on its own, and libfreerdp
         # holds these pointers for as long as the connection is open.
@@ -446,22 +445,9 @@ class FreeRdpSession:
             return 0
         context = instance.contents.context
         context.contents.update.contents.EndPaint = self._end_paint_cb
-        # Temporary diagnostic for the "connects but never renders" bug
-        # (docs/embedded-rdp-status.md) — confirms what GDI actually
-        # allocated, which may not match what was requested if the
-        # server negotiated something else.
-        gdi = context.contents.gdi.contents
-        print(
-            f"[freerdp diag] PostConnect OK, GDI buffer allocated at "
-            f"{gdi.width}x{gdi.height} (stride={gdi.stride})",
-            flush=True,
-        )
         return 1
 
     def _on_end_paint(self, context: ctypes.POINTER(RdpContext)) -> int:
-        if not self._first_end_paint_logged:
-            self._first_end_paint_logged = True
-            print("[freerdp diag] first EndPaint fired -- a frame is ready", flush=True)
         if self.on_frame is not None:
             self.on_frame()
         return 1
