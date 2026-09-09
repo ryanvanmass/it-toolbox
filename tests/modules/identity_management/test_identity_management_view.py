@@ -1,5 +1,6 @@
 from PySide6.QtCore import QUrl
 
+import it_toolbox.modules.identity_management.ui.main_view as main_view_module
 from it_toolbox.modules.identity_management.models import Device, User
 from it_toolbox.modules.identity_management.ui.main_view import (
     DEVICE_ROLE,
@@ -160,6 +161,41 @@ def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
 
     assert not view._devices_category.child(0).isHidden()  # alpha
     assert view._devices_category.child(1).isHidden()  # beta, still filtered out
+
+
+# -- Periodic auto-refresh -----------------------------------------------
+
+
+def test_refresh_timer_is_active_with_the_expected_interval(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    assert view._refresh_timer.isActive()
+    assert view._refresh_timer.interval() == main_view_module.REFRESH_INTERVAL_MS
+
+
+def test_refresh_timer_firing_reloads_devices_and_users(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    # The __init__-time refresh() call's background list_devices task is
+    # only *queued* when _make_view() returns, not necessarily finished —
+    # wait for it to actually settle before installing a second mock
+    # below, or that first (still in-flight) call can pick up the new
+    # mock too once it finally runs, double-counting against it.
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).text(0) == "No devices found.", timeout=2000
+    )
+
+    # Applied after _make_view() rather than before — _make_view() sets
+    # its own default list_devices mock, which would otherwise overwrite
+    # this one instead of the other way around.
+    calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.list_devices",
+        lambda key: calls.append("devices") or [],
+    )
+
+    view._refresh_timer.timeout.emit()
+
+    qtbot.waitUntil(lambda: calls == ["devices"], timeout=2000)
 
 
 def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeypatch):

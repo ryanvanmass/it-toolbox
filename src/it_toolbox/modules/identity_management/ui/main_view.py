@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFormLayout,
@@ -26,6 +26,8 @@ USER_ROLE = Qt.ItemDataRole.UserRole + 3
 
 CATEGORY_DEVICES = "devices"
 CATEGORY_USERS = "users"
+
+REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it sooner"
 
 
 class IdentityManagementView(QWidget):
@@ -106,6 +108,15 @@ class IdentityManagementView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._stack)
+
+        # Keeps devices/users from going stale between visits, same as
+        # Connection Manager's own periodic GCP refresh
+        # (_gcp_refresh_timer) — a manual "Refresh" on the JumpCloud root
+        # covers "I need it sooner than that."
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(REFRESH_INTERVAL_MS)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start()
 
         self.refresh()
 
