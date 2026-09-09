@@ -229,6 +229,50 @@ def test_selecting_a_user_search_result_shows_its_detail(qtbot, monkeypatch):
     assert view._user_fields["first_name"].text() == "Alice"
 
 
+def test_search_filters_the_devices_table_rows(qtbot, monkeypatch):
+    devices = [
+        Device(id="d1", display_name="alpha", os="windows"),
+        Device(id="d2", display_name="beta", os="linux"),
+    ]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
+
+    view._search_box.setText("alp")
+
+    assert not view._devices_table.isRowHidden(0)  # alpha
+    assert view._devices_table.isRowHidden(1)  # beta
+
+
+def test_search_filters_the_users_table_rows(qtbot, monkeypatch):
+    users = [
+        User(id="u1", username="alice", email="alice@example.com"),
+        User(id="u2", username="bob", email="bob@example.com"),
+    ]
+    view = _make_view(qtbot, monkeypatch, users=users)
+    qtbot.waitUntil(lambda: view._users_table.rowCount() == 2, timeout=2000)
+
+    view._search_box.setText("ali")
+
+    assert not view._users_table.isRowHidden(0)  # alice
+    assert view._users_table.isRowHidden(1)  # bob
+
+
+def test_clearing_search_shows_all_table_rows_again(qtbot, monkeypatch):
+    devices = [
+        Device(id="d1", display_name="alpha", os="windows"),
+        Device(id="d2", display_name="beta", os="linux"),
+    ]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
+    view._search_box.setText("alp")
+    assert view._devices_table.isRowHidden(1)
+
+    view._search_box.setText("")
+
+    assert not view._devices_table.isRowHidden(0)
+    assert not view._devices_table.isRowHidden(1)
+
+
 def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
     devices = [
         Device(id="d1", display_name="alpha", os="windows"),

@@ -391,7 +391,10 @@ class IdentityManagementView(QWidget):
     # The tree never lists every device/user as a permanent child (see the
     # class docstring) — search results are the *only* tree leaves that
     # ever exist, materialized fresh on every keystroke from self._devices/
-    # self._users rather than filtered in place.
+    # self._users rather than filtered in place. The same query also hides
+    # non-matching rows in whichever table is (or later becomes) visible,
+    # so a search narrows the table too rather than just offering tree
+    # shortcuts alongside an unfiltered one.
 
     def _on_search_text_changed(self, text: str) -> None:
         query = text.strip().lower()
@@ -401,6 +404,15 @@ class IdentityManagementView(QWidget):
         self._rebuild_search_results(
             self._users_category, self._users, lambda u: u.username, USER_ROLE, query
         )
+        self._filter_table_rows(self._devices_table, query)
+        self._filter_table_rows(self._users_table, query)
+
+    @staticmethod
+    def _filter_table_rows(table: QTableWidget, query: str) -> None:
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            text = item.text().lower() if item is not None else ""
+            table.setRowHidden(row, bool(query) and query not in text)
 
     @staticmethod
     def _rebuild_search_results(category, items, label_fn, role, query: str) -> None:
