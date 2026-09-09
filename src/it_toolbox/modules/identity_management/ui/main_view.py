@@ -1,12 +1,15 @@
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFormLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -27,6 +30,13 @@ CATEGORY_USERS = "users"
 
 REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it sooner"
 
+# self._stack page indices.
+PAGE_PLACEHOLDER = 0
+PAGE_DEVICE_DETAIL = 1
+PAGE_USER_DETAIL = 2
+PAGE_DEVICES_TABLE = 3
+PAGE_USERS_TABLE = 4
+
 
 class IdentityManagementView(QWidget):
     """Browser for identity-management provider integrations (issue #15)
@@ -39,20 +49,17 @@ class IdentityManagementView(QWidget):
     again. One level shallower than GCP's: JumpCloud itself is the root,
     directly followed by its categories, since there's no "project" layer.
 
-    Unlike Connection Manager's tree (pure navigation/action trigger,
-    fully decoupled from its own main-content page), this module's whole
-    point is browsing/inspecting device and user info -- so tree
-    selection here drives a detail panel in the main content area
-    directly, via a QStackedWidget of (placeholder, device detail, user
-    detail) pages.
-
-    Tree leaves are single-column (name/username only) rather than also
-    showing OS/Last Contact/Email inline: a QTreeWidget has one shared
-    header row for the whole tree, and Devices/Users need different
-    columns that don't cleanly coexist under one header. Matches
-    Connection Manager's own tree, which never hits this (VMs and
-    Buckets are both single-column too) -- the detail panel is one click
-    away regardless, via selection.
+    The tree itself stays deliberately uncluttered: Devices/Users
+    categories never list every item as a permanent child (an org with
+    hundreds of devices would make the tree unusable) -- clicking a
+    category instead shows a full table of everything in the main
+    content area. Tree leaves only ever exist as live search results
+    (see the search box), letting a match be opened directly without
+    hunting through the table. Selecting a leaf (search result or table
+    row) drives a detail panel in the main content area -- a genuinely
+    new UI idiom for this app otherwise, since Connection Manager's own
+    tree is a pure navigation/action trigger, fully decoupled from its
+    own main-content page.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -63,6 +70,11 @@ class IdentityManagementView(QWidget):
         # key isn't re-prompted on every single API call.
         self._cached_api_key: str | None = None
         self._selected_device: Device | None = None
+        # The full lists from the last successful refresh — backs both
+        # the Devices/Users tables and the search box, independent of
+        # whatever the tree currently displays.
+        self._devices: list[Device] = []
+        self._users: list[User] = []
 
         self._search_box = QLineEdit()
         self._search_box.setPlaceholderText("Search devices and users…")
@@ -72,7 +84,12 @@ class IdentityManagementView(QWidget):
         self._tree.setHeaderLabels(["Providers"])
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
-        self._tree.currentItemChanged.connect(self._on_tree_selection_changed)
+        # itemClicked (not currentItemChanged) so re-clicking a category
+        # that's already selected still switches back to its table --
+        # e.g. after drilling into a search result's detail view, which
+        # changes self._stack's page without changing the tree's own
+        # selection at all.
+        self._tree.itemClicked.connect(self._on_tree_item_clicked)
 
         self._jumpcloud_root = QTreeWidgetItem(["JumpCloud"])
         self._jumpcloud_root.setData(0, IS_JUMPCLOUD_ROOT_ROLE, True)
@@ -96,13 +113,19 @@ class IdentityManagementView(QWidget):
         sidebar_layout.addWidget(self._search_box)
         sidebar_layout.addWidget(self._tree, 1)
 
-        self._placeholder_label = QLabel("Select a device or user to see its details.")
+        self._placeholder_label = QLabel(
+            'Select "Devices" or "Users" to browse all of them, or search to '
+            "jump straight to one."
+        )
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder_label.setWordWrap(True)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._placeholder_label)
         self._stack.addWidget(self._build_device_detail_panel())
         self._stack.addWidget(self._build_user_detail_panel())
+        self._stack.addWidget(self._build_devices_table_page())
+        self._stack.addWidget(self._build_users_table_page())
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._stack)
@@ -127,7 +150,70 @@ class IdentityManagementView(QWidget):
         """
         return self._sidebar_widget
 
-    # -- Device detail ----------------------------------------------------
+    # -- Devices/Users tables (the "browse everything" view) ------------------
+
+    def _build_devices_table_page(self) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        self._devices_table_status_label = QLabel("")
+        self._devices_table_status_label.setWordWrap(True)
+        layout.addWidget(self._devices_table_status_label)
+
+        self._devices_table = QTableWidget(0, 3)
+        self._devices_table.setHorizontalHeaderLabels(["Name", "OS", "Last Contact"])
+        self._devices_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._devices_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        devices_header = self._devices_table.horizontalHeader()
+        devices_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        devices_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        devices_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._devices_table.currentCellChanged.connect(self._on_devices_table_selection_changed)
+        layout.addWidget(self._devices_table)
+
+        return container
+
+    def _build_users_table_page(self) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        self._users_table_status_label = QLabel("")
+        self._users_table_status_label.setWordWrap(True)
+        layout.addWidget(self._users_table_status_label)
+
+        self._users_table = QTableWidget(0, 2)
+        self._users_table.setHorizontalHeaderLabels(["Username", "Email"])
+        self._users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._users_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        users_header = self._users_table.horizontalHeader()
+        users_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        users_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._users_table.currentCellChanged.connect(self._on_users_table_selection_changed)
+        layout.addWidget(self._users_table)
+
+        return container
+
+    def _on_devices_table_selection_changed(
+        self, current_row: int, current_col: int, previous_row: int, previous_col: int
+    ) -> None:
+        if current_row < 0:
+            return
+        item = self._devices_table.item(current_row, 0)
+        device = item.data(DEVICE_ROLE) if item is not None else None
+        if device is not None:
+            self._show_device_detail(device)
+
+    def _on_users_table_selection_changed(
+        self, current_row: int, current_col: int, previous_row: int, previous_col: int
+    ) -> None:
+        if current_row < 0:
+            return
+        item = self._users_table.item(current_row, 0)
+        user = item.data(USER_ROLE) if item is not None else None
+        if user is not None:
+            self._show_user_detail(user)
+
+    # -- Device/user detail -----------------------------------------------
 
     def _build_device_detail_panel(self) -> QWidget:
         panel = QWidget()
@@ -186,54 +272,64 @@ class IdentityManagementView(QWidget):
 
         return panel
 
-    def _on_tree_selection_changed(self, current: QTreeWidgetItem | None, previous) -> None:
-        device: Device | None = current.data(0, DEVICE_ROLE) if current is not None else None
-        user: User | None = current.data(0, USER_ROLE) if current is not None else None
+    def _show_device_detail(self, device: Device) -> None:
+        self._selected_device = device
+        self._stack.setCurrentIndex(PAGE_DEVICE_DETAIL)
+        # Instant partial render from already-known data (only
+        # hostname/status/last_contact come from the list call), then
+        # backfill the rest once get_device() resolves — avoids a
+        # blank/loading flash on every click.
+        self._device_fields["hostname"].setText(device.hostname)
+        self._device_fields["status"].setText("Active" if device.active else "Inactive")
+        self._device_fields["os_version"].setText(device.os_version or "Loading…")
+        self._device_fields["arch"].setText(device.arch or "Loading…")
+        self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
+        self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
+        self._device_fields["remote_ip"].setText(device.remote_ip or "Loading…")
+        self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
+        self._device_fields["created"].setText(device.created or "Loading…")
+        self._device_fields["description"].setText(device.description or "Loading…")
+
+        api_key = self._get_api_key()
+        if api_key is None:
+            return
+        async_utils.run_in_background(
+            lambda: jumpcloud_client.get_device(api_key, device.id),
+            on_result=self._populate_device_detail,
+            on_error=self._on_detail_error,
+        )
+
+    def _show_user_detail(self, user: User) -> None:
+        # Unlike devices, list_users() already returns everything the
+        # detail panel shows — no separate detail endpoint/async call
+        # needed, just render straight from the given User.
+        self._selected_device = None
+        self._stack.setCurrentIndex(PAGE_USER_DETAIL)
+        self._user_fields["email"].setText(user.email)
+        self._user_fields["first_name"].setText(user.first_name)
+        self._user_fields["last_name"].setText(user.last_name)
+        self._user_fields["job_title"].setText(user.job_title or "—")
+        self._user_fields["department"].setText(user.department or "—")
+        self._user_fields["activated"].setText("Yes" if user.activated else "No")
+        self._user_fields["suspended"].setText("Yes" if user.suspended else "No")
+        self._user_fields["mfa_configured"].setText("Yes" if user.mfa_configured else "No")
+        self._user_fields["created"].setText(user.created or "—")
+
+    def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        device: Device | None = item.data(0, DEVICE_ROLE)
+        user: User | None = item.data(0, USER_ROLE)
+        category = item.data(0, CATEGORY_ROLE)
 
         if device is not None:
-            self._selected_device = device
-            self._stack.setCurrentIndex(1)
-            # Instant partial render from the tree item's own data (only
-            # hostname/status/last_contact are populated by the list call),
-            # then backfill the rest once get_device() resolves — avoids a
-            # blank/loading flash on every click.
-            self._device_fields["hostname"].setText(device.hostname)
-            self._device_fields["status"].setText("Active" if device.active else "Inactive")
-            self._device_fields["os_version"].setText(device.os_version or "Loading…")
-            self._device_fields["arch"].setText(device.arch or "Loading…")
-            self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
-            self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
-            self._device_fields["remote_ip"].setText(device.remote_ip or "Loading…")
-            self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
-            self._device_fields["created"].setText(device.created or "Loading…")
-            self._device_fields["description"].setText(device.description or "Loading…")
-
-            api_key = self._get_api_key()
-            if api_key is None:
-                return
-            async_utils.run_in_background(
-                lambda: jumpcloud_client.get_device(api_key, device.id),
-                on_result=self._populate_device_detail,
-                on_error=self._on_detail_error,
-            )
+            self._show_device_detail(device)
         elif user is not None:
-            self._selected_device = None
-            self._stack.setCurrentIndex(2)
-            # Unlike devices, list_users() already returns everything the
-            # detail panel shows — no separate detail endpoint/async call
-            # needed, just render straight from the tree item's stashed User.
-            self._user_fields["email"].setText(user.email)
-            self._user_fields["first_name"].setText(user.first_name)
-            self._user_fields["last_name"].setText(user.last_name)
-            self._user_fields["job_title"].setText(user.job_title or "—")
-            self._user_fields["department"].setText(user.department or "—")
-            self._user_fields["activated"].setText("Yes" if user.activated else "No")
-            self._user_fields["suspended"].setText("Yes" if user.suspended else "No")
-            self._user_fields["mfa_configured"].setText("Yes" if user.mfa_configured else "No")
-            self._user_fields["created"].setText(user.created or "—")
+            self._show_user_detail(user)
+        elif category == CATEGORY_DEVICES:
+            self._stack.setCurrentIndex(PAGE_DEVICES_TABLE)
+        elif category == CATEGORY_USERS:
+            self._stack.setCurrentIndex(PAGE_USERS_TABLE)
         else:
-            self._selected_device = None
-            self._stack.setCurrentIndex(0)
+            self._stack.setCurrentIndex(PAGE_PLACEHOLDER)
 
     def _populate_device_detail(self, device: Device) -> None:
         try:
@@ -257,69 +353,70 @@ class IdentityManagementView(QWidget):
         except RuntimeError:
             pass  # widget torn down mid-flight
 
-    # -- Populating the tree ------------------------------------------------
-
-    @staticmethod
-    def _show_category_placeholder(category: QTreeWidgetItem, text: str) -> None:
-        category.takeChildren()
-        category.addChild(QTreeWidgetItem([text]))
+    # -- Populating from JumpCloud --------------------------------------------
 
     def _populate_devices(self, devices: list[Device]) -> None:
         try:
-            if not devices:
-                self._show_category_placeholder(self._devices_category, "No devices found.")
-                return
-            self._devices_category.takeChildren()
-            for device in devices:
-                item = QTreeWidgetItem([device.display_name])
-                item.setData(0, DEVICE_ROLE, device)
-                self._devices_category.addChild(item)
+            self._devices = devices
+            self._devices_table_status_label.setText("" if devices else "No devices found.")
+            self._devices_table.setRowCount(len(devices))
+            for row, device in enumerate(devices):
+                name_item = QTableWidgetItem(device.display_name)
+                name_item.setData(DEVICE_ROLE, device)
+                self._devices_table.setItem(row, 0, name_item)
+                self._devices_table.setItem(row, 1, QTableWidgetItem(device.os))
+                self._devices_table.setItem(row, 2, QTableWidgetItem(device.last_contact))
             # Re-apply an already-typed search — a Refresh shouldn't
             # un-filter results the user was in the middle of narrowing.
-            self._filter_category(self._devices_category, self._search_box.text())
+            self._on_search_text_changed(self._search_box.text())
         except RuntimeError:
             pass  # widget torn down mid-flight
 
     def _populate_users(self, users: list[User]) -> None:
         try:
-            if not users:
-                self._show_category_placeholder(self._users_category, "No users found.")
-                return
-            self._users_category.takeChildren()
-            for user in users:
-                item = QTreeWidgetItem([user.username])
-                item.setData(0, USER_ROLE, user)
-                self._users_category.addChild(item)
-            self._filter_category(self._users_category, self._search_box.text())
+            self._users = users
+            self._users_table_status_label.setText("" if users else "No users found.")
+            self._users_table.setRowCount(len(users))
+            for row, user in enumerate(users):
+                username_item = QTableWidgetItem(user.username)
+                username_item.setData(USER_ROLE, user)
+                self._users_table.setItem(row, 0, username_item)
+                self._users_table.setItem(row, 1, QTableWidgetItem(user.email))
+            self._on_search_text_changed(self._search_box.text())
         except RuntimeError:
             pass  # widget torn down mid-flight
 
     # -- Search -------------------------------------------------------------
+    #
+    # The tree never lists every device/user as a permanent child (see the
+    # class docstring) — search results are the *only* tree leaves that
+    # ever exist, materialized fresh on every keystroke from self._devices/
+    # self._users rather than filtered in place.
 
     def _on_search_text_changed(self, text: str) -> None:
-        self._filter_category(self._devices_category, text)
-        self._filter_category(self._users_category, text)
+        query = text.strip().lower()
+        self._rebuild_search_results(
+            self._devices_category, self._devices, lambda d: d.display_name, DEVICE_ROLE, query
+        )
+        self._rebuild_search_results(
+            self._users_category, self._users, lambda u: u.username, USER_ROLE, query
+        )
 
     @staticmethod
-    def _filter_category(category: QTreeWidgetItem, query: str) -> None:
-        query = query.strip().lower()
-        visible_count = 0
-        for i in range(category.childCount()):
-            child = category.child(i)
-            is_leaf = child.data(0, DEVICE_ROLE) is not None or child.data(0, USER_ROLE) is not None
-            if not is_leaf:
-                # A "Loading…"/"No devices found." placeholder, not a real
-                # item — only worth showing when not actively searching.
-                child.setHidden(bool(query))
-                continue
-            matches = not query or query in child.text(0).lower()
-            child.setHidden(not matches)
-            if matches:
-                visible_count += 1
+    def _rebuild_search_results(category, items, label_fn, role, query: str) -> None:
+        category.takeChildren()
+        if not query:
+            category.setHidden(False)
+            return
+        matches = [item for item in items if query in label_fn(item).lower()]
+        for item in matches:
+            leaf = QTreeWidgetItem([label_fn(item)])
+            leaf.setData(0, role, item)
+            category.addChild(leaf)
         # Hide the whole category (rather than an empty, expandable
         # "Devices"/"Users" row with nothing under it) once a search
         # excludes everything in it.
-        category.setHidden(bool(query) and visible_count == 0)
+        category.setHidden(not matches)
 
     # -- Context menu / API key / refresh -------------------------------------
 
@@ -378,12 +475,17 @@ class IdentityManagementView(QWidget):
                 if settings.jumpcloud_api_key_path().is_file()
                 else "No JumpCloud API key configured — set one in Settings."
             )
-            self._show_category_placeholder(self._devices_category, message)
-            self._show_category_placeholder(self._users_category, message)
+            self._devices = []
+            self._users = []
+            self._devices_table.setRowCount(0)
+            self._users_table.setRowCount(0)
+            self._devices_table_status_label.setText(message)
+            self._users_table_status_label.setText(message)
+            self._on_search_text_changed(self._search_box.text())
             return
 
-        self._show_category_placeholder(self._devices_category, "Loading…")
-        self._show_category_placeholder(self._users_category, "Loading…")
+        self._devices_table_status_label.setText("Loading…")
+        self._users_table_status_label.setText("Loading…")
         async_utils.run_in_background(
             lambda: jumpcloud_client.list_devices(api_key),
             on_result=self._populate_devices,

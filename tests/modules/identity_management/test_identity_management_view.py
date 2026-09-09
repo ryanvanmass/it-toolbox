@@ -2,6 +2,11 @@ import it_toolbox.modules.identity_management.ui.main_view as main_view_module
 from it_toolbox.modules.identity_management.models import Device, User
 from it_toolbox.modules.identity_management.ui.main_view import (
     DEVICE_ROLE,
+    PAGE_DEVICE_DETAIL,
+    PAGE_DEVICES_TABLE,
+    PAGE_PLACEHOLDER,
+    PAGE_USER_DETAIL,
+    PAGE_USERS_TABLE,
     USER_ROLE,
     IdentityManagementView,
 )
@@ -37,111 +42,191 @@ def _make_view(qtbot, monkeypatch, api_key="jca_test", devices=(), users=()):
     return view
 
 
-def test_devices_populate_as_tree_children(qtbot, monkeypatch):
+# -- Populating the tables (not the tree) --------------------------------
+
+
+def test_devices_populate_the_table_and_not_the_tree(qtbot, monkeypatch):
     devices = [
         Device(id="d1", display_name="alpha", os="windows", hostname="alpha-host"),
         Device(id="d2", display_name="beta", os="linux", hostname="beta-host"),
     ]
     view = _make_view(qtbot, monkeypatch, devices=devices)
 
-    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
-    assert view._devices_category.child(0).text(0) == "alpha"
-    assert view._devices_category.child(0).data(0, DEVICE_ROLE) == devices[0]
-    assert view._devices_category.child(1).text(0) == "beta"
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
+    assert view._devices_table.item(0, 0).text() == "alpha"
+    assert view._devices_table.item(0, 0).data(DEVICE_ROLE) == devices[0]
+    assert view._devices_table.item(0, 1).text() == "windows"
+    assert view._devices_table.item(1, 0).text() == "beta"
+    # The tree is deliberately uncluttered — no permanent children.
+    assert view._devices_category.childCount() == 0
 
 
-def test_devices_category_shows_placeholder_when_empty(qtbot, monkeypatch):
+def test_devices_table_shows_a_status_message_when_empty(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, devices=[])
 
     qtbot.waitUntil(
-        lambda: view._devices_category.child(0).text(0) == "No devices found.", timeout=2000
+        lambda: view._devices_table_status_label.text() == "No devices found.", timeout=2000
     )
 
 
-def test_users_populate_as_tree_children(qtbot, monkeypatch):
+def test_users_populate_the_table_and_not_the_tree(qtbot, monkeypatch):
     users = [User(id="u1", username="alice", email="alice@example.com")]
     view = _make_view(qtbot, monkeypatch, users=users)
 
-    # A single real user collides in count with the "Loading…" placeholder
-    # refresh() adds synchronously up front (both are exactly 1 child) —
-    # wait for the actual data role instead of just a child count.
-    qtbot.waitUntil(
-        lambda: view._users_category.child(0).data(0, USER_ROLE) is not None, timeout=2000
-    )
-    assert view._users_category.child(0).text(0) == "alice"
-    assert view._users_category.child(0).data(0, USER_ROLE) == users[0]
+    qtbot.waitUntil(lambda: view._users_table.rowCount() == 1, timeout=2000)
+    assert view._users_table.item(0, 0).text() == "alice"
+    assert view._users_table.item(0, 0).data(USER_ROLE) == users[0]
+    assert view._users_table.item(0, 1).text() == "alice@example.com"
+    assert view._users_category.childCount() == 0
+
+
+# -- Clicking a category shows its table ---------------------------------
+
+
+def test_clicking_devices_category_shows_the_devices_table(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    view._on_tree_item_clicked(view._devices_category, 0)
+
+    assert view._stack.currentIndex() == PAGE_DEVICES_TABLE
+
+
+def test_clicking_users_category_shows_the_users_table(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    view._on_tree_item_clicked(view._users_category, 0)
+
+    assert view._stack.currentIndex() == PAGE_USERS_TABLE
+
+
+def test_clicking_the_jumpcloud_root_shows_the_placeholder_page(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._on_tree_item_clicked(view._devices_category, 0)  # move off the default page first
+
+    view._on_tree_item_clicked(view._jumpcloud_root, 0)
+
+    assert view._stack.currentIndex() == PAGE_PLACEHOLDER
+
+
+# -- Clicking a table row shows its detail --------------------------------
+
+
+def test_clicking_a_device_table_row_shows_its_detail(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows", hostname="alpha-host")
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+
+    view._devices_table.setCurrentCell(0, 0)
+
+    assert view._stack.currentIndex() == PAGE_DEVICE_DETAIL
+    assert view._device_fields["hostname"].text() == "alpha-host"
+
+
+def test_clicking_a_user_table_row_shows_its_detail(qtbot, monkeypatch):
+    user = User(id="u1", username="alice", email="alice@example.com", first_name="Alice")
+    view = _make_view(qtbot, monkeypatch, users=[user])
+    qtbot.waitUntil(lambda: view._users_table.rowCount() == 1, timeout=2000)
+
+    view._users_table.setCurrentCell(0, 0)
+
+    assert view._stack.currentIndex() == PAGE_USER_DETAIL
+    assert view._user_fields["first_name"].text() == "Alice"
 
 
 # -- Search -------------------------------------------------------------
 
 
-def test_search_hides_non_matching_devices(qtbot, monkeypatch):
+def test_search_creates_matching_tree_leaves(qtbot, monkeypatch):
     devices = [
         Device(id="d1", display_name="alpha", os="windows"),
         Device(id="d2", display_name="beta", os="linux"),
     ]
     view = _make_view(qtbot, monkeypatch, devices=devices)
-    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
+    assert view._devices_category.childCount() == 0  # nothing until searching
 
     view._search_box.setText("alp")
 
-    assert not view._devices_category.child(0).isHidden()  # alpha
-    assert view._devices_category.child(1).isHidden()  # beta
+    assert view._devices_category.childCount() == 1
+    assert view._devices_category.child(0).text(0) == "alpha"
+    assert view._devices_category.child(0).data(0, DEVICE_ROLE) == devices[0]
 
 
-def test_search_hides_non_matching_users(qtbot, monkeypatch):
+def test_search_matches_users_too(qtbot, monkeypatch):
     users = [
         User(id="u1", username="alice", email="alice@example.com"),
         User(id="u2", username="bob", email="bob@example.com"),
     ]
     view = _make_view(qtbot, monkeypatch, users=users)
-    qtbot.waitUntil(lambda: view._users_category.childCount() == 2, timeout=2000)
+    qtbot.waitUntil(lambda: view._users_table.rowCount() == 2, timeout=2000)
 
     view._search_box.setText("ali")
 
-    assert not view._users_category.child(0).isHidden()  # alice
-    assert view._users_category.child(1).isHidden()  # bob
+    assert view._users_category.childCount() == 1
+    assert view._users_category.child(0).text(0) == "alice"
+    assert view._users_category.child(0).data(0, USER_ROLE) == users[0]
 
 
 def test_search_is_case_insensitive(qtbot, monkeypatch):
     devices = [Device(id="d1", display_name="AlphaHost", os="windows")]
     view = _make_view(qtbot, monkeypatch, devices=devices)
-    qtbot.waitUntil(
-        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
-    )
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
 
     view._search_box.setText("alphahost")
 
-    assert not view._devices_category.child(0).isHidden()
+    assert view._devices_category.childCount() == 1
 
 
 def test_search_hides_a_category_with_no_matches(qtbot, monkeypatch):
     devices = [Device(id="d1", display_name="alpha", os="windows")]
     view = _make_view(qtbot, monkeypatch, devices=devices)
-    qtbot.waitUntil(
-        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
-    )
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
 
     view._search_box.setText("no-such-device")
 
+    assert view._devices_category.childCount() == 0
     assert view._devices_category.isHidden()
 
 
-def test_clearing_search_shows_everything_again(qtbot, monkeypatch):
+def test_clearing_search_removes_the_leaves_again(qtbot, monkeypatch):
     devices = [
         Device(id="d1", display_name="alpha", os="windows"),
         Device(id="d2", display_name="beta", os="linux"),
     ]
     view = _make_view(qtbot, monkeypatch, devices=devices)
-    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
     view._search_box.setText("alp")
-    assert view._devices_category.child(1).isHidden()
+    assert view._devices_category.childCount() == 1
 
     view._search_box.setText("")
 
-    assert not view._devices_category.child(0).isHidden()
-    assert not view._devices_category.child(1).isHidden()
+    assert view._devices_category.childCount() == 0
     assert not view._devices_category.isHidden()
+
+
+def test_selecting_a_device_search_result_shows_its_detail(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows", hostname="alpha-host")
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    view._search_box.setText("alp")
+    assert view._devices_category.childCount() == 1
+
+    view._on_tree_item_clicked(view._devices_category.child(0), 0)
+
+    assert view._stack.currentIndex() == PAGE_DEVICE_DETAIL
+    assert view._device_fields["hostname"].text() == "alpha-host"
+
+
+def test_selecting_a_user_search_result_shows_its_detail(qtbot, monkeypatch):
+    user = User(id="u1", username="alice", email="alice@example.com", first_name="Alice")
+    view = _make_view(qtbot, monkeypatch, users=[user])
+    qtbot.waitUntil(lambda: view._users_table.rowCount() == 1, timeout=2000)
+    view._search_box.setText("ali")
+
+    view._on_tree_item_clicked(view._users_category.child(0), 0)
+
+    assert view._stack.currentIndex() == PAGE_USER_DETAIL
+    assert view._user_fields["first_name"].text() == "Alice"
 
 
 def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
@@ -150,50 +235,20 @@ def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
         Device(id="d2", display_name="beta", os="linux"),
     ]
     view = _make_view(qtbot, monkeypatch, devices=devices)
-    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
     view._search_box.setText("alp")
-    qtbot.waitUntil(lambda: view._devices_category.child(1).isHidden())
+    qtbot.waitUntil(lambda: view._devices_category.childCount() == 1)
 
     view.refresh()
-    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
 
-    assert not view._devices_category.child(0).isHidden()  # alpha
-    assert view._devices_category.child(1).isHidden()  # beta, still filtered out
-
-
-# -- Periodic auto-refresh -----------------------------------------------
-
-
-def test_refresh_timer_is_active_with_the_expected_interval(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch)
-
-    assert view._refresh_timer.isActive()
-    assert view._refresh_timer.interval() == main_view_module.REFRESH_INTERVAL_MS
+    # Still filtered down to just the matching result, not reset to
+    # everything, even though the whole table was reloaded.
+    assert view._devices_category.childCount() == 1
+    assert view._devices_category.child(0).text(0) == "alpha"
 
 
-def test_refresh_timer_firing_reloads_devices_and_users(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch)
-    # The __init__-time refresh() call's background list_devices task is
-    # only *queued* when _make_view() returns, not necessarily finished —
-    # wait for it to actually settle before installing a second mock
-    # below, or that first (still in-flight) call can pick up the new
-    # mock too once it finally runs, double-counting against it.
-    qtbot.waitUntil(
-        lambda: view._devices_category.child(0).text(0) == "No devices found.", timeout=2000
-    )
-
-    # Applied after _make_view() rather than before — _make_view() sets
-    # its own default list_devices mock, which would otherwise overwrite
-    # this one instead of the other way around.
-    calls = []
-    monkeypatch.setattr(
-        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.list_devices",
-        lambda key: calls.append("devices") or [],
-    )
-
-    view._refresh_timer.timeout.emit()
-
-    qtbot.waitUntil(lambda: calls == ["devices"], timeout=2000)
+# -- Detail panels --------------------------------------------------------
 
 
 def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeypatch):
@@ -209,20 +264,15 @@ def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeyp
         last_contact="2026-09-05T00:00:00Z",
     )
     view = _make_view(qtbot, monkeypatch, devices=[device])
-    # A single real device collides in count with the "Loading…"
-    # placeholder refresh() adds synchronously up front (both are exactly
-    # 1 child) — wait for the actual data role instead of just a count.
-    qtbot.waitUntil(
-        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
-    )
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
     monkeypatch.setattr(
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
         lambda key, device_id: detail,
     )
 
-    view._tree.setCurrentItem(view._devices_category.child(0))
+    view._devices_table.setCurrentCell(0, 0)
 
-    assert view._stack.currentIndex() == 1
+    assert view._stack.currentIndex() == PAGE_DEVICE_DETAIL
     assert view._device_fields["hostname"].text() == "alpha-host"
     qtbot.waitUntil(
         lambda: view._device_fields["serial_number"].text() == "ABC123", timeout=2000
@@ -247,15 +297,13 @@ def test_selecting_a_device_shows_general_info_fields(qtbot, monkeypatch):
         description="Finance laptop",
     )
     view = _make_view(qtbot, monkeypatch, devices=[device])
-    qtbot.waitUntil(
-        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
-    )
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
     monkeypatch.setattr(
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
         lambda key, device_id: detail,
     )
 
-    view._tree.setCurrentItem(view._devices_category.child(0))
+    view._devices_table.setCurrentCell(0, 0)
 
     assert view._device_fields["status"].text() == "Inactive"
     qtbot.waitUntil(
@@ -278,11 +326,9 @@ def test_selecting_a_user_shows_general_info_fields(qtbot, monkeypatch):
         created="2024-06-01T00:00:00Z",
     )
     view = _make_view(qtbot, monkeypatch, users=[user])
-    qtbot.waitUntil(
-        lambda: view._users_category.child(0).data(0, USER_ROLE) is not None, timeout=2000
-    )
+    qtbot.waitUntil(lambda: view._users_table.rowCount() == 1, timeout=2000)
 
-    view._tree.setCurrentItem(view._users_category.child(0))
+    view._users_table.setCurrentCell(0, 0)
 
     assert view._user_fields["email"].text() == "alice@example.com"
     assert view._user_fields["job_title"].text() == "Engineer"
@@ -292,24 +338,7 @@ def test_selecting_a_user_shows_general_info_fields(qtbot, monkeypatch):
     assert view._user_fields["created"].text() == "2024-06-01T00:00:00Z"
 
 
-def test_clearing_selection_shows_the_placeholder_page(qtbot, monkeypatch):
-    device = Device(id="d1", display_name="alpha", os="windows")
-    view = _make_view(qtbot, monkeypatch, devices=[device])
-    # A single real device collides in count with the "Loading…"
-    # placeholder refresh() adds synchronously up front (both are exactly
-    # 1 child) — wait for the actual data role instead of just a count.
-    qtbot.waitUntil(
-        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
-    )
-    view._tree.setCurrentItem(view._devices_category.child(0))
-    assert view._stack.currentIndex() == 1
-
-    view._tree.setCurrentItem(None)
-
-    assert view._stack.currentIndex() == 0
-
-
-def test_selecting_a_user_renders_synchronously_from_tree_item_data(qtbot, monkeypatch):
+def test_selecting_a_user_renders_synchronously_from_row_data(qtbot, monkeypatch):
     user = User(
         id="u1",
         username="alice",
@@ -319,19 +348,40 @@ def test_selecting_a_user_renders_synchronously_from_tree_item_data(qtbot, monke
         suspended=True,
     )
     view = _make_view(qtbot, monkeypatch, users=[user])
-    qtbot.waitUntil(
-        lambda: view._users_category.child(0).data(0, USER_ROLE) is not None, timeout=2000
-    )
+    qtbot.waitUntil(lambda: view._users_table.rowCount() == 1, timeout=2000)
 
-    view._tree.setCurrentItem(view._users_category.child(0))
+    view._users_table.setCurrentCell(0, 0)
 
-    assert view._stack.currentIndex() == 2
+    assert view._stack.currentIndex() == PAGE_USER_DETAIL
     assert view._user_fields["first_name"].text() == "Alice"
     assert view._user_fields["last_name"].text() == "Anderson"
     assert view._user_fields["suspended"].text() == "Yes"
 
 
-def test_refresh_shows_placeholder_when_no_api_key_configured(qtbot, monkeypatch):
+def test_populate_device_detail_after_teardown_does_not_raise(qtbot, monkeypatch):
+    # Exercises the try/except RuntimeError guard: a get_device() result
+    # can arrive after the widget backing it was already torn down —
+    # simulated here without an actual Qt-level deletion (which would
+    # conflict with qtbot's own widget-close-at-teardown tracking) by
+    # having a field widget raise the same RuntimeError Qt itself would.
+    device = Device(id="d1", display_name="alpha", os="windows")
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    view._devices_table.setCurrentCell(0, 0)
+
+    def _raise_deleted(*args, **kwargs):
+        raise RuntimeError("Internal C++ object already deleted.")
+
+    monkeypatch.setattr(view._device_fields["os_version"], "setText", _raise_deleted)
+
+    detail = Device(id="d1", display_name="alpha", os="windows", os_version="1.0")
+    view._populate_device_detail(detail)  # must not raise
+
+
+# -- API key / refresh / context menu --------------------------------------
+
+
+def test_refresh_shows_status_message_when_no_api_key_configured(qtbot, monkeypatch):
     calls = []
     monkeypatch.setattr(
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.list_devices",
@@ -340,8 +390,8 @@ def test_refresh_shows_placeholder_when_no_api_key_configured(qtbot, monkeypatch
     view = _make_view(qtbot, monkeypatch, api_key=None)
 
     assert calls == []  # never called — no key means no API traffic at all
-    assert "No JumpCloud API key configured" in view._devices_category.child(0).text(0)
-    assert "No JumpCloud API key configured" in view._users_category.child(0).text(0)
+    assert "No JumpCloud API key configured" in view._devices_table_status_label.text()
+    assert "No JumpCloud API key configured" in view._users_table_status_label.text()
 
 
 def test_jumpcloud_root_menu_offers_only_refresh(qtbot, monkeypatch):
@@ -357,26 +407,36 @@ def test_jumpcloud_root_menu_offers_only_refresh(qtbot, monkeypatch):
     assert [a.text() for a in menu.actions()] == ["Refresh"]
 
 
-def test_populate_device_detail_after_teardown_does_not_raise(qtbot, monkeypatch):
-    # Exercises the try/except RuntimeError guard: a get_device() result
-    # can arrive after the widget backing it was already torn down —
-    # simulated here without an actual Qt-level deletion (which would
-    # conflict with qtbot's own widget-close-at-teardown tracking) by
-    # having a field widget raise the same RuntimeError Qt itself would.
-    device = Device(id="d1", display_name="alpha", os="windows")
-    view = _make_view(qtbot, monkeypatch, devices=[device])
-    # A single real device collides in count with the "Loading…"
-    # placeholder refresh() adds synchronously up front (both are exactly
-    # 1 child) — wait for the actual data role instead of just a count.
+# -- Periodic auto-refresh -----------------------------------------------
+
+
+def test_refresh_timer_is_active_with_the_expected_interval(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    assert view._refresh_timer.isActive()
+    assert view._refresh_timer.interval() == main_view_module.REFRESH_INTERVAL_MS
+
+
+def test_refresh_timer_firing_reloads_devices_and_users(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    # The __init__-time refresh() call's background list_devices task is
+    # only *queued* when _make_view() returns, not necessarily finished —
+    # wait for it to actually settle before installing a second mock
+    # below, or that first (still in-flight) call can pick up the new
+    # mock too once it finally runs, double-counting against it.
     qtbot.waitUntil(
-        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+        lambda: view._devices_table_status_label.text() == "No devices found.", timeout=2000
     )
-    view._tree.setCurrentItem(view._devices_category.child(0))
 
-    def _raise_deleted(*args, **kwargs):
-        raise RuntimeError("Internal C++ object already deleted.")
+    # Applied after _make_view() rather than before — _make_view() sets
+    # its own default list_devices mock, which would otherwise overwrite
+    # this one instead of the other way around.
+    calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.list_devices",
+        lambda key: calls.append("devices") or [],
+    )
 
-    monkeypatch.setattr(view._device_fields["os_version"], "setText", _raise_deleted)
+    view._refresh_timer.timeout.emit()
 
-    detail = Device(id="d1", display_name="alpha", os="windows", os_version="1.0")
-    view._populate_device_detail(detail)  # must not raise
+    qtbot.waitUntil(lambda: calls == ["devices"], timeout=2000)
