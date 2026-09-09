@@ -127,6 +127,15 @@ class RdpWidget(QWidget):
         target = self._scaled_image_rect()
         if target != self.rect():
             painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        if target.size() != self._image.size():
+            # drawImage() defaults to nearest-neighbor scaling, which
+            # looks blocky/aliased for anything but an exact pixel match
+            # — and an exact match is rare even at the "right" aspect
+            # ratio, since window borders/DPI scaling mean the widget is
+            # essentially never exactly the image's native size. Only
+            # worth the cost when actually scaling; skip it for a 1:1
+            # draw (typical "Match window size" mode).
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawImage(target, self._image, self._image.rect())
 
     def sizeHint(self):
