@@ -5,12 +5,16 @@ test machine (no modern MsRdpClient ProgID registered, unfixable from
 app code).
 
 Renders the desktop and forwards mouse/keyboard input back to the
-server. Displayed image is stretched to fill the widget (see
-paintEvent), so pointer coordinates are rescaled from widget-space to
-the remote desktop's native resolution before being sent.
+server. The displayed image is scaled to fit the widget *without*
+distorting its aspect ratio (see paintEvent/_scaled_image_rect) —
+letterboxed with bars rather than stretched, so a resolution requested
+in Settings renders at its correct proportions even when the window
+doesn't match its aspect ratio. Pointer coordinates are rescaled (and
+clamped, for clicks that land in the letterbox bars) from widget-space
+to the remote desktop's native resolution before being sent.
 """
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -41,9 +45,18 @@ class RdpWidget(QWidget):
         username: str,
         password: str,
         domain: str = "",
+        desktop_size: tuple[int, int] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # None means "match window size" (today's default: every resize
+        # requests a matching server resolution). A fixed size instead
+        # means the server resolution is requested once at connect and
+        # never again from a resize — the displayed image is stretched to
+        # fit the widget regardless (see paintEvent), so a window resize
+        # doesn't need a round trip to look right. See settings.py's
+        # load_default_rdp_resolution() docstring for why this exists.
+        self._desktop_size = desktop_size
         self._image: QImage | None = None
         self._frame_bytes: bytes | None = None  # keeps QImage's backing buffer alive
         self._closing = False  # set by close_session(); suppresses finished re-emission
@@ -65,7 +78,7 @@ class RdpWidget(QWidget):
         self._resize_debounce.setInterval(250)
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
-        self._worker = RdpSessionWorker(host, port, username, password, domain)
+        self._worker = RdpSessionWorker(host, port, username, password, domain, desktop_size)
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
         self._worker.signals.error.connect(self._on_error)
@@ -97,11 +110,33 @@ class RdpWidget(QWidget):
             self._status_label.show()
         self._emit_finished_once()
 
+    def _scaled_image_rect(self) -> QRect:
+        """The largest rect, centered in the widget, that fits self._image
+        at its native aspect ratio — the rest is filled with bars rather
+        than stretching the image to cover it (see paintEvent).
+        """
+        scaled = self._image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        return QRect(QPoint(x, y), scaled)
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override signature
         if self._image is None:
             return
         painter = QPainter(self)
-        painter.drawImage(self.rect(), self._image, self._image.rect())
+        target = self._scaled_image_rect()
+        if target != self.rect():
+            painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        if target.size() != self._image.size():
+            # drawImage() defaults to nearest-neighbor scaling, which
+            # looks blocky/aliased for anything but an exact pixel match
+            # — and an exact match is rare even at the "right" aspect
+            # ratio, since window borders/DPI scaling mean the widget is
+            # essentially never exactly the image's native size. Only
+            # worth the cost when actually scaling; skip it for a 1:1
+            # draw (typical "Match window size" mode).
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(target, self._image, self._image.rect())
 
     def sizeHint(self):
         if self._image is not None:
@@ -110,10 +145,29 @@ class RdpWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._resize_debounce.start()
+        # A fixed desktop_size never changes after connect — window
+        # resizes just restretch the existing image (see paintEvent), no
+        # server round trip needed or wanted.
+        if self._desktop_size is None:
+            self._resize_debounce.start()
+
+    def _target_size(self) -> tuple[int, int]:
+        return self._desktop_size if self._desktop_size is not None else (self.width(), self.height())
 
     def _send_resize_request(self) -> None:
-        self._worker.request_resize(self.width(), self.height())
+        self._worker.request_resize(*self._target_size())
+
+    def refresh_resolution(self) -> None:
+        """Re-sends the current target size to the server even though it
+        hasn't changed -- for when the remote desktop's resolution has
+        drifted out of sync without a real resize event to trigger a fix
+        (e.g. after the server's own display state changed, like a UAC
+        prompt or a lock-screen transition). Exposed as a manual "Refresh
+        Resolution" action on the session tab's context menu;
+        request_resize() has no deduplication of its own, so this always
+        sends, unlike the debounced resizeEvent path.
+        """
+        self._send_resize_request()
 
     def close_session(self) -> None:
         """Matches the close_session() convention main_view uses to tear
@@ -126,9 +180,19 @@ class RdpWidget(QWidget):
     def _remote_pos(self, widget_pos) -> tuple[int, int]:
         if self._image is None or self.width() == 0 or self.height() == 0:
             return int(widget_pos.x()), int(widget_pos.y())
-        scale_x = self._image.width() / self.width()
-        scale_y = self._image.height() / self.height()
-        return int(widget_pos.x() * scale_x), int(widget_pos.y() * scale_y)
+        target = self._scaled_image_rect()
+        if target.width() == 0 or target.height() == 0:
+            return 0, 0
+        scale_x = self._image.width() / target.width()
+        scale_y = self._image.height() / target.height()
+        x = (widget_pos.x() - target.x()) * scale_x
+        y = (widget_pos.y() - target.y()) * scale_y
+        # Clicks landing in the letterbox bars clamp to the nearest edge
+        # of the image rather than mapping to a negative/out-of-range
+        # remote coordinate.
+        x = max(0, min(x, self._image.width() - 1))
+        y = max(0, min(y, self._image.height() - 1))
+        return int(x), int(y)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         x, y = self._remote_pos(event.position())

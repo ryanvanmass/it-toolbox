@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -39,6 +40,17 @@ except (ImportError, OSError):
 _FREERDP_FETCH_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "fetch_freerdp_windows.ps1"
 _FREERDP_DEST_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
 
+# (dropdown label, stored value) — None means "match window size", the
+# default. See settings.load_default_rdp_resolution()'s docstring for why
+# a fixed choice exists at all.
+RDP_RESOLUTION_PRESETS: list[tuple[str, tuple[int, int] | None]] = [
+    ("Match window size", None),
+    ("1280 × 720", (1280, 720)),
+    ("1920 × 1080", (1920, 1080)),
+    ("2560 × 1440", (2560, 1440)),
+    ("3840 × 2160", (3840, 2160)),
+]
+
 
 class SettingsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -57,6 +69,7 @@ class SettingsView(QWidget):
         self._content_layout.addWidget(self._build_rclone_section())
         self._content_layout.addWidget(self._build_gcloud_section())
         self._content_layout.addWidget(self._build_qemu_section())
+        self._content_layout.addWidget(self._build_rdp_display_section())
         self._content_layout.addWidget(self._build_freerdp_section())
         self._content_layout.addStretch(1)
         scroll_area.setWidget(content)
@@ -289,6 +302,40 @@ class SettingsView(QWidget):
         layout.addWidget(self._qemu_status_label)
 
         return box
+
+    # -- RDP display --------------------------------------------------------
+
+    def _build_rdp_display_section(self) -> QGroupBox:
+        box = QGroupBox("RDP Display")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Resolution requested for embedded RDP sessions (Connect via RDP). A "
+            "fixed size is requested once at connect and never changes with the "
+            "window — the display just stretches to fit — instead of matching the "
+            "window size on every resize, which can be slow to redraw over a slow "
+            "connection."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._rdp_resolution_combo = QComboBox()
+        for label, _ in RDP_RESOLUTION_PRESETS:
+            self._rdp_resolution_combo.addItem(label)
+
+        current = settings.load_default_rdp_resolution()
+        for index, (_, value) in enumerate(RDP_RESOLUTION_PRESETS):
+            if value == current:
+                self._rdp_resolution_combo.setCurrentIndex(index)
+                break
+
+        self._rdp_resolution_combo.currentIndexChanged.connect(self._on_rdp_resolution_changed)
+        layout.addWidget(self._rdp_resolution_combo)
+        return box
+
+    def _on_rdp_resolution_changed(self, index: int) -> None:
+        _, resolution = RDP_RESOLUTION_PRESETS[index]
+        settings.save_default_rdp_resolution(resolution)
 
     # -- FreeRDP (Windows) ------------------------------------------------
 

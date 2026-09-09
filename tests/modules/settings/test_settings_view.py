@@ -16,6 +16,7 @@ def _make_view(
     gcloud_available=False,
     platform_system="Linux",
     qemu_available=False,
+    default_rdp_resolution=None,
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
     # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
@@ -28,6 +29,7 @@ def _make_view(
     monkeypatch.setattr(rclone_client, "is_available", lambda: rclone_available)
     monkeypatch.setattr(rclone_client, "rclone_executable", lambda: "/usr/bin/rclone")
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
+    monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
     monkeypatch.setattr(qemu_client, "is_available", lambda: qemu_available)
     monkeypatch.setattr(settings_main_view.platform, "system", lambda: platform_system)
@@ -246,6 +248,38 @@ def test_qemu_section_shows_install_instructions_when_missing(qtbot, monkeypatch
 
     assert "virsh not found" in view._qemu_status_label.text()
     assert "apt install libvirt-clients" in view._qemu_status_label.text()
+
+
+def test_rdp_display_section_defaults_to_match_window_size(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, default_rdp_resolution=None)
+
+    assert view._rdp_resolution_combo.currentText() == "Match window size"
+
+
+def test_rdp_display_section_preselects_the_saved_resolution(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, default_rdp_resolution=(1920, 1080))
+
+    assert view._rdp_resolution_combo.currentText() == "1920 × 1080"
+
+
+def test_changing_rdp_resolution_saves_it(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(settings, "save_default_rdp_resolution", lambda value: saved.append(value))
+
+    view._rdp_resolution_combo.setCurrentText("2560 × 1440")
+
+    assert saved == [(2560, 1440)]
+
+
+def test_changing_rdp_resolution_back_to_match_window_size_clears_it(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, default_rdp_resolution=(1920, 1080))
+    saved = []
+    monkeypatch.setattr(settings, "save_default_rdp_resolution", lambda value: saved.append(value))
+
+    view._rdp_resolution_combo.setCurrentText("Match window size")
+
+    assert saved == [None]
 
 
 def test_freerdp_section_not_applicable_off_windows(qtbot, monkeypatch):
