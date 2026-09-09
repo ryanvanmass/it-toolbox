@@ -104,6 +104,45 @@ def save_default_username(username: str | None) -> None:
         path.unlink(missing_ok=True)
 
 
+def default_rdp_resolution_path() -> Path:
+    return data_dir() / "default_rdp_resolution.txt"
+
+
+def load_default_rdp_resolution() -> tuple[int, int] | None:
+    """A fixed resolution to request for embedded RDP sessions instead of
+    matching the window size. None means "match window size" (the
+    default): every resize sends a matching resolution request to the
+    server. A fixed value is requested once at connect and never again —
+    RdpWidget stretches the received image to fill the widget regardless
+    (see its paintEvent), so a window resize doesn't need a server round
+    trip to look right. This exists because that round trip is measurably
+    slow over a GCP/IAP-tunneled connection specifically (see
+    docs/embedded-rdp-status.md's "Post-resize lag is specific to the
+    GCP/IAP-tunnel path" section) — picking a fixed resolution sidesteps
+    the round trip entirely rather than trying to make it faster.
+    """
+    path = default_rdp_resolution_path()
+    if not path.is_file():
+        return None
+    text = path.read_text().strip()
+    if not text:
+        return None
+    try:
+        width_str, height_str = text.split("x")
+        return int(width_str), int(height_str)
+    except ValueError:
+        return None
+
+
+def save_default_rdp_resolution(resolution: tuple[int, int] | None) -> None:
+    path = default_rdp_resolution_path()
+    if resolution is None:
+        path.unlink(missing_ok=True)
+    else:
+        width, height = resolution
+        path.write_text(f"{width}x{height}")
+
+
 def rclone_path_path() -> Path:
     return data_dir() / "rclone_path.txt"
 

@@ -693,9 +693,10 @@ class _FakeRdpWidget(QWidget):
 
     finished = Signal()
 
-    def __init__(self, host, port, username, password, domain=""):
+    def __init__(self, host, port, username, password, domain="", desktop_size=None):
         super().__init__()
         self.host, self.port, self.username, self.password = host, port, username, password
+        self.desktop_size = desktop_size
 
     def close_session(self):
         pass
@@ -720,6 +721,34 @@ def test_rdp_connect_embeds_widget_and_registers_session(qtbot, monkeypatch):
         "secret",
     )
     assert len(view._active_sessions) == 1
+
+
+def test_rdp_connect_passes_the_configured_default_resolution(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.settings, "load_default_rdp_resolution", lambda: (1920, 1080)
+    )
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice", "secret")
+
+    assert view._tabs.widget(0).desktop_size == (1920, 1080)
+
+
+def test_rdp_connect_defaults_to_matching_window_size(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(main_view_module.settings, "load_default_rdp_resolution", lambda: None)
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice", "secret")
+
+    assert view._tabs.widget(0).desktop_size is None
 
 
 def test_rdp_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):

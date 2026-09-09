@@ -266,6 +266,171 @@ trial-and-error:
   `"cliprdr"` (unlike `disp`, see above) — channel binding itself
   worked fine on the first try.
 
+## Fixed resolution option, for GCP/IAP-tunnel connections (2026-09-08)
+
+A user report of 5-10s render lag after a window drag/resize turned out
+to be specific to GCP VM connections — these route through
+`core/iap_tunnel.py`/`core/tunnel_session.py`'s `BackgroundTunnel` (a
+WebSocket-relayed IAP tunnel), not a plain TCP connection, and every
+resize (match-window-size mode restarts a request on every
+`resizeEvent`) pays that tunnel's round trip. A direct connection
+doesn't show the lag; a real GCP VM does.
+
+Rather than trying to make that round trip faster (its own investigation
+— the tunnel's frame/ACK protocol was read through and matches gcloud's
+own `start-iap-tunnel` implementation, so there's no obvious protocol
+bug to fix there), Settings now offers a **fixed resolution** option for
+embedded RDP sessions (`core/settings.py`'s
+`load_default_rdp_resolution()`/`save_default_rdp_resolution()`,
+Settings page's new "RDP Display" section). Picking one of the presets
+(1280×720 through 3840×2160) requests that resolution once at connect
+and never again — `RdpWidget.resizeEvent` skips the resize-debounce
+entirely when a fixed size is configured, since `paintEvent` scales the
+image to fit the widget regardless of its native resolution (see
+"Letterboxing" below for how that scaling preserves aspect ratio rather
+than stretching). This sidesteps the round trip for the common case
+rather than fixing it. "Match window size" (`None`) keeps today's
+default behavior.
+
+The fixed size is applied via
+`FreeRdpSession.connect(..., desktop_size=(w, h))` →
+`freerdp_client._apply_desktop_size()`, which sets
+`FreeRDP_DesktopWidth`/`FreeRDP_DesktopHeight` directly via
+`freerdp_settings_set_uint32()` — but with the numeric key for each
+looked up at runtime via `freerdp_settings_get_key_for_name()`
+(`freerdp/settings.h`, a genuine public/exported API) rather than a
+hand-picked literal, unlike the settings in `_configure_settings()`
+(`SETTING_SERVER_PORT` etc., copied from a real generated header).
+`DesktopWidth`/`DesktopHeight`'s numeric keys aren't stable literals
+safe to transcribe by hand: FreeRDP's upstream
+`include/config/settings_keys.h.in` is a bare CMake
+`@SETTINGS_KEYS_UINT32@` template with no static enum checked into the
+source tree at any version checked (3.0.0 through 3.31.1), generated at
+build time in a way this project can't reproduce without a full FreeRDP
+build. `freerdp_settings_get_key_for_name()` sidesteps that permanently
+by resolving the name against whatever the *actual running library*
+says it is — verified empirically against this machine's real installed
+`libfreerdp3.so.3` (3.31.1): looking up `"FreeRDP_ServerPort"` this way
+returns 19, matching `SETTING_SERVER_PORT` above exactly, confirming the
+lookup is trustworthy and not just plausible.
+
+Two earlier approaches were tried and discarded before landing here —
+worth recording so neither gets retried:
+
+1. `freerdp_client_settings_parse_connection_file_buffer()` (the
+   `.rdp`-file parser). Looked correct in isolation — a standalone check
+   confirmed a buffer with just `desktopwidth`/`desktopheight` lines set
+   exactly those two fields — but real connections with a fixed
+   resolution then failed to connect with no error surfaced. Root cause,
+   found by diffing a `freerdp_client_settings_write_connection_file()`
+   dump of the settings object before and after calling it: that parser
+   allocates a whole `rdpFile` struct with ~50 fields of its *own*
+   defaults (compression, connection type, authentication level, CredSSP
+   support, ...) and applies **all** of them to the target settings, not
+   just the two lines actually in the buffer — silently stomping the
+   NLA/security settings `_configure_settings()` had already set. The
+   one-off verification script that "confirmed" this approach only
+   checked the two fields it cared about, not the full settings surface,
+   which is exactly how this got missed initially.
+2. `freerdp_client_settings_parse_command_line()` with
+   `["it-toolbox", "/w:N", "/h:N"]` — fixed the NLA-stomping problem
+   (each `/w`/`/h` handler is a single targeted
+   `freerdp_settings_set_uint32()` call, verified against FreeRDP's own
+   `cmdline.c`), and was re-verified clean against the real library the
+   same before/after-diffing way, this time also checking the
+   NLA/TLS/RDP-security bools directly (not just the `.rdp`-representable
+   fields, which don't cover those). But it still indirectly triggers
+   `prepare_default_settings()` setting `ConnectionType` to
+   `CONNECTION_TYPE_AUTODETECT` as a side effect of no other
+   network/gfx/rfx/bpp flag being present — turned out to be harmless in
+   practice (`AUTODETECT` is FreeRDP's own compiled-in default for a
+   bare context anyway, confirmed empirically), but still an unnecessary
+   side channel to depend on when a direct settings call now does the
+   whole job with zero side effects at all.
+
+Lesson for next time: when verifying an isolated settings/protocol
+change, diff the *entire* observable settings surface before vs. after,
+not just the specific fields the change was meant to touch — a narrow
+check can pass while a broader side effect still breaks the real thing
+it feeds into.
+
+## Fixed resolution connects but renders nothing (2026-09-08, resolved)
+
+Along the way to the `freerdp_settings_get_key_for_name()` fix above, an
+intermediate version (the discarded `freerdp_client_settings_parse_command_line()`
+approach) connected cleanly against a real GCP VM — TLS, `gdi_init_ex`,
+all dynamic virtual channels loading, no errors anywhere in the log —
+but rendered nothing. No frame ever painted.
+
+Two theories were checked and ruled out:
+
+- That the server was rendering through the newer Graphics Pipeline
+  extension (`rdpgfx`, which our code never reads from; only
+  `update->EndPaint` is hooked) instead of the classic bitmap-update
+  path. Ruled out: `FreeRDP_SupportGraphicsPipeline` defaults to `0`
+  (confirmed via `freerdp_settings_get_key_for_name()` +
+  `freerdp_settings_get_bool()`) and nothing in `_configure_settings()`
+  enables it, so the server has no capability signal from us to switch
+  to it regardless of what channels load locally.
+- That user testing directly against this same GCP VM confirmed
+  disambiguates the scope: "Match window size" mode (never calls
+  `_apply_desktop_size()` at all) renders the real remote desktop fine
+  against this VM — so the blank-screen bug was specific to the
+  resolution feature, not a pre-existing general issue with the embedded
+  client over the IAP tunnel.
+
+That second finding narrowed it down to something specific to
+`_apply_desktop_size()` itself, and the only candidate left standing was
+the thing that had been dismissed as "harmless" one section up: the
+discarded command-line-parser approach's call to
+`prepare_default_settings()`, which explicitly invokes
+`freerdp_set_connection_type(settings, CONNECTION_TYPE_AUTODETECT)`.
+The *raw integer* `connection type` value looked identical before/after
+in the earlier `.rdp`-file-dump diff (both `7`), which is what led to
+ruling it out — but a bare, freshly-created context reporting `7` as its
+compiled-in default doesn't necessarily mean the *derived* bools
+(`NetworkAutoDetect`/`BandwidthAutoDetect`) are also set the way an
+explicit `freerdp_set_connection_type()` call would set them. The
+working theory (not independently re-verified at the settings level,
+but consistent with everything observed) is that explicitly invoking
+connection-type auto-detection put the server into a bandwidth-probing
+sequence this minimal client never responds to, stalling the first
+frame indefinitely with no error on either side — while a bare
+default's matching *integer* alone was never enough to trigger that
+sequence.
+
+**Confirmed fixed**: switching to `freerdp_settings_get_key_for_name()` +
+direct `freerdp_settings_set_uint32()` calls (zero side effects,
+verified earlier in this doc) resolved it — a real GCP VM connection
+with a fixed resolution selected now renders correctly. This is also
+the concrete lesson that motivated dropping the command-line-parser
+approach in the first place, independent of this bug: any code path
+that goes through FreeRDP's higher-level parsers (`.rdp`-file buffer,
+command line) risks additional settings changing as a side effect
+beyond what a diff of the *documented*/`.rdp`-representable fields can
+catch, even when those side effects look inert on the surface.
+
+## Letterboxing instead of stretching (2026-09-09)
+
+`RdpWidget.paintEvent` used to always `drawImage(self.rect(), ...)` —
+stretching the received image to exactly fill the widget, distorting it
+whenever the widget's aspect ratio didn't match the image's. That's
+harmless in "Match window size" mode (the two are always kept equal by
+`resizeEvent`), but with a *fixed* resolution selected, the widget can
+be any shape — a 1920×1080 (16:9) session in a narrower or squarer app
+window would render visibly squashed.
+
+`_scaled_image_rect()` now computes the largest rect, centered in the
+widget, that fits `self._image` at its own aspect ratio (`QSize.scaled(
+..., Qt.AspectRatioMode.KeepAspectRatio)`), and `paintEvent` fills the
+leftover space with solid black bars rather than stretching into it.
+`_remote_pos()` (widget-space → remote-desktop-space, used by every
+mouse event handler) had to change alongside it — it was written
+assuming the image always covers the *entire* widget rect, which is no
+longer true. It now maps through the same letterboxed rect, and clamps
+clicks that land in the bars themselves to the nearest image edge
+instead of producing a negative or out-of-range remote coordinate.
+
 ## What's still open
 
 - The MD4/legacy-provider gap noted above, if it turns out to matter

@@ -17,7 +17,7 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
-from it_toolbox.core.rdp.freerdp_client import FreeRdpError, FreeRdpSession
+from it_toolbox.core.rdp.freerdp_client import FreeRdpSession
 
 
 class RdpSessionSignals(QObject):
@@ -39,12 +39,14 @@ class RdpSessionWorker:
         username: str,
         password: str,
         domain: str = "",
+        desktop_size: tuple[int, int] | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._username = username
         self._password = password
         self._domain = domain
+        self._desktop_size = desktop_size
         self.signals = RdpSessionSignals()
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
@@ -112,10 +114,23 @@ class RdpSessionWorker:
         self._session.on_frame = self._on_frame
         try:
             self._session.connect(
-                self._host, self._port, self._username, self._password, domain=self._domain
+                self._host,
+                self._port,
+                self._username,
+                self._password,
+                domain=self._domain,
+                desktop_size=self._desktop_size,
             )
-        except FreeRdpError as exc:
-            self.signals.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - see comment below
+            # Deliberately broader than FreeRdpError: an uncaught exception
+            # on this background thread has nothing to propagate to — it
+            # just kills the thread silently, leaving the widget stuck on
+            # "Connecting…" forever with no signal ever emitted and no
+            # visible error. That's a strictly worse failure mode than
+            # showing a slightly-less-tailored message for something
+            # unanticipated (e.g. a ctypes marshaling mistake), so anything
+            # unexpected here still surfaces rather than vanishing.
+            self.signals.error.emit(f"{type(exc).__name__}: {exc}")
             return
 
         self.signals.connected.emit()
@@ -130,8 +145,8 @@ class RdpSessionWorker:
                 # polling well above any useful frame rate at a small,
                 # bounded CPU cost.
                 time.sleep(0.005)
-        except FreeRdpError as exc:
-            self.signals.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - see comment above
+            self.signals.error.emit(f"{type(exc).__name__}: {exc}")
         finally:
             self._session.disconnect()
             self.signals.disconnected.emit()

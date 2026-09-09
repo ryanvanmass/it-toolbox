@@ -899,7 +899,8 @@ class ConnectionManagerView(QWidget):
         password: str | None,
         host: str = "127.0.0.1",
     ) -> None:
-        rdp = RdpWidget(host, port, username or "", password or "")
+        desktop_size = settings.load_default_rdp_resolution()
+        rdp = RdpWidget(host, port, username or "", password or "", desktop_size=desktop_size)
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = rdp
         self._owned_tab_widgets.add(rdp)
