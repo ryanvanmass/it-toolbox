@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QWidget
 
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.identity_management.ui.main_view import IdentityManagementView
@@ -17,5 +17,5 @@ class IdentityManagementModule(ToolModule):
             self._widget = IdentityManagementView()
         return self._widget
 
-    def build_context_menu(self, parent: QWidget) -> QMenu:
-        return self.create_widget().build_context_menu(parent)
+    def create_sidebar_widget(self) -> QWidget | None:
+        return self.create_widget().sidebar_tree

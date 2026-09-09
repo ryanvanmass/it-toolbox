@@ -2,17 +2,15 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFormLayout,
-    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
-    QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
-    QTabWidget,
+    QStackedWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -22,17 +20,40 @@ from it_toolbox.modules.identity_management import jumpcloud_client
 from it_toolbox.modules.identity_management.models import Device, User
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
 
-DEVICE_ROLE = Qt.ItemDataRole.UserRole
-USER_ROLE = Qt.ItemDataRole.UserRole
+IS_JUMPCLOUD_ROOT_ROLE = Qt.ItemDataRole.UserRole
+CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 1
+DEVICE_ROLE = Qt.ItemDataRole.UserRole + 2
+USER_ROLE = Qt.ItemDataRole.UserRole + 3
+
+CATEGORY_DEVICES = "devices"
+CATEGORY_USERS = "users"
 
 
 class IdentityManagementView(QWidget):
-    """Devices/Users browser for JumpCloud — the first of what issue #15
-    expects to grow into a small collection of identity-management tool
-    integrations. No sidebar tree in this first version (unlike Connection
-    Manager/Cloud Storage): there's no hierarchical navigation need yet,
-    so this is just the two-tab main view; a "Set JumpCloud API Key…" /
-    "Refresh" context menu (build_context_menu) covers the rest.
+    """Browser for identity-management provider integrations (issue #15)
+    -- JumpCloud is the first, with more (e.g. GAM/Google Workspace)
+    expected to follow. Mirrors Connection Manager's sidebar-tree shape
+    (provider as a root node, its categories as children,
+    e.g. connection_manager/ui/main_view.py's GCP root -> project ->
+    VMs/Buckets) rather than a provider-specific tab set, so a second
+    provider means adding a sibling root, not restructuring this view
+    again. One level shallower than GCP's: JumpCloud itself is the root,
+    directly followed by its categories, since there's no "project" layer.
+
+    Unlike Connection Manager's tree (pure navigation/action trigger,
+    fully decoupled from its own main-content page), this module's whole
+    point is browsing/inspecting device and user info -- so tree
+    selection here drives a detail panel in the main content area
+    directly, via a QStackedWidget of (placeholder, device detail, user
+    detail) pages.
+
+    Tree leaves are single-column (name/username only) rather than also
+    showing OS/Last Contact/Email inline: a QTreeWidget has one shared
+    header row for the whole tree, and Devices/Users need different
+    columns that don't cleanly coexist under one header. Matches
+    Connection Manager's own tree, which never hits this (VMs and
+    Buckets are both single-column too) -- the detail panel is one click
+    away regardless, via selection.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -44,56 +65,54 @@ class IdentityManagementView(QWidget):
         self._cached_api_key: str | None = None
         self._selected_device: Device | None = None
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_devices_tab(), "Devices")
-        tabs.addTab(self._build_users_tab(), "Users")
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Providers"])
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self._tree.currentItemChanged.connect(self._on_tree_selection_changed)
+
+        self._jumpcloud_root = QTreeWidgetItem(["JumpCloud"])
+        self._jumpcloud_root.setData(0, IS_JUMPCLOUD_ROOT_ROLE, True)
+        self._tree.addTopLevelItem(self._jumpcloud_root)
+
+        self._devices_category = QTreeWidgetItem(["Devices"])
+        self._devices_category.setData(0, CATEGORY_ROLE, CATEGORY_DEVICES)
+        self._jumpcloud_root.addChild(self._devices_category)
+
+        self._users_category = QTreeWidgetItem(["Users"])
+        self._users_category.setData(0, CATEGORY_ROLE, CATEGORY_USERS)
+        self._jumpcloud_root.addChild(self._users_category)
+
+        self._jumpcloud_root.setExpanded(True)
+        self._devices_category.setExpanded(True)
+        self._users_category.setExpanded(True)
+
+        self._placeholder_label = QLabel("Select a device or user to see its details.")
+        self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._placeholder_label)
+        self._stack.addWidget(self._build_device_detail_panel())
+        self._stack.addWidget(self._build_user_detail_panel())
 
         layout = QVBoxLayout(self)
-        layout.addWidget(tabs)
+        layout.addWidget(self._stack)
 
         self.refresh()
 
-    # -- Devices tab --------------------------------------------------------
+    @property
+    def sidebar_tree(self) -> QTreeWidget:
+        """The provider/category/item browser, hosted in the app sidebar
+        (nested under this module's entry) rather than in this view's
+        own layout — see IdentityManagementModule.create_sidebar_widget().
+        """
+        return self._tree
 
-    def _build_devices_tab(self) -> QWidget:
-        container = QWidget()
-        layout = QVBoxLayout(container)
-
-        self._device_status_label = QLabel("")
-        self._device_status_label.setWordWrap(True)
-        layout.addWidget(self._device_status_label)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        self._devices_table = QTableWidget(0, 3)
-        self._devices_table.setHorizontalHeaderLabels(["Name", "OS", "Last Contact"])
-        self._devices_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._devices_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        devices_header = self._devices_table.horizontalHeader()
-        # Every column just wide enough for its own longest current value
-        # — Stretch on Name blew it up to fill the whole pane even for
-        # short device names, which looked far worse than an unused strip
-        # of plain background to the right of the table.
-        devices_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        devices_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        devices_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self._devices_table.currentItemChanged.connect(self._on_device_selection_changed)
-        splitter.addWidget(self._devices_table)
-
-        splitter.addWidget(self._build_device_detail_panel())
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
-
-        return container
+    # -- Device detail ----------------------------------------------------
 
     def _build_device_detail_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setEnabled(False)
         form = QFormLayout(panel)
-
-        self._device_placeholder_label = QLabel("Select a device to see its details.")
-        form.addRow(self._device_placeholder_label)
 
         self._device_fields = {
             "hostname": QLabel(""),
@@ -116,37 +135,59 @@ class IdentityManagementView(QWidget):
         self._remote_assist_button.clicked.connect(self._on_launch_remote_assist_clicked)
         form.addRow(self._remote_assist_button)
 
-        self._device_detail_panel = panel
         return panel
 
-    def _on_device_selection_changed(self, current, previous) -> None:
-        if current is None:
+    def _build_user_detail_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+
+        self._user_fields = {
+            "first_name": QLabel(""),
+            "last_name": QLabel(""),
+            "suspended": QLabel(""),
+        }
+        form.addRow("First Name:", self._user_fields["first_name"])
+        form.addRow("Last Name:", self._user_fields["last_name"])
+        form.addRow("Suspended:", self._user_fields["suspended"])
+
+        return panel
+
+    def _on_tree_selection_changed(self, current: QTreeWidgetItem | None, previous) -> None:
+        device: Device | None = current.data(0, DEVICE_ROLE) if current is not None else None
+        user: User | None = current.data(0, USER_ROLE) if current is not None else None
+
+        if device is not None:
+            self._selected_device = device
+            self._stack.setCurrentIndex(1)
+            # Instant partial render from the tree item's own data, then
+            # backfill the detail-only fields once get_device() resolves —
+            # avoids a blank/loading flash on every click.
+            self._device_fields["hostname"].setText(device.hostname)
+            self._device_fields["os_version"].setText(device.os_version or "Loading…")
+            self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
+            self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
+            self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
+
+            api_key = self._get_api_key()
+            if api_key is None:
+                return
+            async_utils.run_in_background(
+                lambda: jumpcloud_client.get_device(api_key, device.id),
+                on_result=self._populate_device_detail,
+                on_error=self._on_detail_error,
+            )
+        elif user is not None:
             self._selected_device = None
-            self._device_detail_panel.setEnabled(False)
-            self._device_placeholder_label.setVisible(True)
-            return
-
-        device: Device = self._devices_table.item(current.row(), 0).data(DEVICE_ROLE)
-        self._selected_device = device
-        self._device_detail_panel.setEnabled(True)
-        self._device_placeholder_label.setVisible(False)
-        # Instant partial render from the list row's own data, then
-        # backfill the detail-only fields once get_device() resolves —
-        # avoids a blank/loading flash on every click.
-        self._device_fields["hostname"].setText(device.hostname)
-        self._device_fields["os_version"].setText(device.os_version or "Loading…")
-        self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
-        self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
-        self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
-
-        api_key = self._get_api_key()
-        if api_key is None:
-            return
-        async_utils.run_in_background(
-            lambda: jumpcloud_client.get_device(api_key, device.id),
-            on_result=self._populate_device_detail,
-            on_error=self._on_detail_error,
-        )
+            self._stack.setCurrentIndex(2)
+            # Unlike devices, list_users() already returns everything the
+            # detail panel shows — no separate detail endpoint/async call
+            # needed, just render straight from the tree item's stashed User.
+            self._user_fields["first_name"].setText(user.first_name)
+            self._user_fields["last_name"].setText(user.last_name)
+            self._user_fields["suspended"].setText("Yes" if user.suspended else "No")
+        else:
+            self._selected_device = None
+            self._stack.setCurrentIndex(0)
 
     def _populate_device_detail(self, device: Device) -> None:
         try:
@@ -172,108 +213,60 @@ class IdentityManagementView(QWidget):
         url = jumpcloud_client.remote_assist_url(self._selected_device.id)
         QDesktopServices.openUrl(QUrl(url))
 
+    # -- Populating the tree ------------------------------------------------
+
+    @staticmethod
+    def _show_category_placeholder(category: QTreeWidgetItem, text: str) -> None:
+        category.takeChildren()
+        category.addChild(QTreeWidgetItem([text]))
+
     def _populate_devices(self, devices: list[Device]) -> None:
         try:
-            self._device_status_label.setText("" if devices else "No devices found.")
-            self._devices_table.setRowCount(len(devices))
-            for row, device in enumerate(devices):
-                name_item = QTableWidgetItem(device.display_name)
-                name_item.setData(DEVICE_ROLE, device)
-                self._devices_table.setItem(row, 0, name_item)
-                self._devices_table.setItem(row, 1, QTableWidgetItem(device.os))
-                self._devices_table.setItem(row, 2, QTableWidgetItem(device.last_contact))
+            if not devices:
+                self._show_category_placeholder(self._devices_category, "No devices found.")
+                return
+            self._devices_category.takeChildren()
+            for device in devices:
+                item = QTreeWidgetItem([device.display_name])
+                item.setData(0, DEVICE_ROLE, device)
+                self._devices_category.addChild(item)
         except RuntimeError:
             pass  # widget torn down mid-flight
-
-    # -- Users tab ------------------------------------------------------------
-
-    def _build_users_tab(self) -> QWidget:
-        container = QWidget()
-        layout = QVBoxLayout(container)
-
-        self._user_status_label = QLabel("")
-        self._user_status_label.setWordWrap(True)
-        layout.addWidget(self._user_status_label)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        self._users_table = QTableWidget(0, 2)
-        self._users_table.setHorizontalHeaderLabels(["Username", "Email"])
-        self._users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._users_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        users_header = self._users_table.horizontalHeader()
-        users_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        users_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self._users_table.currentItemChanged.connect(self._on_user_selection_changed)
-        splitter.addWidget(self._users_table)
-
-        splitter.addWidget(self._build_user_detail_panel())
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
-
-        return container
-
-    def _build_user_detail_panel(self) -> QWidget:
-        panel = QWidget()
-        panel.setEnabled(False)
-        form = QFormLayout(panel)
-
-        self._user_placeholder_label = QLabel("Select a user to see its details.")
-        form.addRow(self._user_placeholder_label)
-
-        self._user_fields = {
-            "first_name": QLabel(""),
-            "last_name": QLabel(""),
-            "suspended": QLabel(""),
-        }
-        form.addRow("First Name:", self._user_fields["first_name"])
-        form.addRow("Last Name:", self._user_fields["last_name"])
-        form.addRow("Suspended:", self._user_fields["suspended"])
-
-        self._user_detail_panel = panel
-        return panel
-
-    def _on_user_selection_changed(self, current, previous) -> None:
-        if current is None:
-            self._user_detail_panel.setEnabled(False)
-            self._user_placeholder_label.setVisible(True)
-            return
-
-        # Unlike devices, list_users() already returns everything the
-        # detail panel shows — no separate detail endpoint/async call
-        # needed, just render straight from the row's stashed User.
-        user: User = self._users_table.item(current.row(), 0).data(USER_ROLE)
-        self._user_detail_panel.setEnabled(True)
-        self._user_placeholder_label.setVisible(False)
-        self._user_fields["first_name"].setText(user.first_name)
-        self._user_fields["last_name"].setText(user.last_name)
-        self._user_fields["suspended"].setText("Yes" if user.suspended else "No")
 
     def _populate_users(self, users: list[User]) -> None:
         try:
-            self._user_status_label.setText("" if users else "No users found.")
-            self._users_table.setRowCount(len(users))
-            for row, user in enumerate(users):
-                username_item = QTableWidgetItem(user.username)
-                username_item.setData(USER_ROLE, user)
-                self._users_table.setItem(row, 0, username_item)
-                self._users_table.setItem(row, 1, QTableWidgetItem(user.email))
+            if not users:
+                self._show_category_placeholder(self._users_category, "No users found.")
+                return
+            self._users_category.takeChildren()
+            for user in users:
+                item = QTreeWidgetItem([user.username])
+                item.setData(0, USER_ROLE, user)
+                self._users_category.addChild(item)
         except RuntimeError:
             pass  # widget torn down mid-flight
 
-    # -- API key / refresh ----------------------------------------------------
+    # -- Context menu / API key / refresh -------------------------------------
 
-    def build_context_menu(self, parent: QWidget) -> QMenu:
-        """Shown when right-clicking this module's entry in the app
-        sidebar — see IdentityManagementModule.build_context_menu().
+    def _build_jumpcloud_root_menu(self) -> QMenu:
+        """Split out from _on_tree_context_menu so tests can check the
+        built menu's actions without ever calling QMenu.exec() (which
+        opens a real, blocking popup with nothing to dismiss it
+        headless — see app.py's _build_session_tab_menu for the same
+        split, done for the same reason).
         """
-        menu = QMenu(parent)
+        menu = QMenu(self)
         configured = settings.jumpcloud_api_key_path().is_file()
         label = "Change JumpCloud API Key…" if configured else "Set JumpCloud API Key…"
         menu.addAction(label).triggered.connect(self._on_set_api_key_clicked)
         menu.addAction("Refresh").triggered.connect(self.refresh)
         return menu
+
+    def _on_tree_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if item is None or not item.data(0, IS_JUMPCLOUD_ROOT_ROLE):
+            return
+        self._build_jumpcloud_root_menu().exec(self._tree.viewport().mapToGlobal(pos))
 
     def _on_set_api_key_clicked(self) -> None:
         dialog = ApiKeyDialog(parent=self)
@@ -309,20 +302,18 @@ class IdentityManagementView(QWidget):
         api_key = self._get_api_key()
         if api_key is None:
             message = (
-                "Couldn't unlock the stored JumpCloud API key — set it again via the "
-                "sidebar menu."
+                "Couldn't unlock the stored JumpCloud API key — right-click "
+                '"JumpCloud" and choose "Change JumpCloud API Key…".'
                 if settings.jumpcloud_api_key_path().is_file()
-                else 'No JumpCloud API key configured yet — right-click "Identity '
-                'Management" in the sidebar and choose "Set JumpCloud API Key…".'
+                else 'No JumpCloud API key configured — right-click "JumpCloud" '
+                'and choose "Set JumpCloud API Key…".'
             )
-            self._devices_table.setRowCount(0)
-            self._users_table.setRowCount(0)
-            self._device_status_label.setText(message)
-            self._user_status_label.setText(message)
+            self._show_category_placeholder(self._devices_category, message)
+            self._show_category_placeholder(self._users_category, message)
             return
 
-        self._device_status_label.setText("")
-        self._user_status_label.setText("")
+        self._show_category_placeholder(self._devices_category, "Loading…")
+        self._show_category_placeholder(self._users_category, "Loading…")
         async_utils.run_in_background(
             lambda: jumpcloud_client.list_devices(api_key),
             on_result=self._populate_devices,

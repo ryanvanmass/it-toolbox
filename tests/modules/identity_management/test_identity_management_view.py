@@ -38,26 +38,39 @@ def _make_view(qtbot, monkeypatch, api_key="jca_test", devices=(), users=()):
     return view
 
 
-def test_devices_table_populates_from_list_devices(qtbot, monkeypatch):
+def test_devices_populate_as_tree_children(qtbot, monkeypatch):
     devices = [
         Device(id="d1", display_name="alpha", os="windows", hostname="alpha-host"),
         Device(id="d2", display_name="beta", os="linux", hostname="beta-host"),
     ]
     view = _make_view(qtbot, monkeypatch, devices=devices)
 
-    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
-    assert view._devices_table.item(0, 0).text() == "alpha"
-    assert view._devices_table.item(0, 1).text() == "windows"
-    assert view._devices_table.item(0, 0).data(DEVICE_ROLE) == devices[0]
+    qtbot.waitUntil(lambda: view._devices_category.childCount() == 2, timeout=2000)
+    assert view._devices_category.child(0).text(0) == "alpha"
+    assert view._devices_category.child(0).data(0, DEVICE_ROLE) == devices[0]
+    assert view._devices_category.child(1).text(0) == "beta"
 
 
-def test_users_table_populates_from_list_users(qtbot, monkeypatch):
+def test_devices_category_shows_placeholder_when_empty(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, devices=[])
+
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).text(0) == "No devices found.", timeout=2000
+    )
+
+
+def test_users_populate_as_tree_children(qtbot, monkeypatch):
     users = [User(id="u1", username="alice", email="alice@example.com")]
     view = _make_view(qtbot, monkeypatch, users=users)
 
-    qtbot.waitUntil(lambda: view._users_table.rowCount() == 1, timeout=2000)
-    assert view._users_table.item(0, 0).text() == "alice"
-    assert view._users_table.item(0, 0).data(USER_ROLE) == users[0]
+    # A single real user collides in count with the "Loading…" placeholder
+    # refresh() adds synchronously up front (both are exactly 1 child) —
+    # wait for the actual data role instead of just a child count.
+    qtbot.waitUntil(
+        lambda: view._users_category.child(0).data(0, USER_ROLE) is not None, timeout=2000
+    )
+    assert view._users_category.child(0).text(0) == "alice"
+    assert view._users_category.child(0).data(0, USER_ROLE) == users[0]
 
 
 def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeypatch):
@@ -73,15 +86,20 @@ def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeyp
         last_contact="2026-09-05T00:00:00Z",
     )
     view = _make_view(qtbot, monkeypatch, devices=[device])
-    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    # A single real device collides in count with the "Loading…"
+    # placeholder refresh() adds synchronously up front (both are exactly
+    # 1 child) — wait for the actual data role instead of just a count.
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+    )
     monkeypatch.setattr(
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
         lambda key, device_id: detail,
     )
 
-    view._devices_table.setCurrentCell(0, 0)
+    view._tree.setCurrentItem(view._devices_category.child(0))
 
-    assert view._device_detail_panel.isEnabled()
+    assert view._stack.currentIndex() == 1
     assert view._device_fields["hostname"].text() == "alpha-host"
     qtbot.waitUntil(
         lambda: view._device_fields["serial_number"].text() == "ABC123", timeout=2000
@@ -90,19 +108,24 @@ def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeyp
     assert view._device_fields["agent_version"].text() == "1.2.3"
 
 
-def test_clearing_device_selection_disables_detail_panel(qtbot, monkeypatch):
+def test_clearing_selection_shows_the_placeholder_page(qtbot, monkeypatch):
     device = Device(id="d1", display_name="alpha", os="windows")
     view = _make_view(qtbot, monkeypatch, devices=[device])
-    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
-    view._devices_table.setCurrentCell(0, 0)
-    assert view._device_detail_panel.isEnabled()
+    # A single real device collides in count with the "Loading…"
+    # placeholder refresh() adds synchronously up front (both are exactly
+    # 1 child) — wait for the actual data role instead of just a count.
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+    )
+    view._tree.setCurrentItem(view._devices_category.child(0))
+    assert view._stack.currentIndex() == 1
 
-    view._devices_table.setCurrentCell(-1, -1)
+    view._tree.setCurrentItem(None)
 
-    assert not view._device_detail_panel.isEnabled()
+    assert view._stack.currentIndex() == 0
 
 
-def test_selecting_a_user_renders_synchronously_from_row_data(qtbot, monkeypatch):
+def test_selecting_a_user_renders_synchronously_from_tree_item_data(qtbot, monkeypatch):
     user = User(
         id="u1",
         username="alice",
@@ -112,11 +135,13 @@ def test_selecting_a_user_renders_synchronously_from_row_data(qtbot, monkeypatch
         suspended=True,
     )
     view = _make_view(qtbot, monkeypatch, users=[user])
-    qtbot.waitUntil(lambda: view._users_table.rowCount() == 1, timeout=2000)
+    qtbot.waitUntil(
+        lambda: view._users_category.child(0).data(0, USER_ROLE) is not None, timeout=2000
+    )
 
-    view._users_table.setCurrentCell(0, 0)
+    view._tree.setCurrentItem(view._users_category.child(0))
 
-    assert view._user_detail_panel.isEnabled()
+    assert view._stack.currentIndex() == 2
     assert view._user_fields["first_name"].text() == "Alice"
     assert view._user_fields["last_name"].text() == "Anderson"
     assert view._user_fields["suspended"].text() == "Yes"
@@ -125,8 +150,13 @@ def test_selecting_a_user_renders_synchronously_from_row_data(qtbot, monkeypatch
 def test_launch_remote_assist_opens_the_device_console_url(qtbot, monkeypatch):
     device = Device(id="d1", display_name="alpha", os="windows")
     view = _make_view(qtbot, monkeypatch, devices=[device])
-    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
-    view._devices_table.setCurrentCell(0, 0)
+    # A single real device collides in count with the "Loading…"
+    # placeholder refresh() adds synchronously up front (both are exactly
+    # 1 child) — wait for the actual data role instead of just a count.
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+    )
+    view._tree.setCurrentItem(view._devices_category.child(0))
 
     opened = []
     monkeypatch.setattr(
@@ -161,22 +191,26 @@ def test_refresh_shows_placeholder_when_no_api_key_configured(qtbot, monkeypatch
     view = _make_view(qtbot, monkeypatch, api_key=None)
 
     assert calls == []  # never called — no key means no API traffic at all
-    assert "No JumpCloud API key configured" in view._device_status_label.text()
-    assert "No JumpCloud API key configured" in view._user_status_label.text()
+    assert "No JumpCloud API key configured" in view._devices_category.child(0).text(0)
+    assert "No JumpCloud API key configured" in view._users_category.child(0).text(0)
 
 
-def test_context_menu_offers_set_key_when_unconfigured(qtbot, monkeypatch):
+def test_jumpcloud_root_menu_offers_set_key_when_unconfigured(qtbot, monkeypatch):
+    # _build_jumpcloud_root_menu is split out precisely so this can be
+    # checked without ever calling QMenu.exec() — see its docstring and
+    # app.py's _build_session_tab_menu, which hit the same "monkeypatching
+    # exec() hangs the test" problem this split avoids.
     view = _make_view(qtbot, monkeypatch, api_key=None)
 
-    menu = view.build_context_menu(view)
+    menu = view._build_jumpcloud_root_menu()
 
     assert [a.text() for a in menu.actions()] == ["Set JumpCloud API Key…", "Refresh"]
 
 
-def test_context_menu_offers_change_key_when_configured(qtbot, monkeypatch):
+def test_jumpcloud_root_menu_offers_change_key_when_configured(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
 
-    menu = view.build_context_menu(view)
+    menu = view._build_jumpcloud_root_menu()
 
     assert [a.text() for a in menu.actions()] == ["Change JumpCloud API Key…", "Refresh"]
 
@@ -189,8 +223,13 @@ def test_populate_device_detail_after_teardown_does_not_raise(qtbot, monkeypatch
     # having a field widget raise the same RuntimeError Qt itself would.
     device = Device(id="d1", display_name="alpha", os="windows")
     view = _make_view(qtbot, monkeypatch, devices=[device])
-    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
-    view._devices_table.setCurrentCell(0, 0)
+    # A single real device collides in count with the "Loading…"
+    # placeholder refresh() adds synchronously up front (both are exactly
+    # 1 child) — wait for the actual data role instead of just a count.
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+    )
+    view._tree.setCurrentItem(view._devices_category.child(0))
 
     def _raise_deleted(*args, **kwargs):
         raise RuntimeError("Internal C++ object already deleted.")
