@@ -135,16 +135,27 @@ class IdentityManagementView(QWidget):
 
         self._device_fields = {
             "hostname": QLabel(""),
+            "status": QLabel(""),
             "os_version": QLabel(""),
+            "arch": QLabel(""),
             "serial_number": QLabel(""),
             "agent_version": QLabel(""),
+            "remote_ip": QLabel(""),
             "last_contact": QLabel(""),
+            "created": QLabel(""),
+            "description": QLabel(""),
         }
+        self._device_fields["description"].setWordWrap(True)
         form.addRow("Hostname:", self._device_fields["hostname"])
+        form.addRow("Status:", self._device_fields["status"])
         form.addRow("OS Version:", self._device_fields["os_version"])
+        form.addRow("Architecture:", self._device_fields["arch"])
         form.addRow("Serial Number:", self._device_fields["serial_number"])
         form.addRow("Agent Version:", self._device_fields["agent_version"])
+        form.addRow("Remote IP:", self._device_fields["remote_ip"])
         form.addRow("Last Contact:", self._device_fields["last_contact"])
+        form.addRow("Enrolled:", self._device_fields["created"])
+        form.addRow("Description:", self._device_fields["description"])
 
         return panel
 
@@ -153,13 +164,25 @@ class IdentityManagementView(QWidget):
         form = QFormLayout(panel)
 
         self._user_fields = {
+            "email": QLabel(""),
             "first_name": QLabel(""),
             "last_name": QLabel(""),
+            "job_title": QLabel(""),
+            "department": QLabel(""),
+            "activated": QLabel(""),
             "suspended": QLabel(""),
+            "mfa_configured": QLabel(""),
+            "created": QLabel(""),
         }
+        form.addRow("Email:", self._user_fields["email"])
         form.addRow("First Name:", self._user_fields["first_name"])
         form.addRow("Last Name:", self._user_fields["last_name"])
+        form.addRow("Job Title:", self._user_fields["job_title"])
+        form.addRow("Department:", self._user_fields["department"])
+        form.addRow("Activated:", self._user_fields["activated"])
         form.addRow("Suspended:", self._user_fields["suspended"])
+        form.addRow("MFA Configured:", self._user_fields["mfa_configured"])
+        form.addRow("Created:", self._user_fields["created"])
 
         return panel
 
@@ -170,14 +193,20 @@ class IdentityManagementView(QWidget):
         if device is not None:
             self._selected_device = device
             self._stack.setCurrentIndex(1)
-            # Instant partial render from the tree item's own data, then
-            # backfill the detail-only fields once get_device() resolves —
-            # avoids a blank/loading flash on every click.
+            # Instant partial render from the tree item's own data (only
+            # hostname/status/last_contact are populated by the list call),
+            # then backfill the rest once get_device() resolves — avoids a
+            # blank/loading flash on every click.
             self._device_fields["hostname"].setText(device.hostname)
+            self._device_fields["status"].setText("Active" if device.active else "Inactive")
             self._device_fields["os_version"].setText(device.os_version or "Loading…")
+            self._device_fields["arch"].setText(device.arch or "Loading…")
             self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
             self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
+            self._device_fields["remote_ip"].setText(device.remote_ip or "Loading…")
             self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
+            self._device_fields["created"].setText(device.created or "Loading…")
+            self._device_fields["description"].setText(device.description or "Loading…")
 
             api_key = self._get_api_key()
             if api_key is None:
@@ -193,9 +222,15 @@ class IdentityManagementView(QWidget):
             # Unlike devices, list_users() already returns everything the
             # detail panel shows — no separate detail endpoint/async call
             # needed, just render straight from the tree item's stashed User.
+            self._user_fields["email"].setText(user.email)
             self._user_fields["first_name"].setText(user.first_name)
             self._user_fields["last_name"].setText(user.last_name)
+            self._user_fields["job_title"].setText(user.job_title or "—")
+            self._user_fields["department"].setText(user.department or "—")
+            self._user_fields["activated"].setText("Yes" if user.activated else "No")
             self._user_fields["suspended"].setText("Yes" if user.suspended else "No")
+            self._user_fields["mfa_configured"].setText("Yes" if user.mfa_configured else "No")
+            self._user_fields["created"].setText(user.created or "—")
         else:
             self._selected_device = None
             self._stack.setCurrentIndex(0)
@@ -205,10 +240,14 @@ class IdentityManagementView(QWidget):
             # The selection may have moved on before this resolved.
             if self._selected_device is None or self._selected_device.id != device.id:
                 return
-            self._device_fields["os_version"].setText(device.os_version)
-            self._device_fields["serial_number"].setText(device.serial_number)
-            self._device_fields["agent_version"].setText(device.agent_version)
-            self._device_fields["last_contact"].setText(device.last_contact)
+            self._device_fields["os_version"].setText(device.os_version or "—")
+            self._device_fields["arch"].setText(device.arch or "—")
+            self._device_fields["serial_number"].setText(device.serial_number or "—")
+            self._device_fields["agent_version"].setText(device.agent_version or "—")
+            self._device_fields["remote_ip"].setText(device.remote_ip or "—")
+            self._device_fields["last_contact"].setText(device.last_contact or "—")
+            self._device_fields["created"].setText(device.created or "—")
+            self._device_fields["description"].setText(device.description or "—")
         except RuntimeError:
             pass  # widget torn down mid-flight
 

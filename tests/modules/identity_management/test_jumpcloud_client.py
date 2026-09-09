@@ -112,6 +112,10 @@ def test_get_device_maps_detail_fields(monkeypatch):
                 "agentVersion": "1.2.3",
                 "lastContact": "2026-09-05T00:00:00Z",
                 "active": True,
+                "created": "2025-01-01T00:00:00Z",
+                "remoteIP": "203.0.113.5",
+                "arch": "x86_64",
+                "description": "Finance laptop",
             }
         )
 
@@ -124,6 +128,10 @@ def test_get_device_maps_detail_fields(monkeypatch):
     assert device.serial_number == "ABC123"
     assert device.agent_version == "1.2.3"
     assert device.last_contact == "2026-09-05T00:00:00Z"
+    assert device.created == "2025-01-01T00:00:00Z"
+    assert device.remote_ip == "203.0.113.5"
+    assert device.arch == "x86_64"
+    assert device.description == "Finance laptop"
 
 
 def test_get_device_raises_on_http_error(monkeypatch):
@@ -185,6 +193,54 @@ def test_list_users_maps_name_and_suspended_fields(monkeypatch):
     assert user.first_name == "Alice"
     assert user.last_name == "Anderson"
     assert user.suspended is True
+
+
+def test_list_users_maps_general_info_fields(monkeypatch):
+    monkeypatch.setattr(
+        jumpcloud_client.requests,
+        "get",
+        lambda url, headers, params, timeout: _FakeResponse(
+            json_data={
+                "results": [
+                    {
+                        "id": "u1",
+                        "username": "alice",
+                        "email": "alice@example.com",
+                        "activated": False,
+                        "created": "2024-06-01T00:00:00Z",
+                        "department": "R&D",
+                        "jobTitle": "Engineer",
+                        "mfa": {"configured": True},
+                    }
+                ]
+            }
+        ),
+    )
+
+    (user,) = jumpcloud_client.list_users("jca_testkey")
+
+    assert user.activated is False
+    assert user.created == "2024-06-01T00:00:00Z"
+    assert user.department == "R&D"
+    assert user.job_title == "Engineer"
+    assert user.mfa_configured is True
+
+
+def test_list_users_defaults_mfa_configured_false_when_field_missing(monkeypatch):
+    # The "mfa" object's exact shape is the least-confirmed field here
+    # (see jumpcloud_client.py's _user_from_json) -- a missing/differently
+    # shaped field should degrade quietly, not raise.
+    monkeypatch.setattr(
+        jumpcloud_client.requests,
+        "get",
+        lambda url, headers, params, timeout: _FakeResponse(
+            json_data={"results": [{"id": "u1", "username": "alice", "email": "a@example.com"}]}
+        ),
+    )
+
+    (user,) = jumpcloud_client.list_users("jca_testkey")
+
+    assert user.mfa_configured is False
 
 
 def test_connection_uses_a_minimal_single_item_page(monkeypatch):

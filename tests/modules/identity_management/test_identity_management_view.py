@@ -231,6 +231,67 @@ def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeyp
     assert view._device_fields["agent_version"].text() == "1.2.3"
 
 
+def test_selecting_a_device_shows_general_info_fields(qtbot, monkeypatch):
+    device = Device(
+        id="d1", display_name="alpha", os="windows", hostname="alpha-host", active=False
+    )
+    detail = Device(
+        id="d1",
+        display_name="alpha",
+        os="windows",
+        hostname="alpha-host",
+        active=False,
+        created="2025-01-01T00:00:00Z",
+        remote_ip="203.0.113.5",
+        arch="x86_64",
+        description="Finance laptop",
+    )
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(
+        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: detail,
+    )
+
+    view._tree.setCurrentItem(view._devices_category.child(0))
+
+    assert view._device_fields["status"].text() == "Inactive"
+    qtbot.waitUntil(
+        lambda: view._device_fields["description"].text() == "Finance laptop", timeout=2000
+    )
+    assert view._device_fields["created"].text() == "2025-01-01T00:00:00Z"
+    assert view._device_fields["remote_ip"].text() == "203.0.113.5"
+    assert view._device_fields["arch"].text() == "x86_64"
+
+
+def test_selecting_a_user_shows_general_info_fields(qtbot, monkeypatch):
+    user = User(
+        id="u1",
+        username="alice",
+        email="alice@example.com",
+        job_title="Engineer",
+        department="R&D",
+        activated=False,
+        mfa_configured=True,
+        created="2024-06-01T00:00:00Z",
+    )
+    view = _make_view(qtbot, monkeypatch, users=[user])
+    qtbot.waitUntil(
+        lambda: view._users_category.child(0).data(0, USER_ROLE) is not None, timeout=2000
+    )
+
+    view._tree.setCurrentItem(view._users_category.child(0))
+
+    assert view._user_fields["email"].text() == "alice@example.com"
+    assert view._user_fields["job_title"].text() == "Engineer"
+    assert view._user_fields["department"].text() == "R&D"
+    assert view._user_fields["activated"].text() == "No"
+    assert view._user_fields["mfa_configured"].text() == "Yes"
+    assert view._user_fields["created"].text() == "2024-06-01T00:00:00Z"
+
+
 def test_clearing_selection_shows_the_placeholder_page(qtbot, monkeypatch):
     device = Device(id="d1", display_name="alpha", os="windows")
     view = _make_view(qtbot, monkeypatch, devices=[device])

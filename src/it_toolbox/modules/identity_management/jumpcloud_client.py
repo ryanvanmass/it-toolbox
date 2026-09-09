@@ -60,6 +60,10 @@ def _device_from_detail_json(data: dict) -> Device:
         agent_version=data.get("agentVersion", ""),
         last_contact=data.get("lastContact", ""),
         active=data.get("active", True),
+        created=data.get("created", ""),
+        remote_ip=data.get("remoteIP", ""),
+        arch=data.get("arch", ""),
+        description=data.get("description", ""),
     )
 
 
@@ -71,6 +75,15 @@ def _user_from_json(data: dict) -> User:
         first_name=data.get("firstname", ""),
         last_name=data.get("lastname", ""),
         suspended=data.get("suspended", False),
+        activated=data.get("activated", True),
+        created=data.get("created", ""),
+        department=data.get("department", ""),
+        job_title=data.get("jobTitle", ""),
+        # JumpCloud's own doc examples nest MFA status under an "mfa"
+        # object (`mfa.configured`) -- defensive .get() chain since this
+        # is the least-confirmed field here, and a wrong/missing shape
+        # should degrade to "not configured" rather than raise.
+        mfa_configured=bool((data.get("mfa") or {}).get("configured", False)),
     )
 
 
