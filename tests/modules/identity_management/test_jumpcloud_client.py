@@ -213,7 +213,3 @@ def test_connection_raises_on_http_error(monkeypatch):
         raise AssertionError("expected JumpCloudApiError")
     except jumpcloud_client.JumpCloudApiError:
         pass
-
-
-def test_remote_assist_url_does_not_call_the_api():
-    assert jumpcloud_client.remote_assist_url("d1") == "https://console.jumpcloud.com/devices/d1"

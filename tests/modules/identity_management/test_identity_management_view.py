@@ -1,5 +1,3 @@
-from PySide6.QtCore import QUrl
-
 import it_toolbox.modules.identity_management.ui.main_view as main_view_module
 from it_toolbox.modules.identity_management.models import Device, User
 from it_toolbox.modules.identity_management.ui.main_view import (
@@ -270,41 +268,6 @@ def test_selecting_a_user_renders_synchronously_from_tree_item_data(qtbot, monke
     assert view._user_fields["first_name"].text() == "Alice"
     assert view._user_fields["last_name"].text() == "Anderson"
     assert view._user_fields["suspended"].text() == "Yes"
-
-
-def test_launch_remote_assist_opens_the_device_console_url(qtbot, monkeypatch):
-    device = Device(id="d1", display_name="alpha", os="windows")
-    view = _make_view(qtbot, monkeypatch, devices=[device])
-    # A single real device collides in count with the "Loading…"
-    # placeholder refresh() adds synchronously up front (both are exactly
-    # 1 child) — wait for the actual data role instead of just a count.
-    qtbot.waitUntil(
-        lambda: view._devices_category.child(0).data(0, DEVICE_ROLE) is not None, timeout=2000
-    )
-    view._tree.setCurrentItem(view._devices_category.child(0))
-
-    opened = []
-    monkeypatch.setattr(
-        "it_toolbox.modules.identity_management.ui.main_view.QDesktopServices.openUrl",
-        lambda url: opened.append(url),
-    )
-
-    view._on_launch_remote_assist_clicked()
-
-    assert opened == [QUrl("https://console.jumpcloud.com/devices/d1")]
-
-
-def test_launch_remote_assist_does_nothing_without_a_selection(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch)
-    opened = []
-    monkeypatch.setattr(
-        "it_toolbox.modules.identity_management.ui.main_view.QDesktopServices.openUrl",
-        lambda url: opened.append(url),
-    )
-
-    view._on_launch_remote_assist_clicked()
-
-    assert opened == []
 
 
 def test_refresh_shows_placeholder_when_no_api_key_configured(qtbot, monkeypatch):

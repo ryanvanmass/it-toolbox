@@ -117,14 +117,3 @@ def test_connection(api_key: str) -> None:
     failure, returns nothing on success.
     """
     _get(f"{API_BASE_V1}/systems", api_key, params={"limit": 1, "skip": 0})
-
-
-def remote_assist_url(device_id: str) -> str:
-    """Deep link to this device's JumpCloud Admin Portal page, where the
-    user clicks "Launch Remote Assist" themselves — there is no documented
-    public API to start a Remote Assist session programmatically (it's a
-    WebRTC session negotiated through JumpCloud's own console, with no
-    published SDK/API for third parties). Exact URL shape unverified
-    against a live org.
-    """
-    return f"https://console.jumpcloud.com/devices/{device_id}"

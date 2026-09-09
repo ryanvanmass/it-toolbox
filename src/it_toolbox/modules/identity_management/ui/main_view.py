@@ -1,5 +1,4 @@
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFormLayout,
     QInputDialog,
@@ -7,7 +6,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
-    QPushButton,
     QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -148,14 +146,6 @@ class IdentityManagementView(QWidget):
         form.addRow("Agent Version:", self._device_fields["agent_version"])
         form.addRow("Last Contact:", self._device_fields["last_contact"])
 
-        # No public API exists to start a JumpCloud Remote Assist session
-        # (WebRTC, negotiated entirely through their own console) — this
-        # deep-links to the device's Admin Portal page instead, same as
-        # clicking through from the console yourself.
-        self._remote_assist_button = QPushButton("Launch Remote Assist")
-        self._remote_assist_button.clicked.connect(self._on_launch_remote_assist_clicked)
-        form.addRow(self._remote_assist_button)
-
         return panel
 
     def _build_user_detail_panel(self) -> QWidget:
@@ -227,12 +217,6 @@ class IdentityManagementView(QWidget):
             QMessageBox.warning(self, "Failed to load device details", str(error))
         except RuntimeError:
             pass  # widget torn down mid-flight
-
-    def _on_launch_remote_assist_clicked(self) -> None:
-        if self._selected_device is None:
-            return
-        url = jumpcloud_client.remote_assist_url(self._selected_device.id)
-        QDesktopServices.openUrl(QUrl(url))
 
     # -- Populating the tree ------------------------------------------------
 
