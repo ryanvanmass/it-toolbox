@@ -69,9 +69,13 @@ class IdentityManagementView(QWidget):
         self._devices_table.setHorizontalHeaderLabels(["Name", "OS", "Last Contact"])
         self._devices_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._devices_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._devices_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+        devices_header = self._devices_table.horizontalHeader()
+        devices_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        # OS/Last Contact stay just wide enough for their own longest
+        # value instead of a fixed default width — the timestamps in
+        # particular were getting truncated otherwise.
+        devices_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        devices_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._devices_table.currentItemChanged.connect(self._on_device_selection_changed)
         splitter.addWidget(self._devices_table)
 
@@ -196,9 +200,9 @@ class IdentityManagementView(QWidget):
         self._users_table.setHorizontalHeaderLabels(["Username", "Email"])
         self._users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._users_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._users_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+        users_header = self._users_table.horizontalHeader()
+        users_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        users_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._users_table.currentItemChanged.connect(self._on_user_selection_changed)
         splitter.addWidget(self._users_table)
 
