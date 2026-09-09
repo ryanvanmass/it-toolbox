@@ -70,10 +70,11 @@ class IdentityManagementView(QWidget):
         self._devices_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._devices_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         devices_header = self._devices_table.horizontalHeader()
-        devices_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        # OS/Last Contact stay just wide enough for their own longest
-        # value instead of a fixed default width — the timestamps in
-        # particular were getting truncated otherwise.
+        # Every column just wide enough for its own longest current value
+        # — Stretch on Name blew it up to fill the whole pane even for
+        # short device names, which looked far worse than an unused strip
+        # of plain background to the right of the table.
+        devices_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         devices_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         devices_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._devices_table.currentItemChanged.connect(self._on_device_selection_changed)
@@ -201,7 +202,7 @@ class IdentityManagementView(QWidget):
         self._users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._users_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         users_header = self._users_table.horizontalHeader()
-        users_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        users_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         users_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._users_table.currentItemChanged.connect(self._on_user_selection_changed)
         splitter.addWidget(self._users_table)
