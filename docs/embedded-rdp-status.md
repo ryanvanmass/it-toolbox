@@ -285,11 +285,12 @@ embedded RDP sessions (`core/settings.py`'s
 Settings page's new "RDP Display" section). Picking one of the presets
 (1280×720 through 3840×2160) requests that resolution once at connect
 and never again — `RdpWidget.resizeEvent` skips the resize-debounce
-entirely when a fixed size is configured, since `paintEvent` already
-stretches the image to fill the widget regardless of its native
-resolution. This sidesteps the round trip for the common case rather
-than fixing it. "Match window size" (`None`) keeps today's default
-behavior.
+entirely when a fixed size is configured, since `paintEvent` scales the
+image to fit the widget regardless of its native resolution (see
+"Letterboxing" below for how that scaling preserves aspect ratio rather
+than stretching). This sidesteps the round trip for the common case
+rather than fixing it. "Match window size" (`None`) keeps today's
+default behavior.
 
 The fixed size is applied via
 `FreeRdpSession.connect(..., desktop_size=(w, h))` →
@@ -408,6 +409,27 @@ that goes through FreeRDP's higher-level parsers (`.rdp`-file buffer,
 command line) risks additional settings changing as a side effect
 beyond what a diff of the *documented*/`.rdp`-representable fields can
 catch, even when those side effects look inert on the surface.
+
+## Letterboxing instead of stretching (2026-09-09)
+
+`RdpWidget.paintEvent` used to always `drawImage(self.rect(), ...)` —
+stretching the received image to exactly fill the widget, distorting it
+whenever the widget's aspect ratio didn't match the image's. That's
+harmless in "Match window size" mode (the two are always kept equal by
+`resizeEvent`), but with a *fixed* resolution selected, the widget can
+be any shape — a 1920×1080 (16:9) session in a narrower or squarer app
+window would render visibly squashed.
+
+`_scaled_image_rect()` now computes the largest rect, centered in the
+widget, that fits `self._image` at its own aspect ratio (`QSize.scaled(
+..., Qt.AspectRatioMode.KeepAspectRatio)`), and `paintEvent` fills the
+leftover space with solid black bars rather than stretching into it.
+`_remote_pos()` (widget-space → remote-desktop-space, used by every
+mouse event handler) had to change alongside it — it was written
+assuming the image always covers the *entire* widget rect, which is no
+longer true. It now maps through the same letterboxed rect, and clamps
+clicks that land in the bars themselves to the nearest image edge
+instead of producing a negative or out-of-range remote coordinate.
 
 ## What's still open
 

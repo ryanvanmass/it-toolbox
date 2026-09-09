@@ -5,12 +5,16 @@ test machine (no modern MsRdpClient ProgID registered, unfixable from
 app code).
 
 Renders the desktop and forwards mouse/keyboard input back to the
-server. Displayed image is stretched to fill the widget (see
-paintEvent), so pointer coordinates are rescaled from widget-space to
-the remote desktop's native resolution before being sent.
+server. The displayed image is scaled to fit the widget *without*
+distorting its aspect ratio (see paintEvent/_scaled_image_rect) —
+letterboxed with bars rather than stretched, so a resolution requested
+in Settings renders at its correct proportions even when the window
+doesn't match its aspect ratio. Pointer coordinates are rescaled (and
+clamped, for clicks that land in the letterbox bars) from widget-space
+to the remote desktop's native resolution before being sent.
 """
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -106,11 +110,24 @@ class RdpWidget(QWidget):
             self._status_label.show()
         self._emit_finished_once()
 
+    def _scaled_image_rect(self) -> QRect:
+        """The largest rect, centered in the widget, that fits self._image
+        at its native aspect ratio — the rest is filled with bars rather
+        than stretching the image to cover it (see paintEvent).
+        """
+        scaled = self._image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        return QRect(QPoint(x, y), scaled)
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override signature
         if self._image is None:
             return
         painter = QPainter(self)
-        painter.drawImage(self.rect(), self._image, self._image.rect())
+        target = self._scaled_image_rect()
+        if target != self.rect():
+            painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        painter.drawImage(target, self._image, self._image.rect())
 
     def sizeHint(self):
         if self._image is not None:
@@ -154,9 +171,19 @@ class RdpWidget(QWidget):
     def _remote_pos(self, widget_pos) -> tuple[int, int]:
         if self._image is None or self.width() == 0 or self.height() == 0:
             return int(widget_pos.x()), int(widget_pos.y())
-        scale_x = self._image.width() / self.width()
-        scale_y = self._image.height() / self.height()
-        return int(widget_pos.x() * scale_x), int(widget_pos.y() * scale_y)
+        target = self._scaled_image_rect()
+        if target.width() == 0 or target.height() == 0:
+            return 0, 0
+        scale_x = self._image.width() / target.width()
+        scale_y = self._image.height() / target.height()
+        x = (widget_pos.x() - target.x()) * scale_x
+        y = (widget_pos.y() - target.y()) * scale_y
+        # Clicks landing in the letterbox bars clamp to the nearest edge
+        # of the image rather than mapping to a negative/out-of-range
+        # remote coordinate.
+        x = max(0, min(x, self._image.width() - 1))
+        y = max(0, min(y, self._image.height() - 1))
+        return int(x), int(y)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         x, y = self._remote_pos(event.position())
