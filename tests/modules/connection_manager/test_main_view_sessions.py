@@ -27,11 +27,24 @@ class _FakeTunnel:
 
 
 def _make_view(
-    qtbot, monkeypatch, qemu_hosts=(), manual_connections=(), instances=(), buckets=()
+    qtbot,
+    monkeypatch,
+    qemu_hosts=(),
+    manual_connections=(),
+    instances=(),
+    buckets=(),
+    qemu_available=True,
 ):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
+    )
+    # The QEMU root only appears when virsh is installed — default True
+    # here so existing tests (written before this gating existed) don't
+    # depend on whether this sandbox happens to have virsh on PATH.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.qemu_client.is_available",
+        lambda: qemu_available,
     )
     # QEMU hosts and manual connections are loaded unconditionally
     # (independent of GCP sign-in) — stub both out so tests don't depend
@@ -788,6 +801,36 @@ def test_populate_qemu_hosts_creates_lazy_loading_host_items(qtbot, monkeypatch)
     assert host_item.data(0, HOST_ROLE) == host
     assert host_item.data(0, CHILDREN_LOADED_ROLE) is False
     assert host_item.child(0).text(0) == "Loading…"
+
+
+def test_qemu_root_is_hidden_when_virsh_unavailable(qtbot, monkeypatch):
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        qemu_hosts=[{"name": host.name, "uri": host.uri}],
+        qemu_available=False,
+    )
+
+    # gcloud unavailable too, so Manual is the only root left.
+    assert view._tree.topLevelItemCount() == 1
+    assert view._tree.topLevelItem(0).text(0) == "Manual"
+    assert view._qemu_root_item is None
+
+
+def test_qemu_root_disappears_if_virsh_becomes_unavailable_on_repopulate(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, qemu_available=True)
+    assert view._qemu_root_item is not None
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.qemu_client.is_available",
+        lambda: False,
+    )
+    view._populate_qemu_hosts()
+
+    assert view._qemu_root_item is None
+    for i in range(view._tree.topLevelItemCount()):
+        assert view._tree.topLevelItem(i).text(0) != "QEMU"
 
 
 def test_populate_qemu_vms_creates_items_with_roles(qtbot, monkeypatch):
