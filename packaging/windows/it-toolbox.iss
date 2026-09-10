@@ -5,6 +5,15 @@
 #define MyAppExeName "it-toolbox.exe"
 
 [Setup]
+; Relative paths below (Source:, SetupIconFile, OutputDir) are otherwise
+; resolved relative to this .iss file's own directory (packaging\windows),
+; not wherever iscc was invoked from -- SourceDir repoints that at the
+; repo root, matching where build.ps1 actually puts build\pyembed and
+; where the GitHub Actions artifact glob (dist/packages/*.exe) expects
+; the output to land. Confirmed necessary the hard way: a real
+; windows-latest run failed on the [Files] Source line with "The system
+; cannot find the path specified" before this was added.
+SourceDir=..\..
 ; Fixed GUID -- must never change across releases. Inno Setup uses this
 ; to detect and replace a prior install on upgrade rather than treating
 ; every version as a separate, side-by-side app.
