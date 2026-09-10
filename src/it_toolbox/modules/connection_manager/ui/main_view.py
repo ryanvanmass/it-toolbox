@@ -133,6 +133,16 @@ class ConnectionManagerView(QWidget):
         # modules (see ConnectionManagerModule / MainWindow).
         self._owned_tab_widgets: set[QWidget] = set()
         self._next_session_id = 1
+        # Remembers the account an "Upload Public Key…" grant was made
+        # for, per instance — see _on_ssh_key_uploaded. An instance often
+        # has no access at all under the global default username, so a
+        # subsequent SSH connection should use the account we just
+        # actually granted access to instead of silently trying (and
+        # failing under) the unrelated default. Session-only: re-derived
+        # from a fresh upload each run rather than persisted, since it's
+        # just a connect-time convenience, not a record of what's really
+        # on the instance (which GCP itself already tracks).
+        self._instance_ssh_username_overrides: dict[tuple[str, str, str], str] = {}
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
@@ -821,7 +831,13 @@ class ConnectionManagerView(QWidget):
             )
             return
 
-        username = settings.load_default_username()
+        username = None
+        if kind == "ssh":
+            username = self._instance_ssh_username_overrides.get(
+                (instance.project_id, instance.zone, instance.name)
+            )
+        if username is None:
+            username = settings.load_default_username()
         if username is None:
             username, ok = QInputDialog.getText(
                 self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
@@ -963,12 +979,16 @@ class ConnectionManagerView(QWidget):
             return
         username = username.strip()
 
+        # Pre-filled from the Settings-configured default (or the same
+        # ~/.ssh/id_ed25519 / id_rsa discovery JumpCloud's own SSH key
+        # setting falls back to) so the common case needs no manual
+        # pasting — still editable/clearable for a one-off different key.
         public_key, ok = QInputDialog.getText(
             self,
             "Upload Public Key",
-            f"Public key to authorize for {username}@{instance.name} (the contents of, "
-            "e.g., id_ed25519.pub):",
+            f"Public key to authorize for {username}@{instance.name}:",
             QLineEdit.EchoMode.Normal,
+            settings.resolve_gcp_ssh_public_key() or "",
         )
         if not ok or not public_key.strip():
             return
@@ -988,6 +1008,15 @@ class ConnectionManagerView(QWidget):
         )
 
     def _on_ssh_key_uploaded(self, instance: Instance, username: str) -> None:
+        # If this granted access under a different account than the global
+        # default, a subsequent "Connect via SSH" should use *this*
+        # account -- the default may well have no access on this instance
+        # at all, which is the whole reason a different username was
+        # entered above. See _start_session_from_instance's lookup.
+        if username != settings.load_default_username():
+            self._instance_ssh_username_overrides[
+                (instance.project_id, instance.zone, instance.name)
+            ] = username
         QMessageBox.information(
             self,
             "Public Key Uploaded",

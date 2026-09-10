@@ -27,6 +27,8 @@ def _make_view(
     default_rdp_resolution=None,
     default_double_click_action="ask",
     jumpcloud_key_configured=False,
+    gcp_ssh_key_override=None,
+    gcp_ssh_public_key=None,
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
     # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
@@ -46,6 +48,11 @@ def _make_view(
     monkeypatch.setattr(
         settings, "jumpcloud_api_key_path", lambda: _FakePath(jumpcloud_key_configured)
     )
+    # Same hermeticity reasoning as above — real load_gcp_ssh_key_path()/
+    # resolve_gcp_ssh_public_key() would otherwise read this machine's
+    # actual ~/.ssh contents.
+    monkeypatch.setattr(settings, "load_gcp_ssh_key_path", lambda: gcp_ssh_key_override)
+    monkeypatch.setattr(settings, "resolve_gcp_ssh_public_key", lambda: gcp_ssh_public_key)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
     monkeypatch.setattr(qemu_client, "is_available", lambda: qemu_available)
     monkeypatch.setattr(settings_main_view.platform, "system", lambda: platform_system)
@@ -245,6 +252,76 @@ def test_gcloud_sign_out_updates_status(qtbot, monkeypatch):
     view._on_gcloud_sign_out_clicked()
 
     qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+
+def test_gcp_ssh_key_section_shows_resolved_public_key(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, gcp_ssh_public_key="ssh-ed25519 AAAA alice@laptop")
+
+    assert "ssh-ed25519 AAAA alice@laptop" in view._gcp_ssh_key_status_label.text()
+    assert "default (~/.ssh)" in view._gcp_ssh_key_status_label.text()
+    assert view._gcp_ssh_key_button.text() == "Set Key…"
+    assert view._gcp_ssh_key_clear_button.isHidden()
+
+
+def test_gcp_ssh_key_section_shows_configured_override(qtbot, monkeypatch):
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        gcp_ssh_key_override="/home/alice/.ssh/custom_key",
+        gcp_ssh_public_key="ssh-ed25519 BBBB alice@laptop",
+    )
+
+    assert "/home/alice/.ssh/custom_key" in view._gcp_ssh_key_status_label.text()
+    assert view._gcp_ssh_key_button.text() == "Change Key…"
+    assert not view._gcp_ssh_key_clear_button.isHidden()
+
+
+def test_gcp_ssh_key_section_shows_not_found_message(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, gcp_ssh_public_key=None)
+
+    assert "No SSH public key found" in view._gcp_ssh_key_status_label.text()
+
+
+def test_set_gcp_ssh_key_saves_and_refreshes(qtbot, monkeypatch):
+    import it_toolbox.modules.settings.ui.main_view as settings_main_view
+
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        settings_main_view.QFileDialog,
+        "getOpenFileName",
+        lambda *a, **k: ("/home/alice/.ssh/custom_key.pub", ""),
+    )
+    saved = []
+    monkeypatch.setattr(settings, "save_gcp_ssh_key_path", lambda path: saved.append(path))
+
+    view._on_set_gcp_ssh_key_clicked()
+
+    assert saved == ["/home/alice/.ssh/custom_key.pub"]
+
+
+def test_set_gcp_ssh_key_cancelled_does_not_save(qtbot, monkeypatch):
+    import it_toolbox.modules.settings.ui.main_view as settings_main_view
+
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        settings_main_view.QFileDialog, "getOpenFileName", lambda *a, **k: ("", "")
+    )
+    saved = []
+    monkeypatch.setattr(settings, "save_gcp_ssh_key_path", lambda path: saved.append(path))
+
+    view._on_set_gcp_ssh_key_clicked()
+
+    assert saved == []
+
+
+def test_clear_gcp_ssh_key_resets_override(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, gcp_ssh_key_override="/home/alice/.ssh/custom_key")
+    saved = []
+    monkeypatch.setattr(settings, "save_gcp_ssh_key_path", lambda path: saved.append(path))
+
+    view._on_clear_gcp_ssh_key_clicked()
+
+    assert saved == [None]
 
 
 def test_jumpcloud_section_shows_unconfigured_state(qtbot, monkeypatch):

@@ -11,6 +11,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -78,6 +79,7 @@ class SettingsView(QWidget):
         self._content_layout.addWidget(self._build_updates_section())
         self._content_layout.addWidget(self._build_rclone_section())
         self._content_layout.addWidget(self._build_gcloud_section())
+        self._content_layout.addWidget(self._build_gcp_ssh_key_section())
         self._content_layout.addWidget(self._build_jumpcloud_section())
         self._content_layout.addWidget(self._build_qemu_section())
         self._content_layout.addWidget(self._build_rdp_display_section())
@@ -288,6 +290,62 @@ class SettingsView(QWidget):
         self._gcloud_sign_in_button.setEnabled(True)
         self._gcloud_sign_out_button.setEnabled(True)
         self._gcloud_status_label.setText(f"gcloud error: {error}")
+
+    # -- GCP SSH key ------------------------------------------------------------
+
+    def _build_gcp_ssh_key_section(self) -> QGroupBox:
+        box = QGroupBox("GCP SSH Key")
+        layout = QVBoxLayout(box)
+
+        self._gcp_ssh_key_status_label = QLabel()
+        self._gcp_ssh_key_status_label.setWordWrap(True)
+        layout.addWidget(self._gcp_ssh_key_status_label)
+
+        self._gcp_ssh_key_button = QPushButton()
+        self._gcp_ssh_key_button.clicked.connect(self._on_set_gcp_ssh_key_clicked)
+
+        self._gcp_ssh_key_clear_button = QPushButton("Use Default (~/.ssh)")
+        self._gcp_ssh_key_clear_button.clicked.connect(self._on_clear_gcp_ssh_key_clicked)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self._gcp_ssh_key_button)
+        button_row.addWidget(self._gcp_ssh_key_clear_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._refresh_gcp_ssh_key_status()
+        return box
+
+    def _refresh_gcp_ssh_key_status(self) -> None:
+        override = settings.load_gcp_ssh_key_path()
+        public_key = settings.resolve_gcp_ssh_public_key()
+        if public_key is not None:
+            source = f"configured key ({override})" if override else "default (~/.ssh)"
+            preview = public_key if len(public_key) <= 60 else f"{public_key[:60]}…"
+            self._gcp_ssh_key_status_label.setText(
+                f"Prefilled in Connection Manager's \"Upload Public Key…\" action, from "
+                f"the {source}:\n{preview}"
+            )
+        else:
+            self._gcp_ssh_key_status_label.setText(
+                "No SSH public key found — set one below, or place one at "
+                "~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub."
+            )
+        self._gcp_ssh_key_button.setText("Change Key…" if override else "Set Key…")
+        self._gcp_ssh_key_clear_button.setVisible(override is not None)
+
+    def _on_set_gcp_ssh_key_clicked(self) -> None:
+        current = settings.load_gcp_ssh_key_path()
+        start_dir = str(current) if current else str(Path.home() / ".ssh")
+        path, _ = QFileDialog.getOpenFileName(self, "Locate your SSH public key", start_dir)
+        if not path:
+            return
+        settings.save_gcp_ssh_key_path(path)
+        self._refresh_gcp_ssh_key_status()
+
+    def _on_clear_gcp_ssh_key_clicked(self) -> None:
+        settings.save_gcp_ssh_key_path(None)
+        self._refresh_gcp_ssh_key_status()
 
     # -- JumpCloud ------------------------------------------------------------
 

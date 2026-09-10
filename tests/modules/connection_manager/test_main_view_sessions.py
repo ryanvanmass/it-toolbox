@@ -632,6 +632,36 @@ def test_upload_ssh_key_prompt_is_prefilled_with_default_username(qtbot, monkeyp
     assert prefill_seen == ["alice"]
 
 
+def test_upload_ssh_key_public_key_prompt_is_prefilled_from_settings(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: None)
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "resolve_gcp_ssh_public_key",
+        lambda: "ssh-ed25519 AAAA alice@laptop",
+    )
+    prefills = []
+
+    def fake_get_text(parent, title, label, mode, text=""):
+        prefills.append(text)
+        return ("alice", True) if len(prefills) == 1 else ("", False)
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", fake_get_text)
+
+    view._on_upload_ssh_key_clicked(instance)
+
+    assert prefills == ["", "ssh-ed25519 AAAA alice@laptop"]
+
+
 def test_upload_ssh_key_cancel_at_username_does_not_call_the_api(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
@@ -722,6 +752,76 @@ def test_upload_ssh_key_calls_the_api_and_shows_confirmation(qtbot, monkeypatch)
     title, text = shown[0]
     assert "alice" in text
     assert "vm-1" in text
+
+
+def test_upload_ssh_key_override_is_used_for_a_subsequent_ssh_connection(qtbot, monkeypatch):
+    # Uploading a key for an account other than the global default means
+    # the default likely has no access on this instance at all -- a
+    # following "Connect via SSH" should use the account we just granted
+    # access to, not silently try (and fail under) the unrelated default.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    connect_calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: connect_calls.append(kwargs))
+
+    view._start_session_from_instance(instance, "ssh")
+
+    assert connect_calls[0]["username"] == "alice"
+
+
+def test_upload_ssh_key_override_does_not_affect_rdp_connections(qtbot, monkeypatch):
+    # The override is SSH-specific (Upload Public Key only ever grants SSH
+    # access) -- an RDP connection to the same instance must still use the
+    # global default/prompt, not the unrelated Linux account.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="windows"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    view._on_ssh_key_uploaded(instance, "alice")  # simulate a prior override having been recorded
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", lambda *a, **k: ("ignored", True))
+
+    connect_calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: connect_calls.append(kwargs))
+
+    view._start_session_from_instance(instance, "rdp")
+
+    assert connect_calls[0]["username"] == "root"
+
+
+def test_upload_ssh_key_matching_the_default_username_creates_no_override(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "alice")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    assert view._instance_ssh_username_overrides == {}
 
 
 def test_double_clicking_a_gcp_instance_starts_a_session_with_resolved_kind(qtbot, monkeypatch):
