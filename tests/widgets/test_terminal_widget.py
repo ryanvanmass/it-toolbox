@@ -3,7 +3,7 @@ import sys
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent, QKeySequence
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLineEdit, QVBoxLayout, QWidget
 
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
@@ -102,6 +102,30 @@ def test_paste_shortcut_writes_clipboard_text_to_the_shell(qtbot):
     term.close_session()
 
 
+def test_ctrl_shift_v_pastes_instead_of_sending_a_control_byte(qtbot):
+    # Regression test: Ctrl+Shift+V never matches
+    # QKeySequence.StandardKey.Paste, so without an explicit check it fell
+    # through to the Ctrl+letter branch and sent a literal ^V control byte
+    # to the shell instead of pasting -- many real terminal emulators
+    # (GNOME Terminal, Konsole, ...) bind paste there specifically because
+    # plain Ctrl+V is already meaningful to a shell/readline.
+    QApplication.clipboard().setText("echo pasted_via_ctrl_shift_v\n")
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+    qtbot.waitUntil(lambda: bool(term.toPlainText().strip()), timeout=3000)
+
+    term.keyPressEvent(
+        QKeyEvent(
+            QKeyEvent.Type.KeyPress,
+            Qt.Key.Key_V,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+    )
+
+    qtbot.waitUntil(lambda: "pasted_via_ctrl_shift_v" in term.toPlainText(), timeout=3000)
+    term.close_session()
+
+
 def test_paste_with_empty_clipboard_writes_nothing(qtbot, monkeypatch):
     QApplication.clipboard().setText("")
     term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
@@ -125,3 +149,58 @@ def test_close_session_terminates_child_process(qtbot):
     assert term._pty.is_alive()
     term.close_session()
     qtbot.waitUntil(lambda: not term._pty.is_alive(), timeout=3000)
+
+
+# -- Tab: forwarded to the pty, not stolen by Qt's own focus-traversal ------
+#
+# QWidget's default Tab-key focus-traversal only has somewhere to go (and so
+# only actually misbehaves) when there's another focusable widget in the
+# same window to steal focus to -- an isolated TerminalWidget with no
+# siblings wouldn't reproduce the bug this guards against (real usage always
+# has sibling tabs/sidebar widgets in the same window). See RdpWidget's
+# identical fixture/tests for the same reasoning.
+
+
+@pytest.fixture
+def terminal_with_sibling(qtbot):
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24, parent=container)
+    sibling = QLineEdit(container)
+    layout.addWidget(term)
+    layout.addWidget(sibling)
+    qtbot.addWidget(container)
+    container.show()
+    qtbot.waitExposed(container)
+    qtbot.waitUntil(lambda: bool(term.toPlainText().strip()), timeout=3000)
+    term.setFocus()
+    yield term
+    term.close_session()
+
+
+def test_tab_does_not_steal_focus(qtbot, terminal_with_sibling):
+    term = terminal_with_sibling
+    assert term.hasFocus()
+
+    qtbot.keyClick(term, Qt.Key.Key_Tab)
+
+    assert term.hasFocus()
+
+
+def test_tab_is_forwarded_to_the_pty(qtbot, monkeypatch, terminal_with_sibling):
+    term = terminal_with_sibling
+    writes = []
+    monkeypatch.setattr(term._pty, "write", lambda data: writes.append(data))
+
+    qtbot.keyClick(term, Qt.Key.Key_Tab)
+
+    assert writes == [b"\t"]
+
+
+def test_shift_tab_does_not_steal_focus(qtbot, terminal_with_sibling):
+    term = terminal_with_sibling
+    assert term.hasFocus()
+
+    qtbot.keyClick(term, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+
+    assert term.hasFocus()

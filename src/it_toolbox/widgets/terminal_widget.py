@@ -11,7 +11,7 @@ import sys
 import threading
 
 import pyte
-from PySide6.QtCore import QSocketNotifier, Qt, Signal
+from PySide6.QtCore import QEvent, QSocketNotifier, Qt, Signal
 from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
@@ -151,6 +151,19 @@ class TerminalWidget(QPlainTextEdit):
 
     # -- writing keystrokes ------------------------------------------------
 
+    def event(self, e) -> bool:  # noqa: N802 - Qt override signature
+        # Same fix as RdpWidget/SpiceWidget's own event() override --
+        # QWidget's default focus-traversal intercepts Key_Tab/Key_Backtab
+        # at this level, before keyPressEvent() ever runs, so shell
+        # tab-completion silently never reached the pty: Tab just moved
+        # Qt focus to whatever widget was next in line instead. Forward
+        # these directly and report the event as handled so that
+        # focus-traversal never runs.
+        if e.type() == QEvent.Type.KeyPress and e.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(e)
+            return True
+        return super().event(e)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
         modifiers = event.modifiers()
@@ -159,8 +172,18 @@ class TerminalWidget(QPlainTextEdit):
         # this resolves to Ctrl+V (Windows/Linux) it would otherwise be
         # swallowed as the literal ^V control byte, which is where "can't
         # paste into the terminal" came from — Ctrl+V never reached
-        # anything but that byte.
-        if event.matches(QKeySequence.StandardKey.Paste):
+        # anything but that byte. Ctrl+Shift+V is also accepted directly
+        # (real terminal emulators — GNOME Terminal, Konsole, etc. — bind
+        # paste there instead of/alongside Ctrl+V, precisely because Ctrl+V
+        # is already a real, differently-meaningful control byte to a
+        # shell): QKeySequence.StandardKey.Paste never matches it, so
+        # without this it fell through to the same Ctrl+letter branch and
+        # sent ^V instead of pasting, exactly the bug this whole check
+        # exists to avoid for plain Ctrl+V.
+        if event.matches(QKeySequence.StandardKey.Paste) or (
+            modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+            and key == Qt.Key.Key_V
+        ):
             self._paste_clipboard()
             return
 
