@@ -549,11 +549,99 @@ characters — turned out to be two independent bugs:
    live server — the actual fix for real Shift+punctuation typing still
    needs to be confirmed against one.
 
+## Keyboard layout is now a Settings override (2026-09-10)
+
+The hardcoded `KeyboardLayout = 0x0409` (English (US)) fix above was
+confirmed live against the original VM, but a second VM hit the exact
+same Shift+punctuation symptom despite it — the declared layout is only
+useful if the *server* actually has it installed, and a non-English-
+language Windows image may simply not have English (US) available.
+There's no way for the client to know what's installed on an arbitrary
+target server ahead of time, so this can't be auto-detected/fixed once
+and for all the way the original bug could.
+
+Made it a Settings option instead (`settings.load_rdp_keyboard_layout`,
+default unchanged at English (US)/`0x0409`), threaded through
+`RdpWidget` -> `RdpSessionWorker` -> `FreeRdpSession.connect` ->
+`_configure_settings`, the identical shape `desktop_size` already uses.
+A "RDP Keyboard Layout" section (10 common-layout presets) lets a user
+hitting this on a specific VM pick the layout that's actually installed
+there instead.
+
+## Shift+symbol in console apps: scancode+Shift vs Unicode input (2026-09-10)
+
+Live investigation of the "second VM" report above ruled out a layout
+mismatch entirely: the declared layout (English (US)) matched the VM's
+own Windows language settings exactly, and Windows' own Remote Desktop
+Connection (`mstsc`) typed Shift+symbol correctly against the very same
+VM. So it was a bug in this client specifically, not a server-config
+issue -- but every character/scancode/modifier looked individually
+correct, which didn't fit until one more fact came in: **it worked when
+typed into a GUI text field within the RDP session, but not into a
+PowerShell/console prompt in that same session.**
+
+That's the real signature. A GUI text control gets an already-resolved
+character via `WM_CHAR` -- generated upstream in Windows' input
+pipeline. A console app (PowerShell, cmd) instead resolves the raw
+Shift+scancode pair itself, via its own lower-level keyboard-state
+translation, reading each key as a separate synthetic event -- and is
+evidently less forgiving about it than the WM_CHAR path GUI controls
+already get for free.
+
+`scancodes.py`'s own module docstring already said one possible fix:
+"[Unicode input] sidesteps scancode/shift mapping entirely and works
+correctly across keyboard layouts" -- but no printable character ever
+actually used that path, because every one (letters, digits,
+punctuation) had its own `SCANCODES` entry, so `_forward_key_event`
+always took the scancode branch first. **Tried and reverted**:
+restructured it to prefer sending the already-resolved Unicode
+character for any printable key with no Ctrl/Alt held. Live-tested
+result: this broke typing in PowerShell/cmd *entirely*, not just
+Shift+symbol -- RDP's Unicode keyboard input synthesizes a Windows
+`VK_PACKET` key event, and raw console input (unlike GUI controls,
+which handle it fine via `WM_CHAR`) is a documented weak spot for
+`VK_PACKET`-based synthetic keystrokes; it isn't reliably recognized
+as a real keystroke at all there. So scancode has to stay the primary
+path for anything with a `SCANCODES` entry -- back to this file's
+original shape, Shift+symbol-in-console bug included and still
+unresolved. The real fix needs to stay within scancode-based input,
+not swap the transport.
+
+## Shift+symbol in console apps: the actual fix (2026-09-10)
+
+Root cause, finally pinned down from a real `IT_TOOLBOX_LOG_LEVEL=DEBUG`
+capture of the live session: Qt (at least on Windows) reports Shift+
+symbol keys -- Shift+`;` -> `:`, Shift+`1` -> `!`, and so on -- as their
+own distinct `Key_*` constants (`Key_Colon`, `Key_Exclam`, ...), *not*
+the unshifted key (`Key_Semicolon`, `Key_1`, ...) with a Shift modifier
+set. None of those distinct constants had a `SCANCODES` entry, so every
+one of them has *always* fallen through to `send_key_unicode()` -- fine
+in a GUI text field, but the exact `VK_PACKET`-based path confirmed
+broken in a Windows console in the entry above. This explains the whole
+shape of the bug: plain letters and unshifted symbols (real `SCANCODES`
+entries) always worked in both places; every Shift-row symbol (no
+entry) only ever worked where Unicode input happens to work -- GUI
+controls, not consoles.
+
+Fix: added `SCANCODES` entries for all the Shift-row symbol keys
+(`Key_Exclam` through `Key_Question` -- see `scancodes.py`), each
+mapped to the *same physical scancode* as its unshifted key. Shift's
+own press/release is already sent as a separate scancode event (visible
+in the capture, right before each of these), so this uses the exact
+scancode+Shift mechanism that was already proven working for everything
+else -- no unicode/`VK_PACKET` involved at all for these keys anymore.
+
 ## What's still open
 
-- Confirm the keyboard-layout fix above actually resolves Shift+punctuation
-  typing against a real server — verified only that the setting is
-  correctly applied, not the live typing behavior itself.
+- Confirm the fix above against the actual reporting VM's PowerShell
+  prompt -- strongly evidenced from a real live capture (the exact
+  `Key_Colon`/`Key_QuoteDbl`/etc. codes were seen going through the
+  unicode path), reasoned + unit-tested, but the live keystroke-level
+  confirmation still needs to come from the user.
+- The keyboard-layout Settings override (two sections up) turned out
+  not to be what actually needed fixing for this specific report, but
+  is still worth keeping for a case where a target VM's declared
+  layout genuinely doesn't match what's installed there.
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).

@@ -286,6 +286,23 @@ def test_default_rdp_resolution_ignores_a_malformed_file(monkeypatch, tmp_path):
     assert settings.load_default_rdp_resolution() is None
 
 
+def test_rdp_keyboard_layout_defaults_to_english_us_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_rdp_keyboard_layout() == 0x0409
+
+
+def test_save_and_load_rdp_keyboard_layout(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_rdp_keyboard_layout(0x040C)
+    assert settings.load_rdp_keyboard_layout() == 0x040C
+
+
+def test_rdp_keyboard_layout_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.rdp_keyboard_layout_path().write_text("not-a-layout")
+    assert settings.load_rdp_keyboard_layout() == 0x0409
+
+
 def test_instance_ssh_username_overrides_is_empty_when_never_set(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     assert settings.load_instance_ssh_username_overrides() == {}

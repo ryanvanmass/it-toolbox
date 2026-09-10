@@ -85,7 +85,7 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     captured = {}
 
     class _CapturingWorker(_FakeWorker):
-        def __init__(self, host, port, username, password, domain="", desktop_size=None):
+        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None):
             super().__init__()
             captured["desktop_size"] = desktop_size
 
@@ -95,6 +95,42 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     qtbot.addWidget(widget)
 
     assert captured["desktop_size"] == (1920, 1080)
+
+
+def test_keyboard_layout_is_passed_to_the_worker(qtbot, monkeypatch):
+    captured = {}
+
+    class _CapturingWorker(_FakeWorker):
+        def __init__(
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+        ):
+            super().__init__()
+            captured["keyboard_layout"] = keyboard_layout
+
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _CapturingWorker)
+
+    widget = RdpWidget("host", 3389, "user", "pass", keyboard_layout=0x040C)
+    qtbot.addWidget(widget)
+
+    assert captured["keyboard_layout"] == 0x040C
+
+
+def test_keyboard_layout_defaults_to_english_us(qtbot, monkeypatch):
+    captured = {}
+
+    class _CapturingWorker(_FakeWorker):
+        def __init__(
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+        ):
+            super().__init__()
+            captured["keyboard_layout"] = keyboard_layout
+
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _CapturingWorker)
+
+    widget = RdpWidget("host", 3389, "user", "pass")
+    qtbot.addWidget(widget)
+
+    assert captured["keyboard_layout"] == 0x0409
 
 
 def test_resizing_with_a_fixed_desktop_size_does_not_request_a_resize(qtbot, fixed_resolution_rdp_widget):
@@ -283,3 +319,91 @@ def test_regular_keys_still_forward_normally_alongside_tab_handling(rdp_widget):
     rdp_widget.keyPressEvent(event)
 
     assert (0x1E, False, True) in rdp_widget._worker.scancode_calls
+
+
+# -- Debug logging: every forwarded key logs what was actually computed -----
+#
+# Added to chase a live report of Shift+symbol (e.g. Shift+; -> ":") typing
+# the wrong character on one specific VM, but working fine there with mstsc,
+# and working fine with this same client against a different VM. A follow-up
+# fix routing printable keys through send_key_unicode instead was tried and
+# reverted -- it broke typing in PowerShell/cmd *entirely* (Windows console
+# input doesn't handle synthetic Unicode/VK_PACKET keyboard events the way
+# GUI controls do) -- so scancode is back to being the only path for
+# anything with a SCANCODES entry, Shift+symbol included, and this logging
+# is what's needed to keep chasing the real fix from an actual live repro.
+
+
+def test_scancode_key_forwarding_is_logged(rdp_widget, caplog):
+    from PySide6.QtGui import QKeyEvent
+
+    with caplog.at_level("DEBUG", logger="it_toolbox.widgets.rdp_widget"):
+        event = QKeyEvent(
+            QKeyEvent.Type.KeyPress, Qt.Key.Key_Semicolon, Qt.KeyboardModifier.ShiftModifier, ":"
+        )
+        rdp_widget.keyPressEvent(event)
+
+    messages = [r.message for r in caplog.records]
+    assert any("0x27" in m and "down=True" in m for m in messages)
+
+
+def test_unicode_fallback_key_forwarding_is_logged(rdp_widget, caplog):
+    from PySide6.QtGui import QKeyEvent
+
+    with caplog.at_level("DEBUG", logger="it_toolbox.widgets.rdp_widget"):
+        # Key_unknown has no SCANCODES entry, forcing the unicode fallback
+        # path -- mirrors how a real layout-dependent symbol with no
+        # dedicated Qt key constant would be forwarded.
+        event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_unknown, Qt.KeyboardModifier.NoModifier, "€")
+        rdp_widget.keyPressEvent(event)
+
+    messages = [r.message for r in caplog.records]
+    assert any("'€'" in m and "down=True" in m for m in messages)
+
+
+# -- Shift+symbol keys: scancode, not unicode -------------------------------
+#
+# Root cause, found from a live capture: Qt (at least on Windows) reports
+# Shift+symbol keys (Shift+; -> ":", Shift+1 -> "!", ...) as their own
+# distinct Key_* constants -- not the unshifted key plus a Shift modifier --
+# so with no SCANCODES entry for them, they fell through to send_key_unicode
+# for every one of them, which is confirmed broken in a Windows console
+# (PowerShell/cmd) even though it works fine in a GUI text field. Each of
+# these now has a SCANCODES entry pointing at the same physical scancode as
+# its unshifted key.
+
+
+@pytest.mark.parametrize(
+    ("key", "scancode"),
+    [
+        (Qt.Key.Key_Exclam, 0x02),
+        (Qt.Key.Key_At, 0x03),
+        (Qt.Key.Key_NumberSign, 0x04),
+        (Qt.Key.Key_Dollar, 0x05),
+        (Qt.Key.Key_Percent, 0x06),
+        (Qt.Key.Key_AsciiCircum, 0x07),
+        (Qt.Key.Key_Ampersand, 0x08),
+        (Qt.Key.Key_Asterisk, 0x09),
+        (Qt.Key.Key_ParenLeft, 0x0A),
+        (Qt.Key.Key_ParenRight, 0x0B),
+        (Qt.Key.Key_Underscore, 0x0C),
+        (Qt.Key.Key_Plus, 0x0D),
+        (Qt.Key.Key_BraceLeft, 0x1A),
+        (Qt.Key.Key_BraceRight, 0x1B),
+        (Qt.Key.Key_Colon, 0x27),
+        (Qt.Key.Key_QuoteDbl, 0x28),
+        (Qt.Key.Key_AsciiTilde, 0x29),
+        (Qt.Key.Key_Bar, 0x2B),
+        (Qt.Key.Key_Less, 0x33),
+        (Qt.Key.Key_Greater, 0x34),
+        (Qt.Key.Key_Question, 0x35),
+    ],
+)
+def test_shift_symbol_key_uses_the_base_keys_scancode(rdp_widget, key, scancode):
+    from PySide6.QtGui import QKeyEvent
+
+    event = QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.ShiftModifier, "")
+    rdp_widget.keyPressEvent(event)
+
+    assert (scancode, False, True) in rdp_widget._worker.scancode_calls
+    assert rdp_widget._worker.unicode_calls == []

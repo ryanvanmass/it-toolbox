@@ -75,6 +75,25 @@ TERMINAL_FONT_SIZE_PRESETS: list[tuple[str, int | None]] = [
     ("20", 20),
 ]
 
+# (dropdown label, stored value) — the Windows keyboard layout ID declared
+# to the RDP server (see settings.load_rdp_keyboard_layout()'s docstring).
+# The *server* needs the declared layout actually installed to interpret
+# scancodes with it, so this is only worth changing away from English (US)
+# when a specific target VM doesn't have that layout available -- not an
+# attempt to cover every layout in existence.
+RDP_KEYBOARD_LAYOUT_PRESETS: list[tuple[str, int]] = [
+    ("English (US)", 0x0409),
+    ("English (UK)", 0x0809),
+    ("French", 0x040C),
+    ("German", 0x0407),
+    ("Spanish", 0x040A),
+    ("Italian", 0x0410),
+    ("Portuguese (Brazil)", 0x0416),
+    ("Dutch", 0x0413),
+    ("Swedish", 0x041D),
+    ("Japanese", 0x0411),
+]
+
 
 class SettingsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -96,6 +115,7 @@ class SettingsView(QWidget):
         self._content_layout.addWidget(self._build_jumpcloud_section())
         self._content_layout.addWidget(self._build_qemu_section())
         self._content_layout.addWidget(self._build_rdp_display_section())
+        self._content_layout.addWidget(self._build_rdp_keyboard_layout_section())
         self._content_layout.addWidget(self._build_terminal_font_size_section())
         self._content_layout.addWidget(self._build_double_click_action_section())
         self._content_layout.addWidget(self._build_freerdp_section())
@@ -453,6 +473,43 @@ class SettingsView(QWidget):
     def _on_rdp_resolution_changed(self, index: int) -> None:
         _, resolution = RDP_RESOLUTION_PRESETS[index]
         settings.save_default_rdp_resolution(resolution)
+
+    # -- RDP keyboard layout --------------------------------------------------
+
+    def _build_rdp_keyboard_layout_section(self) -> QGroupBox:
+        box = QGroupBox("RDP Keyboard Layout")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Keyboard layout declared to the RDP server for embedded RDP sessions. "
+            "English (US) works for most VMs, but the server needs that layout "
+            "actually installed to interpret keystrokes with it — a non-English "
+            "Windows image may not have it, which shows up as Shift+punctuation "
+            "(e.g. \" or :) typing the wrong character or nothing at all. Change "
+            "this only if that happens on a specific VM."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._rdp_keyboard_layout_combo = QComboBox()
+        for label, _ in RDP_KEYBOARD_LAYOUT_PRESETS:
+            self._rdp_keyboard_layout_combo.addItem(label)
+
+        current = settings.load_rdp_keyboard_layout()
+        for index, (_, value) in enumerate(RDP_KEYBOARD_LAYOUT_PRESETS):
+            if value == current:
+                self._rdp_keyboard_layout_combo.setCurrentIndex(index)
+                break
+
+        self._rdp_keyboard_layout_combo.currentIndexChanged.connect(
+            self._on_rdp_keyboard_layout_changed
+        )
+        layout.addWidget(self._rdp_keyboard_layout_combo)
+        return box
+
+    def _on_rdp_keyboard_layout_changed(self, index: int) -> None:
+        _, layout_id = RDP_KEYBOARD_LAYOUT_PRESETS[index]
+        settings.save_rdp_keyboard_layout(layout_id)
 
     # -- Terminal font size ---------------------------------------------------
 

@@ -347,6 +347,7 @@ def _configure_settings(
     password: str,
     domain: str,
     ignore_certificate: bool,
+    keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
 ) -> None:
     settings = context.contents.settings  # c_void_p, opaque — accessed via accessors only
     _core_lib.freerdp_settings_set_string(settings, SETTING_SERVER_HOSTNAME, host.encode())
@@ -386,10 +387,16 @@ def _configure_settings(
     # (client/X11/xf_keyboard.c's xf_keyboard_init) auto-detects a layout
     # from XKB/system locale and only falls back to English (US) if that
     # fails; scancodes.py's table is a fixed US QWERTY Set-1 mapping (not
-    # layout-adaptive), so hardcoding the same fallback here unconditionally
-    # is the correct match for what we actually send, not a placeholder.
+    # layout-adaptive), so English (US) is the correct default for what we
+    # actually send, not a placeholder. It's still only a default, though:
+    # the server must have the *declared* layout installed to interpret
+    # scancodes with it at all, and a non-English-language Windows image
+    # may not have English (US) installed -- reproducing the exact same
+    # symptom on that VM despite a validly-declared layout. Overridable via
+    # Settings (core/settings.py's load_rdp_keyboard_layout) for exactly
+    # that case.
     keyboard_layout_key = _settings_key_for_name("FreeRDP_KeyboardLayout")
-    _core_lib.freerdp_settings_set_uint32(settings, keyboard_layout_key, KEYBOARD_LAYOUT_ENGLISH_US)
+    _core_lib.freerdp_settings_set_uint32(settings, keyboard_layout_key, keyboard_layout)
 
 
 def _settings_key_for_name(name: str) -> int:
@@ -548,11 +555,14 @@ class FreeRdpSession:
         domain: str = "",
         ignore_certificate: bool = True,
         desktop_size: tuple[int, int] | None = None,
+        keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
     ) -> None:
         context = _new_context()
         self._context = context
         try:
-            _configure_settings(context, host, port, username, password, domain, ignore_certificate)
+            _configure_settings(
+                context, host, port, username, password, domain, ignore_certificate, keyboard_layout
+            )
             if desktop_size is not None:
                 _apply_desktop_size(context, *desktop_size)
         except Exception:
