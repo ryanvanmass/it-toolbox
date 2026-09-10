@@ -443,6 +443,19 @@ class ConnectionManagerView(QWidget):
         settings.save_qemu_hosts([{"name": h.name, "uri": h.uri} for h in hosts])
 
     def _populate_qemu_hosts(self) -> None:
+        # virsh isn't installed -- Settings' "QEMU / libvirt" section
+        # already surfaces that; nothing under this root could actually be
+        # used (not even "Manage Hosts…", since there'd be no way to
+        # connect to a registered host), so don't clutter the tree with a
+        # root that leads nowhere.
+        if not qemu_client.is_available():
+            if self._qemu_root_item is not None:
+                index = self._tree.indexOfTopLevelItem(self._qemu_root_item)
+                if index != -1:
+                    self._tree.takeTopLevelItem(index)
+                self._qemu_root_item = None
+            return
+
         if self._qemu_root_item is None:
             self._qemu_root_item = QTreeWidgetItem(["QEMU"])
             self._qemu_root_item.setData(0, IS_QEMU_ROOT_ROLE, True)
