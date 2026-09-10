@@ -62,6 +62,19 @@ DOUBLE_CLICK_ACTION_PRESETS: list[tuple[str, str]] = [
     ("SSH", "ssh"),
 ]
 
+# (dropdown label, stored value) — None means the default monospace size
+# (TerminalWidget leaves the font's point size unset). See
+# settings.load_terminal_font_size()'s docstring.
+TERMINAL_FONT_SIZE_PRESETS: list[tuple[str, int | None]] = [
+    ("Default", None),
+    ("10", 10),
+    ("12", 12),
+    ("14", 14),
+    ("16", 16),
+    ("18", 18),
+    ("20", 20),
+]
+
 
 class SettingsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -83,6 +96,7 @@ class SettingsView(QWidget):
         self._content_layout.addWidget(self._build_jumpcloud_section())
         self._content_layout.addWidget(self._build_qemu_section())
         self._content_layout.addWidget(self._build_rdp_display_section())
+        self._content_layout.addWidget(self._build_terminal_font_size_section())
         self._content_layout.addWidget(self._build_double_click_action_section())
         self._content_layout.addWidget(self._build_freerdp_section())
         self._content_layout.addStretch(1)
@@ -439,6 +453,40 @@ class SettingsView(QWidget):
     def _on_rdp_resolution_changed(self, index: int) -> None:
         _, resolution = RDP_RESOLUTION_PRESETS[index]
         settings.save_default_rdp_resolution(resolution)
+
+    # -- Terminal font size ---------------------------------------------------
+
+    def _build_terminal_font_size_section(self) -> QGroupBox:
+        box = QGroupBox("Terminal Font Size")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Font size for embedded terminal sessions — both Shell Launcher and "
+            "Connection Manager's Connect via SSH. Applies to new sessions; already-open "
+            "terminal tabs keep the size they were opened with."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._terminal_font_size_combo = QComboBox()
+        for label, _ in TERMINAL_FONT_SIZE_PRESETS:
+            self._terminal_font_size_combo.addItem(label)
+
+        current = settings.load_terminal_font_size()
+        for index, (_, value) in enumerate(TERMINAL_FONT_SIZE_PRESETS):
+            if value == current:
+                self._terminal_font_size_combo.setCurrentIndex(index)
+                break
+
+        self._terminal_font_size_combo.currentIndexChanged.connect(
+            self._on_terminal_font_size_changed
+        )
+        layout.addWidget(self._terminal_font_size_combo)
+        return box
+
+    def _on_terminal_font_size_changed(self, index: int) -> None:
+        _, size = TERMINAL_FONT_SIZE_PRESETS[index]
+        settings.save_terminal_font_size(size)
 
     # -- Double-click action --------------------------------------------------
 

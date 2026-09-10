@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from it_toolbox.core import settings
 from it_toolbox.core.shell_discovery import Shell, discover_shells
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
@@ -94,7 +95,7 @@ class ShellLauncherView(QWidget):
     # -- Launch / teardown ----------------------------------------------
 
     def _launch_shell(self, shell: Shell) -> None:
-        terminal = TerminalWidget(list(shell.argv))
+        terminal = TerminalWidget(list(shell.argv), font_point_size=settings.load_terminal_font_size())
         terminal.finished.connect(lambda: self._on_terminal_finished(terminal))
         self._owned_tab_widgets.add(terminal)
         index = self._tabs.addTab(terminal, shell.name)

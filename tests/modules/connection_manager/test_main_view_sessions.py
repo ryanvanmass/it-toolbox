@@ -1098,7 +1098,7 @@ def test_ssh_connect_gives_the_terminal_keyboard_focus(qtbot, monkeypatch):
     # shell exercises the same focus-wiring path deterministically instead.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
-        lambda argv: TerminalWidget(["/bin/sh"]),
+        lambda argv, font_point_size=None: TerminalWidget(["/bin/sh"]),
     )
 
     view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
@@ -1115,9 +1115,10 @@ class _FakeTerminalWidget(QWidget):
 
     finished = Signal()
 
-    def __init__(self, argv):
+    def __init__(self, argv, font_point_size=None):
         super().__init__()
         self.argv = argv
+        self.font_point_size = font_point_size
 
     def close_session(self):
         pass
@@ -1142,6 +1143,22 @@ def test_ssh_connect_via_gcp_tunnel_skips_host_key_checking(qtbot, monkeypatch):
     argv = view._tabs.widget(0).argv
     assert "StrictHostKeyChecking=no" in argv
     assert any(arg.startswith("UserKnownHostsFile=") for arg in argv)
+
+
+def test_ssh_connect_passes_the_configured_terminal_font_size(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
+        _FakeTerminalWidget,
+    )
+    monkeypatch.setattr(main_view_module.settings, "load_terminal_font_size", lambda: 16)
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
+
+    assert view._tabs.widget(0).font_point_size == 16
 
 
 def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
