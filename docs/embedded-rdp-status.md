@@ -506,8 +506,54 @@ longer true. It now maps through the same letterboxed rect, and clamps
 clicks that land in the bars themselves to the nearest image edge
 instead of producing a negative or out-of-range remote coordinate.
 
+## Tab-stealing and unset keyboard layout (2026-09-10, resolved)
+
+A user report of inconsistent behavior — Tab appearing to do nothing, and
+Shift+key combos for punctuation like `"`/`:` producing wrong or no
+characters — turned out to be two independent bugs:
+
+1. **Qt's own focus-traversal was stealing Tab/Shift+Tab.**
+   `QWidget::event()` intercepts these to cycle keyboard focus between
+   widgets before `keyPressEvent()` ever runs — `setFocusPolicy(StrongFocus)`
+   doesn't disable that. Once Tab moved local Qt focus away from the
+   `RdpWidget`, every subsequent keystroke (Shift+key combos included)
+   went to whatever local widget picked up focus instead, until a click
+   brought focus back — explaining the "inconsistent" pattern, since it
+   depends on what else was focusable nearby. Fixed with an `event()`
+   override intercepting Tab/`Key_Backtab` KeyPress before Qt's default
+   handling runs; confirmed for real via a test that fails without the
+   fix and passes with it (not just reasoned). `scancodes.py` also had no
+   mapping for `Key_Backtab` at all (Shift+Tab reports as this distinct
+   key, not `Key_Tab` + a modifier) — added, mapped to the same scancode
+   as plain Tab. The identical fix was applied to `SpiceWidget`, which
+   shares the exact same input-handling shape and vulnerability.
+2. **`KeyboardLayout` was never set, defaulting to 0** — confirmed
+   against FreeRDP's own `libfreerdp/core/settings.c`: every other
+   keyboard-related setting (`KeyboardType`/`SubType`/`FunctionKey`) gets
+   a sane compiled-in default, but `KeyboardLayout` doesn't. A real
+   client is expected to set this itself — confirmed by reading the
+   actual X11 reference client (`client/X11/xf_keyboard.c`'s
+   `xf_keyboard_init`), which auto-detects a layout from XKB/system
+   locale and falls back to `ENGLISH_UNITED_STATES` (`0x0409`,
+   `freerdp/locale/locale.h`) only if that fails. Left at 0, the server
+   has no declared layout to interpret our scancodes against — plausible
+   root cause for exactly this shape of bug (basic letters/numbers stay
+   broadly consistent across layouts, punctuation varies a lot more).
+   Since `scancodes.py`'s table is a fixed US QWERTY Set-1 mapping, not
+   layout-adaptive, `freerdp_client.py` now hardcodes
+   `KeyboardLayout = 0x0409` unconditionally in `_configure_settings` —
+   the correct match for what this client actually sends, not a
+   placeholder. Verified the setting round-trips through a real
+   `FreeRdpSession` context (get/set via the real installed
+   `libfreerdp3`), but — like everything else in this file needing a
+   live server — the actual fix for real Shift+punctuation typing still
+   needs to be confirmed against one.
+
 ## What's still open
 
+- Confirm the keyboard-layout fix above actually resolves Shift+punctuation
+  typing against a real server — verified only that the setting is
+  correctly applied, not the live typing behavior itself.
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).

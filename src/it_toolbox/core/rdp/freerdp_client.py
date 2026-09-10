@@ -64,6 +64,10 @@ SETTING_IGNORE_CERTIFICATE = 1408  # FreeRDP_Settings_Keys_Bool
 SETTING_DYNAMIC_RESOLUTION_UPDATE = 1558  # FreeRDP_Settings_Keys_Bool
 SETTING_SUPPORT_DISPLAY_CONTROL = 5185  # FreeRDP_Settings_Keys_Bool
 
+# freerdp/locale/locale.h's ENGLISH_UNITED_STATES -- see _configure_settings'
+# KeyboardLayout comment for why this is set unconditionally.
+KEYBOARD_LAYOUT_ENGLISH_US = 0x0409
+
 # freerdp/codec/color.h — FREERDP_PIXEL_FORMAT(32, TYPE_BGRA, a=0, r=8, g=8, b=8).
 # Computed rather than transcribed from a literal, since the header only
 # defines it via macro arithmetic: (bpp<<24)|(type<<16)|(a<<12)|(r<<8)|(g<<4)|b.
@@ -368,6 +372,24 @@ def _configure_settings(
     clipboard_feature_mask_key = _settings_key_for_name("FreeRDP_ClipboardFeatureMask")
     _core_lib.freerdp_settings_set_bool(settings, redirect_clipboard_key, 1)
     _core_lib.freerdp_settings_set_uint32(settings, clipboard_feature_mask_key, CLIPRDR_FLAG_DEFAULT_MASK)
+    # KeyboardLayout defaults to 0 on a fresh settings object (confirmed
+    # against FreeRDP's own libfreerdp/core/settings.c) -- an invalid
+    # Windows LCID, unlike every other keyboard-related setting
+    # (KeyboardType/SubType/FunctionKey), which already get sane compiled-
+    # in defaults. Left unset, the server has no declared layout to
+    # interpret our scancodes against, which is exactly the kind of thing
+    # that would work for plain letters/numbers (broadly consistent across
+    # layouts) while silently breaking punctuation that varies more
+    # between them -- confirmed as a real, live, previously-unexplained
+    # bug (Shift+key producing wrong or no characters for symbols like
+    # `"`/`:`), not just a hypothetical gap. The real reference client
+    # (client/X11/xf_keyboard.c's xf_keyboard_init) auto-detects a layout
+    # from XKB/system locale and only falls back to English (US) if that
+    # fails; scancodes.py's table is a fixed US QWERTY Set-1 mapping (not
+    # layout-adaptive), so hardcoding the same fallback here unconditionally
+    # is the correct match for what we actually send, not a placeholder.
+    keyboard_layout_key = _settings_key_for_name("FreeRDP_KeyboardLayout")
+    _core_lib.freerdp_settings_set_uint32(settings, keyboard_layout_key, KEYBOARD_LAYOUT_ENGLISH_US)
 
 
 def _settings_key_for_name(name: str) -> int:
