@@ -1,6 +1,6 @@
 import pytest
 from PySide6.QtCore import QPointF, QRect
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionSignals
 from it_toolbox.widgets.rdp_widget import RdpWidget
@@ -193,3 +193,27 @@ def test_close_session_disconnects_the_clipboard_signal(rdp_widget):
 def test_close_session_disconnect_is_safe_to_call_twice(rdp_widget):
     rdp_widget.close_session()
     rdp_widget.close_session()  # must not raise
+
+
+# -- Connection failure is surfaced, not silent -----------------------------
+
+
+def test_connection_error_shows_a_message_box(rdp_widget, monkeypatch):
+    calls = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a: calls.append(a)))
+
+    rdp_widget._worker.signals.error.emit("Logon failed.")
+
+    assert len(calls) == 1
+    assert calls[0][2] == "Logon failed."  # (parent, title, message)
+    assert "Connection failed: Logon failed." in rdp_widget._status_label.text()
+
+
+def test_connection_error_after_close_does_not_show_a_message_box(rdp_widget, monkeypatch):
+    calls = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a: calls.append(a)))
+
+    rdp_widget.close_session()
+    rdp_widget._worker.signals.error.emit("Logon failed.")
+
+    assert calls == []
