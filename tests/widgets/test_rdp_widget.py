@@ -1,6 +1,6 @@
 import pytest
-from PySide6.QtCore import QPointF, QRect
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QPointF, QRect, Qt
+from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionSignals
 from it_toolbox.widgets.rdp_widget import RdpWidget
@@ -17,6 +17,8 @@ class _FakeWorker:
         self.signals = RdpSessionSignals()
         self.resize_calls = []
         self.clipboard_texts = []
+        self.scancode_calls = []
+        self.unicode_calls = []
         self.started = False
         self.stopped = False
 
@@ -31,6 +33,12 @@ class _FakeWorker:
 
     def send_clipboard_text(self, text):
         self.clipboard_texts.append(text)
+
+    def send_key_scancode(self, code, extended, down):
+        self.scancode_calls.append((code, extended, down))
+
+    def send_key_unicode(self, codepoint, down):
+        self.unicode_calls.append((codepoint, down))
 
 
 @pytest.fixture
@@ -217,3 +225,61 @@ def test_connection_error_after_close_does_not_show_a_message_box(rdp_widget, mo
     rdp_widget._worker.signals.error.emit("Logon failed.")
 
     assert calls == []
+
+
+# -- Tab / Shift+Tab: forwarded to the remote session, not stolen by -------
+# -- Qt's own focus-traversal --------------------------------------------
+
+
+@pytest.fixture
+def rdp_widget_with_sibling(qtbot, monkeypatch):
+    # Qt's default Tab-key focus-traversal only has somewhere to go (and
+    # so only actually misbehaves) when there's another focusable widget
+    # in the same window to steal focus to -- an isolated RdpWidget with
+    # no siblings wouldn't reproduce the bug this guards against.
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _FakeWorker)
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    widget = RdpWidget("host", 3389, "user", "pass", parent=container)
+    sibling = QLineEdit(container)
+    layout.addWidget(widget)
+    layout.addWidget(sibling)
+    qtbot.addWidget(container)
+    container.show()
+    qtbot.waitExposed(container)
+    widget.setFocus()
+    yield widget
+    widget.close_session()
+
+
+def test_tab_is_forwarded_and_does_not_steal_focus(qtbot, rdp_widget_with_sibling):
+    widget = rdp_widget_with_sibling
+    assert widget.hasFocus()
+
+    qtbot.keyClick(widget, Qt.Key.Key_Tab)
+
+    assert (0x0F, False, True) in widget._worker.scancode_calls
+    assert (0x0F, False, False) in widget._worker.scancode_calls
+    assert widget.hasFocus()
+
+
+def test_shift_tab_is_forwarded_and_does_not_steal_focus(qtbot, rdp_widget_with_sibling):
+    widget = rdp_widget_with_sibling
+    assert widget.hasFocus()
+
+    qtbot.keyClick(widget, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+
+    assert (0x0F, False, True) in widget._worker.scancode_calls
+    assert widget.hasFocus()
+
+
+def test_regular_keys_still_forward_normally_alongside_tab_handling(rdp_widget):
+    # Regression guard: the new event() override must not interfere with
+    # ordinary keys that aren't Tab/Backtab.
+    key = Qt.Key.Key_A
+    from PySide6.QtGui import QKeyEvent
+
+    event = QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, "a")
+    rdp_widget.keyPressEvent(event)
+
+    assert (0x1E, False, True) in rdp_widget._worker.scancode_calls

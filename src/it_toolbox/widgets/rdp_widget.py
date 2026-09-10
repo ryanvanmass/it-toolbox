@@ -14,7 +14,7 @@ clamped, for clicks that land in the letterbox bars) from widget-space
 to the remote desktop's native resolution before being sent.
 """
 
-from PySide6.QtCore import QPoint, QRect, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QWidget
 
@@ -248,6 +248,23 @@ class RdpWidget(QWidget):
         steps = event.angleDelta().y() // 120
         if steps:
             self._worker.send_mouse_wheel(x, y, steps)
+
+    def event(self, e) -> bool:  # noqa: N802 - Qt override signature
+        # Qt's default QWidget::event() intercepts Tab/Shift+Tab
+        # (Key_Backtab) at this level to cycle keyboard focus between
+        # widgets *before* keyPressEvent() ever sees them -- StrongFocus
+        # alone doesn't disable that. Left unhandled, pressing Tab in the
+        # remote session can silently move local focus away from this
+        # widget instead of forwarding the keystroke, and once that
+        # happens every subsequent keystroke (Shift+key combos included)
+        # goes to whatever local widget focus landed on instead of the
+        # remote session -- until a click brings focus back here. Forward
+        # these directly and report the event as handled so Qt's own
+        # focus-traversal never runs.
+        if e.type() == QEvent.Type.KeyPress and e.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(e)
+            return True
+        return super().event(e)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         self._forward_key_event(event, down=True)

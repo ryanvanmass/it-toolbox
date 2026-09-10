@@ -16,7 +16,7 @@ symbols) simply can't be forwarded through this widget. See
 SpiceSession's input methods for the underlying reasoning.
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -142,6 +142,19 @@ class SpiceWidget(QWidget):
         if steps:
             self._worker.send_mouse_move(x, y)
             self._worker.send_mouse_wheel(steps)
+
+    def event(self, e) -> bool:  # noqa: N802 - Qt override signature
+        # Same fix as RdpWidget.event() -- Qt's default QWidget::event()
+        # intercepts Tab/Shift+Tab (Key_Backtab) at this level to cycle
+        # keyboard focus between widgets before keyPressEvent() ever sees
+        # them; StrongFocus alone doesn't disable that. Forward these
+        # directly and report the event as handled so Qt's own
+        # focus-traversal never runs and silently steals local focus away
+        # from the remote session.
+        if e.type() == QEvent.Type.KeyPress and e.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(e)
+            return True
+        return super().event(e)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         self._forward_key_event(event, down=True)

@@ -32,6 +32,14 @@ SCANCODES: dict[Qt.Key, tuple[int, bool]] = {
     Qt.Key.Key_Equal: (0x0D, False),
     Qt.Key.Key_Backspace: (0x0E, False),
     Qt.Key.Key_Tab: (0x0F, False),
+    # Shift+Tab is reported by Qt as a distinct key (Key_Backtab), not
+    # Key_Tab with a shift modifier -- but it's physically still the Tab
+    # key, so it maps to the same scancode. Shift's own state is
+    # communicated separately via its own scancode press/release (see
+    # RdpWidget), the same "physical scancode, let the remote side combine
+    # it with tracked modifier state" model already used for every letter/
+    # symbol key here.
+    Qt.Key.Key_Backtab: (0x0F, False),
     Qt.Key.Key_Q: (0x10, False),
     Qt.Key.Key_W: (0x11, False),
     Qt.Key.Key_E: (0x12, False),
