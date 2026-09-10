@@ -607,16 +607,38 @@ original shape, Shift+symbol-in-console bug included and still
 unresolved. The real fix needs to stay within scancode-based input,
 not swap the transport.
 
+## Shift+symbol in console apps: the actual fix (2026-09-10)
+
+Root cause, finally pinned down from a real `IT_TOOLBOX_LOG_LEVEL=DEBUG`
+capture of the live session: Qt (at least on Windows) reports Shift+
+symbol keys -- Shift+`;` -> `:`, Shift+`1` -> `!`, and so on -- as their
+own distinct `Key_*` constants (`Key_Colon`, `Key_Exclam`, ...), *not*
+the unshifted key (`Key_Semicolon`, `Key_1`, ...) with a Shift modifier
+set. None of those distinct constants had a `SCANCODES` entry, so every
+one of them has *always* fallen through to `send_key_unicode()` -- fine
+in a GUI text field, but the exact `VK_PACKET`-based path confirmed
+broken in a Windows console in the entry above. This explains the whole
+shape of the bug: plain letters and unshifted symbols (real `SCANCODES`
+entries) always worked in both places; every Shift-row symbol (no
+entry) only ever worked where Unicode input happens to work -- GUI
+controls, not consoles.
+
+Fix: added `SCANCODES` entries for all the Shift-row symbol keys
+(`Key_Exclam` through `Key_Question` -- see `scancodes.py`), each
+mapped to the *same physical scancode* as its unshifted key. Shift's
+own press/release is already sent as a separate scancode event (visible
+in the capture, right before each of these), so this uses the exact
+scancode+Shift mechanism that was already proven working for everything
+else -- no unicode/`VK_PACKET` involved at all for these keys anymore.
+
 ## What's still open
 
-- **The actual Shift+symbol-in-console bug is still open.** Confirmed
-  real (GUI textbox works, PowerShell/cmd in the same session doesn't,
-  `mstsc` against the same VM works, declared layout already matches
-  the VM's own) and confirmed NOT fixable by switching to Unicode
-  input (see above -- that broke console typing entirely instead).
-  Needs a fix that keeps scancode+Shift as the transport; not yet
-  identified.
-- The keyboard-layout Settings override (previous section) turned out
+- Confirm the fix above against the actual reporting VM's PowerShell
+  prompt -- strongly evidenced from a real live capture (the exact
+  `Key_Colon`/`Key_QuoteDbl`/etc. codes were seen going through the
+  unicode path), reasoned + unit-tested, but the live keystroke-level
+  confirmation still needs to come from the user.
+- The keyboard-layout Settings override (two sections up) turned out
   not to be what actually needed fixing for this specific report, but
   is still worth keeping for a case where a target VM's declared
   layout genuinely doesn't match what's installed there.

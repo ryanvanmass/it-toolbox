@@ -359,3 +359,51 @@ def test_unicode_fallback_key_forwarding_is_logged(rdp_widget, caplog):
 
     messages = [r.message for r in caplog.records]
     assert any("'€'" in m and "down=True" in m for m in messages)
+
+
+# -- Shift+symbol keys: scancode, not unicode -------------------------------
+#
+# Root cause, found from a live capture: Qt (at least on Windows) reports
+# Shift+symbol keys (Shift+; -> ":", Shift+1 -> "!", ...) as their own
+# distinct Key_* constants -- not the unshifted key plus a Shift modifier --
+# so with no SCANCODES entry for them, they fell through to send_key_unicode
+# for every one of them, which is confirmed broken in a Windows console
+# (PowerShell/cmd) even though it works fine in a GUI text field. Each of
+# these now has a SCANCODES entry pointing at the same physical scancode as
+# its unshifted key.
+
+
+@pytest.mark.parametrize(
+    ("key", "scancode"),
+    [
+        (Qt.Key.Key_Exclam, 0x02),
+        (Qt.Key.Key_At, 0x03),
+        (Qt.Key.Key_NumberSign, 0x04),
+        (Qt.Key.Key_Dollar, 0x05),
+        (Qt.Key.Key_Percent, 0x06),
+        (Qt.Key.Key_AsciiCircum, 0x07),
+        (Qt.Key.Key_Ampersand, 0x08),
+        (Qt.Key.Key_Asterisk, 0x09),
+        (Qt.Key.Key_ParenLeft, 0x0A),
+        (Qt.Key.Key_ParenRight, 0x0B),
+        (Qt.Key.Key_Underscore, 0x0C),
+        (Qt.Key.Key_Plus, 0x0D),
+        (Qt.Key.Key_BraceLeft, 0x1A),
+        (Qt.Key.Key_BraceRight, 0x1B),
+        (Qt.Key.Key_Colon, 0x27),
+        (Qt.Key.Key_QuoteDbl, 0x28),
+        (Qt.Key.Key_AsciiTilde, 0x29),
+        (Qt.Key.Key_Bar, 0x2B),
+        (Qt.Key.Key_Less, 0x33),
+        (Qt.Key.Key_Greater, 0x34),
+        (Qt.Key.Key_Question, 0x35),
+    ],
+)
+def test_shift_symbol_key_uses_the_base_keys_scancode(rdp_widget, key, scancode):
+    from PySide6.QtGui import QKeyEvent
+
+    event = QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.ShiftModifier, "")
+    rdp_widget.keyPressEvent(event)
+
+    assert (scancode, False, True) in rdp_widget._worker.scancode_calls
+    assert rdp_widget._worker.unicode_calls == []
