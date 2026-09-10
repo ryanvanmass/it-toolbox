@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPushButton,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -17,6 +18,9 @@ from PySide6.QtWidgets import (
 )
 
 from it_toolbox.core import async_utils, settings
+from it_toolbox.core.auth import gcp_auth
+from it_toolbox.modules.connection_manager import gcp_client
+from it_toolbox.modules.connection_manager.models import GcpIamBinding, GcpProject
 from it_toolbox.modules.identity_management import jumpcloud_client
 from it_toolbox.modules.identity_management.models import Device, User
 
@@ -24,11 +28,30 @@ IS_JUMPCLOUD_ROOT_ROLE = Qt.ItemDataRole.UserRole
 CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 1
 DEVICE_ROLE = Qt.ItemDataRole.UserRole + 2
 USER_ROLE = Qt.ItemDataRole.UserRole + 3
+IS_GCP_ROOT_ROLE = Qt.ItemDataRole.UserRole + 4
+GCP_PROJECT_ROLE = Qt.ItemDataRole.UserRole + 5
 
 CATEGORY_DEVICES = "devices"
 CATEGORY_USERS = "users"
+CATEGORY_GCP_PROJECTS = "gcp_projects"
 
 REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it sooner"
+
+# Raw IAM member strings are "type:principal" (e.g. "user:alice@example.com")
+# -- split for display the same way device/user model fields are formatted
+# in the view rather than pre-formatted on the model (see _show_device_detail).
+_MEMBER_TYPE_LABELS = {
+    "user": "User",
+    "serviceAccount": "Service Account",
+    "group": "Group",
+    "domain": "Domain",
+}
+
+
+def _split_member(member: str) -> tuple[str, str]:
+    prefix, _, principal = member.partition(":")
+    return _MEMBER_TYPE_LABELS.get(prefix, prefix or "Unknown"), principal or member
+
 
 # self._stack page indices.
 PAGE_PLACEHOLDER = 0
@@ -36,18 +59,31 @@ PAGE_DEVICE_DETAIL = 1
 PAGE_USER_DETAIL = 2
 PAGE_DEVICES_TABLE = 3
 PAGE_USERS_TABLE = 4
+PAGE_GCP_PROJECTS_TABLE = 5
+PAGE_GCP_PROJECT_DETAIL = 6
 
 
 class IdentityManagementView(QWidget):
     """Browser for identity-management provider integrations (issue #15)
-    -- JumpCloud is the first, with more (e.g. GAM/Google Workspace)
-    expected to follow. Mirrors Connection Manager's sidebar-tree shape
-    (provider as a root node, its categories as children,
-    e.g. connection_manager/ui/main_view.py's GCP root -> project ->
+    -- JumpCloud (devices/users) and GCP (project IAM access) are the
+    first two, with more (e.g. GAM/Google Workspace) expected to follow.
+    Mirrors Connection Manager's sidebar-tree shape (provider as a root
+    node, its categories as children, e.g.
+    connection_manager/ui/main_view.py's GCP root -> project ->
     VMs/Buckets) rather than a provider-specific tab set, so a second
     provider means adding a sibling root, not restructuring this view
-    again. One level shallower than GCP's: JumpCloud itself is the root,
-    directly followed by its categories, since there's no "project" layer.
+    again. One level shallower than Connection Manager's GCP handling:
+    JumpCloud's root is directly followed by its categories (no
+    "project" layer), and GCP here has a single "Projects" category
+    (selecting a project shows its IAM bindings directly, not a further
+    VMs/Buckets split -- this module is a read-only "who has access"
+    view, not project/instance management).
+
+    GCP auth is a real sign-in/out action (unlike JumpCloud's static API
+    key) via the shared core.auth.gcp_auth gcloud-CLI flow -- also used
+    by Connection Manager, with zero dependency on it. Since gcloud's
+    login state is genuinely global, signing in from either module's
+    tree is visible to the other without a separate sign-in.
 
     The tree itself stays deliberately uncluttered: Devices/Users
     categories never list every item as a permanent child (an org with
@@ -75,6 +111,11 @@ class IdentityManagementView(QWidget):
         # whatever the tree currently displays.
         self._devices: list[Device] = []
         self._users: list[User] = []
+
+        self._gcp_signed_in = False
+        self._gcp_projects: list[GcpProject] = []
+        self._selected_gcp_project: GcpProject | None = None
+        self._gcp_iam_bindings: list[GcpIamBinding] = []
 
         self._search_box = QLineEdit()
         self._search_box.setPlaceholderText("Search devices and users…")
@@ -107,6 +148,17 @@ class IdentityManagementView(QWidget):
         self._devices_category.setExpanded(True)
         self._users_category.setExpanded(True)
 
+        self._gcp_root = QTreeWidgetItem(["GCP"])
+        self._gcp_root.setData(0, IS_GCP_ROOT_ROLE, True)
+        self._tree.addTopLevelItem(self._gcp_root)
+
+        self._gcp_projects_category = QTreeWidgetItem(["Projects"])
+        self._gcp_projects_category.setData(0, CATEGORY_ROLE, CATEGORY_GCP_PROJECTS)
+        self._gcp_root.addChild(self._gcp_projects_category)
+
+        self._gcp_root.setExpanded(True)
+        self._gcp_projects_category.setExpanded(True)
+
         self._sidebar_widget = QWidget()
         sidebar_layout = QVBoxLayout(self._sidebar_widget)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
@@ -126,6 +178,8 @@ class IdentityManagementView(QWidget):
         self._stack.addWidget(self._build_user_detail_panel())
         self._stack.addWidget(self._build_devices_table_page())
         self._stack.addWidget(self._build_users_table_page())
+        self._stack.addWidget(self._build_gcp_projects_table_page())
+        self._stack.addWidget(self._build_gcp_project_detail_page())
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._stack)
@@ -140,6 +194,7 @@ class IdentityManagementView(QWidget):
         self._refresh_timer.start()
 
         self.refresh()
+        self._check_gcp_signed_in()
 
     @property
     def sidebar_widget(self) -> QWidget:
@@ -192,6 +247,128 @@ class IdentityManagementView(QWidget):
         layout.addWidget(self._users_table)
 
         return container
+
+    # -- GCP projects table / IAM binding detail (the "browse everything" ---
+    # -- and "who has access" views) ------------------------------------
+
+    def _build_gcp_projects_table_page(self) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        self._gcp_projects_status_label = QLabel("Checking sign-in status…")
+        self._gcp_projects_status_label.setWordWrap(True)
+        layout.addWidget(self._gcp_projects_status_label)
+
+        self._gcp_sign_in_button = QPushButton("Sign in with Google")
+        self._gcp_sign_in_button.clicked.connect(self._on_gcp_sign_in_clicked)
+        self._gcp_sign_in_button.hide()
+        layout.addWidget(self._gcp_sign_in_button)
+
+        self._gcp_projects_table = QTableWidget(0, 2)
+        self._gcp_projects_table.setHorizontalHeaderLabels(["Project", "Project ID"])
+        self._gcp_projects_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._gcp_projects_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        gcp_projects_header = self._gcp_projects_table.horizontalHeader()
+        gcp_projects_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        gcp_projects_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._gcp_projects_table.currentCellChanged.connect(
+            self._on_gcp_projects_table_selection_changed
+        )
+        layout.addWidget(self._gcp_projects_table)
+
+        return container
+
+    def _build_gcp_project_detail_page(self) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        self._gcp_project_detail_label = QLabel("")
+        self._gcp_project_detail_label.setWordWrap(True)
+        layout.addWidget(self._gcp_project_detail_label)
+
+        self._gcp_bindings_status_label = QLabel("")
+        self._gcp_bindings_status_label.setWordWrap(True)
+        layout.addWidget(self._gcp_bindings_status_label)
+
+        self._gcp_bindings_filter_box = QLineEdit()
+        self._gcp_bindings_filter_box.setPlaceholderText("Filter by principal or role…")
+        self._gcp_bindings_filter_box.textChanged.connect(self._on_gcp_bindings_filter_changed)
+        layout.addWidget(self._gcp_bindings_filter_box)
+
+        self._gcp_bindings_table = QTableWidget(0, 3)
+        self._gcp_bindings_table.setHorizontalHeaderLabels(["Principal", "Type", "Role"])
+        self._gcp_bindings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._gcp_bindings_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        bindings_header = self._gcp_bindings_table.horizontalHeader()
+        bindings_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        bindings_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        bindings_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self._gcp_bindings_table)
+
+        return container
+
+    def _on_gcp_projects_table_selection_changed(
+        self, current_row: int, current_col: int, previous_row: int, previous_col: int
+    ) -> None:
+        if current_row < 0:
+            return
+        item = self._gcp_projects_table.item(current_row, 0)
+        project = item.data(GCP_PROJECT_ROLE) if item is not None else None
+        if project is not None:
+            self._show_gcp_project_detail(project)
+
+    def _show_gcp_project_detail(self, project: GcpProject) -> None:
+        self._selected_gcp_project = project
+        self._gcp_iam_bindings = []
+        self._gcp_bindings_filter_box.setText("")
+        self._gcp_project_detail_label.setText(
+            f"Who has access to {project.display_name or project.project_id} "
+            f"({project.project_id}):"
+        )
+        self._gcp_bindings_table.setRowCount(0)
+        self._gcp_bindings_status_label.setText("Loading…")
+        self._stack.setCurrentIndex(PAGE_GCP_PROJECT_DETAIL)
+        async_utils.run_in_background(
+            lambda: gcp_client.get_iam_policy(gcp_auth.get_credentials(), project.project_id),
+            on_result=lambda bindings: self._populate_gcp_iam_bindings(project, bindings),
+            on_error=self._on_gcp_iam_load_error,
+        )
+
+    def _populate_gcp_iam_bindings(self, project: GcpProject, bindings: list[GcpIamBinding]) -> None:
+        try:
+            # The selection may have moved on before this resolved.
+            if (
+                self._selected_gcp_project is None
+                or self._selected_gcp_project.project_id != project.project_id
+            ):
+                return
+            self._gcp_iam_bindings = bindings
+            self._gcp_bindings_status_label.setText("" if bindings else "No IAM bindings found.")
+            self._render_gcp_bindings_table(self._gcp_bindings_filter_box.text())
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
+    def _on_gcp_bindings_filter_changed(self, text: str) -> None:
+        self._render_gcp_bindings_table(text)
+
+    def _render_gcp_bindings_table(self, query: str) -> None:
+        query = query.strip().lower()
+        matches = [
+            b for b in self._gcp_iam_bindings if query in b.member.lower() or query in b.role.lower()
+        ]
+        self._gcp_bindings_table.setRowCount(len(matches))
+        for row, binding in enumerate(matches):
+            type_label, principal = _split_member(binding.member)
+            self._gcp_bindings_table.setItem(row, 0, QTableWidgetItem(principal))
+            self._gcp_bindings_table.setItem(row, 1, QTableWidgetItem(type_label))
+            self._gcp_bindings_table.setItem(row, 2, QTableWidgetItem(binding.role))
+
+    def _on_gcp_iam_load_error(self, error: Exception) -> None:
+        try:
+            self._gcp_bindings_status_label.setText("Failed to load IAM policy — see error dialog.")
+            QMessageBox.warning(self, "Failed to load GCP IAM policy", str(error))
+        except RuntimeError:
+            pass  # widget torn down mid-flight
 
     def _on_devices_table_selection_changed(
         self, current_row: int, current_col: int, previous_row: int, previous_col: int
@@ -318,16 +495,21 @@ class IdentityManagementView(QWidget):
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         device: Device | None = item.data(0, DEVICE_ROLE)
         user: User | None = item.data(0, USER_ROLE)
+        gcp_project: GcpProject | None = item.data(0, GCP_PROJECT_ROLE)
         category = item.data(0, CATEGORY_ROLE)
 
         if device is not None:
             self._show_device_detail(device)
         elif user is not None:
             self._show_user_detail(user)
+        elif gcp_project is not None:
+            self._show_gcp_project_detail(gcp_project)
         elif category == CATEGORY_DEVICES:
             self._stack.setCurrentIndex(PAGE_DEVICES_TABLE)
         elif category == CATEGORY_USERS:
             self._stack.setCurrentIndex(PAGE_USERS_TABLE)
+        elif category == CATEGORY_GCP_PROJECTS:
+            self._stack.setCurrentIndex(PAGE_GCP_PROJECTS_TABLE)
         else:
             self._stack.setCurrentIndex(PAGE_PLACEHOLDER)
 
@@ -404,8 +586,16 @@ class IdentityManagementView(QWidget):
         self._rebuild_search_results(
             self._users_category, self._users, lambda u: u.username, USER_ROLE, query
         )
+        self._rebuild_search_results(
+            self._gcp_projects_category,
+            self._gcp_projects,
+            lambda p: p.display_name or p.project_id,
+            GCP_PROJECT_ROLE,
+            query,
+        )
         self._filter_table_rows(self._devices_table, query)
         self._filter_table_rows(self._users_table, query)
+        self._filter_table_rows(self._gcp_projects_table, query)
 
     @staticmethod
     def _filter_table_rows(table: QTableWidget, query: str) -> None:
@@ -443,11 +633,24 @@ class IdentityManagementView(QWidget):
         menu.addAction("Refresh").triggered.connect(self.refresh)
         return menu
 
+    def _build_gcp_root_menu(self) -> QMenu | None:
+        if not self._gcp_signed_in:
+            return None
+        menu = QMenu(self)
+        menu.addAction("Refresh").triggered.connect(self._refresh_gcp_projects)
+        menu.addAction("Sign out").triggered.connect(self._do_gcp_sign_out)
+        return menu
+
     def _on_tree_context_menu(self, pos) -> None:
         item = self._tree.itemAt(pos)
-        if item is None or not item.data(0, IS_JUMPCLOUD_ROOT_ROLE):
+        if item is None:
             return
-        self._build_jumpcloud_root_menu().exec(self._tree.viewport().mapToGlobal(pos))
+        if item.data(0, IS_JUMPCLOUD_ROOT_ROLE):
+            self._build_jumpcloud_root_menu().exec(self._tree.viewport().mapToGlobal(pos))
+        elif item.data(0, IS_GCP_ROOT_ROLE):
+            menu = self._build_gcp_root_menu()
+            if menu is not None:
+                menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _get_api_key(self) -> str | None:
         if self._cached_api_key is not None:
@@ -509,8 +712,96 @@ class IdentityManagementView(QWidget):
             on_error=self._on_load_error,
         )
 
+        if self._gcp_signed_in:
+            self._refresh_gcp_projects()
+
     def _on_load_error(self, error: Exception) -> None:
         try:
             QMessageBox.warning(self, "Failed to load from JumpCloud", str(error))
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
+    # -- GCP sign-in / out / project refresh -----------------------------
+
+    def _check_gcp_signed_in(self) -> None:
+        if not gcp_auth.is_available():
+            self._gcp_projects_status_label.setText(
+                f"gcloud CLI not found — install it from {gcp_auth.INSTALL_URL} and relaunch."
+            )
+            self._gcp_sign_in_button.hide()
+            return
+        async_utils.run_in_background(
+            gcp_auth.get_active_account,
+            on_result=self._on_startup_gcp_account_checked,
+            on_error=self._on_gcp_auth_error,
+        )
+
+    def _on_startup_gcp_account_checked(self, account: str | None) -> None:
+        if account is not None:
+            self._set_gcp_signed_in(account)
+        else:
+            self._set_gcp_signed_out()
+
+    def _on_gcp_sign_in_clicked(self) -> None:
+        self._gcp_sign_in_button.setEnabled(False)
+        async_utils.run_in_background(
+            gcp_auth.sign_in,
+            on_result=self._set_gcp_signed_in,
+            on_error=self._on_gcp_auth_error,
+        )
+
+    def _do_gcp_sign_out(self) -> None:
+        async_utils.run_in_background(
+            gcp_auth.sign_out,
+            on_result=lambda _: self._set_gcp_signed_out(),
+            on_error=self._on_gcp_auth_error,
+        )
+
+    def _set_gcp_signed_in(self, account: str) -> None:
+        self._gcp_signed_in = True
+        self._gcp_sign_in_button.hide()
+        self._refresh_gcp_projects()
+
+    def _set_gcp_signed_out(self) -> None:
+        self._gcp_signed_in = False
+        self._gcp_projects = []
+        self._gcp_projects_table.setRowCount(0)
+        self._gcp_projects_status_label.setText("Sign in with Google to browse GCP projects.")
+        self._gcp_sign_in_button.setEnabled(True)
+        self._gcp_sign_in_button.show()
+        self._on_search_text_changed(self._search_box.text())
+
+    def _on_gcp_auth_error(self, error: Exception) -> None:
+        try:
+            self._gcp_sign_in_button.setEnabled(True)
+            QMessageBox.warning(self, "gcloud auth failed", str(error))
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
+    def _refresh_gcp_projects(self) -> None:
+        self._gcp_projects_status_label.setText("Loading…")
+        async_utils.run_in_background(
+            lambda: gcp_client.list_projects(gcp_auth.get_credentials()),
+            on_result=self._populate_gcp_projects,
+            on_error=self._on_gcp_projects_load_error,
+        )
+
+    def _populate_gcp_projects(self, projects: list[GcpProject]) -> None:
+        try:
+            self._gcp_projects = projects
+            self._gcp_projects_status_label.setText("" if projects else "No projects found.")
+            self._gcp_projects_table.setRowCount(len(projects))
+            for row, project in enumerate(projects):
+                name_item = QTableWidgetItem(project.display_name or project.project_id)
+                name_item.setData(GCP_PROJECT_ROLE, project)
+                self._gcp_projects_table.setItem(row, 0, name_item)
+                self._gcp_projects_table.setItem(row, 1, QTableWidgetItem(project.project_id))
+            self._on_search_text_changed(self._search_box.text())
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
+    def _on_gcp_projects_load_error(self, error: Exception) -> None:
+        try:
+            QMessageBox.warning(self, "Failed to load from GCP", str(error))
         except RuntimeError:
             pass  # widget torn down mid-flight
