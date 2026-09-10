@@ -1,3 +1,5 @@
+import platform
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
@@ -73,6 +75,10 @@ CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
 
 GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it sooner"
+
+# ssh's null device, for discarding a known_hosts write — see _embed_ssh's
+# skip_host_key_check.
+_NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
 
 
 class ConnectionManagerView(QWidget):
@@ -935,7 +941,7 @@ class ConnectionManagerView(QWidget):
         self._active_sessions[session_id] = (kind, tunnel)
 
         if kind == "ssh":
-            self._embed_ssh(session_id, display_name, tunnel.port, username)
+            self._embed_ssh(session_id, display_name, tunnel.port, username, skip_host_key_check=True)
         else:
             self._embed_rdp(session_id, display_name, tunnel.port, username, password)
 
@@ -949,9 +955,28 @@ class ConnectionManagerView(QWidget):
         port: int,
         username: str | None,
         host: str = "127.0.0.1",
+        skip_host_key_check: bool = False,
     ) -> None:
         target = f"{username}@{host}" if username else host
-        terminal = TerminalWidget(["ssh", "-p", str(port), target])
+        args = ["ssh", "-p", str(port)]
+        if skip_host_key_check:
+            # GCP/IAP-tunneled SSH always connects to 127.0.0.1 on a
+            # fresh, ephemeral local port BackgroundTunnel picks per
+            # session -- ssh's normal known_hosts check treats every new
+            # port as an unrecognized host, so each connection (even to
+            # the same real VM) prompts to accept a "new" host key and
+            # then writes it to ~/.ssh/known_hosts, accumulating junk
+            # entries for a local port number that means nothing the next
+            # time some other tunnel reuses it. The actual trust boundary
+            # here is IAP's own OAuth-authenticated tunnel, not this local
+            # hop's host key, so skip the check rather than prompting for
+            # something with no real security value. Only passed True
+            # from the GCP/IAP path -- a Manual connection (a real
+            # external host, no tunnel) still gets normal host-key
+            # checking.
+            args += ["-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={_NULL_DEVICE}"]
+        args.append(target)
+        terminal = TerminalWidget(args)
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
         self._owned_tab_widgets.add(terminal)

@@ -813,6 +813,42 @@ def test_ssh_connect_gives_the_terminal_keyboard_focus(qtbot, monkeypatch):
     terminal.close_session()
 
 
+class _FakeTerminalWidget(QWidget):
+    """Stands in for TerminalWidget — the real one spawns an actual `ssh`
+    subprocess in a pty, which would try to really connect over the
+    network. Only used to capture the argv main_view.py builds."""
+
+    finished = Signal()
+
+    def __init__(self, argv):
+        super().__init__()
+        self.argv = argv
+
+    def close_session(self):
+        pass
+
+
+def test_ssh_connect_via_gcp_tunnel_skips_host_key_checking(qtbot, monkeypatch):
+    # GCP/IAP-tunneled SSH always connects to 127.0.0.1 on a fresh
+    # ephemeral local port -- without this, ssh's normal known_hosts check
+    # treats every single connection (even to the same real VM) as an
+    # unrecognized host, prompting the user and cluttering
+    # ~/.ssh/known_hosts with junk entries for a port number that's
+    # meaningless the next time it's reused.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
+        _FakeTerminalWidget,
+    )
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
+
+    argv = view._tabs.widget(0).argv
+    assert "StrictHostKeyChecking=no" in argv
+    assert any(arg.startswith("UserKnownHostsFile=") for arg in argv)
+
+
 def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
     tunnel = _FakeTunnel()
@@ -1155,6 +1191,25 @@ def test_manual_ssh_connect_embeds_terminal_without_tunnel(qtbot, monkeypatch):
     assert view._tabs.tabText(0) == "my-box"
     assert view._active_sessions == {}
     assert len(view._session_tab_widgets) == 1
+
+
+def test_manual_ssh_connect_does_not_skip_host_key_checking(qtbot, monkeypatch):
+    # Unlike the GCP/IAP-tunnel path, a Manual connection dials a real
+    # external host directly -- normal known_hosts checking still
+    # protects against an actual MITM there, so it must stay on.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
+        _FakeTerminalWidget,
+    )
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="ssh", username="alice")
+
+    view._start_session_from_manual_connection(connection)
+
+    argv = view._tabs.widget(0).argv
+    assert "StrictHostKeyChecking=no" not in argv
+    assert not any(arg.startswith("UserKnownHostsFile=") for arg in argv)
+    view._tabs.widget(0).close_session()
 
 
 def test_manual_rdp_connect_embeds_widget_without_tunnel(qtbot, monkeypatch):
