@@ -16,7 +16,7 @@ to the remote desktop's native resolution before being sent.
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
@@ -116,6 +116,13 @@ class RdpWidget(QWidget):
         if not self._closing:
             self._status_label.setText(f"Connection failed: {message}")
             self._status_label.show()
+            # main_view.py tears this tab down as soon as `finished` fires
+            # below (same teardown path a clean disconnect uses) — often
+            # too fast for the status label above to ever actually be
+            # read. A blocking dialog guarantees the user sees why the
+            # connection failed instead of just watching a tab flash open
+            # and close.
+            QMessageBox.warning(self, "RDP Connection Failed", message)
         self._emit_finished_once()
 
     def _on_disconnected(self) -> None:
