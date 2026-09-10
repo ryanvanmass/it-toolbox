@@ -14,6 +14,8 @@ clamped, for clicks that land in the letterbox bars) from widget-space
 to the remote desktop's native resolution before being sent.
 """
 
+import logging
+
 from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QWidget
@@ -21,6 +23,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QW
 from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
+
+logger = logging.getLogger(__name__)
 
 _BUTTON_NAMES = {
     Qt.MouseButton.LeftButton: "left",
@@ -281,9 +285,22 @@ class RdpWidget(QWidget):
         scancode = SCANCODES.get(key)
         if scancode is not None:
             code, extended = scancode
+            # DEBUG-only, off by default (see __main__.py's IT_TOOLBOX_LOG_LEVEL) --
+            # a live report of Shift+symbol producing the wrong character on one
+            # specific VM (but not with mstsc against the same VM, and not with
+            # this same client against a different VM) couldn't be chased further
+            # without seeing the actual key/modifier/scancode sequence as it's
+            # computed, since none of that is visible from outside this method.
+            logger.debug(
+                "key %s modifiers=%s -> scancode=0x%02X extended=%s down=%s",
+                key, event.modifiers(), code, extended, down,
+            )
             self._worker.send_key_scancode(code, extended, down)
             return
         text = event.text()
         for char in text:
             if char.isprintable():
+                logger.debug(
+                    "key %s modifiers=%s -> unicode=%r down=%s", key, event.modifiers(), char, down
+                )
                 self._worker.send_key_unicode(ord(char), down)

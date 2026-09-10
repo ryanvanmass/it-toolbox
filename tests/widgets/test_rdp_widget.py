@@ -319,3 +319,40 @@ def test_regular_keys_still_forward_normally_alongside_tab_handling(rdp_widget):
     rdp_widget.keyPressEvent(event)
 
     assert (0x1E, False, True) in rdp_widget._worker.scancode_calls
+
+
+# -- Debug logging: every forwarded key logs what was actually computed -----
+#
+# Added to chase a live report of Shift+symbol (e.g. Shift+; -> ":") typing
+# the wrong character on one specific VM, but working fine there with mstsc,
+# and working fine with this same client against a different VM -- nothing
+# about the key/modifier/scancode sequence as it's actually computed is
+# otherwise visible from outside _forward_key_event, so there was no way to
+# make further progress without being able to capture it from a live repro.
+
+
+def test_scancode_key_forwarding_is_logged(rdp_widget, caplog):
+    from PySide6.QtGui import QKeyEvent
+
+    with caplog.at_level("DEBUG", logger="it_toolbox.widgets.rdp_widget"):
+        event = QKeyEvent(
+            QKeyEvent.Type.KeyPress, Qt.Key.Key_Semicolon, Qt.KeyboardModifier.ShiftModifier, ":"
+        )
+        rdp_widget.keyPressEvent(event)
+
+    messages = [r.message for r in caplog.records]
+    assert any("0x27" in m and "down=True" in m for m in messages)
+
+
+def test_unicode_fallback_key_forwarding_is_logged(rdp_widget, caplog):
+    from PySide6.QtGui import QKeyEvent
+
+    with caplog.at_level("DEBUG", logger="it_toolbox.widgets.rdp_widget"):
+        # Key_unknown has no SCANCODES entry, forcing the unicode fallback
+        # path -- mirrors how a real layout-dependent symbol with no
+        # dedicated Qt key constant would be forwarded.
+        event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_unknown, Qt.KeyboardModifier.NoModifier, "€")
+        rdp_widget.keyPressEvent(event)
+
+    messages = [r.message for r in caplog.records]
+    assert any("'€'" in m and "down=True" in m for m in messages)
