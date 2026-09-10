@@ -25,6 +25,7 @@ def _make_view(
     platform_system="Linux",
     qemu_available=False,
     default_rdp_resolution=None,
+    terminal_font_size=None,
     default_double_click_action="ask",
     jumpcloud_key_configured=False,
     gcp_ssh_key_override=None,
@@ -42,6 +43,7 @@ def _make_view(
     monkeypatch.setattr(rclone_client, "rclone_executable", lambda: "/usr/bin/rclone")
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
+    monkeypatch.setattr(settings, "load_terminal_font_size", lambda: terminal_font_size)
     monkeypatch.setattr(
         settings, "load_default_double_click_action", lambda: default_double_click_action
     )
@@ -428,6 +430,38 @@ def test_changing_rdp_resolution_back_to_match_window_size_clears_it(qtbot, monk
     monkeypatch.setattr(settings, "save_default_rdp_resolution", lambda value: saved.append(value))
 
     view._rdp_resolution_combo.setCurrentText("Match window size")
+
+    assert saved == [None]
+
+
+def test_terminal_font_size_section_defaults_to_default(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, terminal_font_size=None)
+
+    assert view._terminal_font_size_combo.currentText() == "Default"
+
+
+def test_terminal_font_size_section_preselects_the_saved_size(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, terminal_font_size=14)
+
+    assert view._terminal_font_size_combo.currentText() == "14"
+
+
+def test_changing_terminal_font_size_saves_it(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(settings, "save_terminal_font_size", lambda value: saved.append(value))
+
+    view._terminal_font_size_combo.setCurrentText("18")
+
+    assert saved == [18]
+
+
+def test_changing_terminal_font_size_back_to_default_clears_it(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, terminal_font_size=18)
+    saved = []
+    monkeypatch.setattr(settings, "save_terminal_font_size", lambda value: saved.append(value))
+
+    view._terminal_font_size_combo.setCurrentText("Default")
 
     assert saved == [None]
 

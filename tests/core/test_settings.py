@@ -286,6 +286,30 @@ def test_default_rdp_resolution_ignores_a_malformed_file(monkeypatch, tmp_path):
     assert settings.load_default_rdp_resolution() is None
 
 
+def test_terminal_font_size_is_none_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_terminal_font_size() is None
+
+
+def test_save_and_load_terminal_font_size(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_terminal_font_size(14)
+    assert settings.load_terminal_font_size() == 14
+
+
+def test_save_terminal_font_size_none_clears_it(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_terminal_font_size(14)
+    settings.save_terminal_font_size(None)
+    assert settings.load_terminal_font_size() is None
+
+
+def test_terminal_font_size_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.terminal_font_size_path().write_text("not-a-number")
+    assert settings.load_terminal_font_size() is None
+
+
 def test_default_double_click_action_is_ask_when_never_set(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     assert settings.load_default_double_click_action() == "ask"

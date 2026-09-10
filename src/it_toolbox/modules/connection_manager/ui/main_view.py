@@ -1109,7 +1109,7 @@ class ConnectionManagerView(QWidget):
             # checking.
             args += ["-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={_NULL_DEVICE}"]
         args.append(target)
-        terminal = TerminalWidget(args)
+        terminal = TerminalWidget(args, font_point_size=settings.load_terminal_font_size())
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
         self._owned_tab_widgets.add(terminal)

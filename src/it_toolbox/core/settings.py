@@ -174,6 +174,34 @@ def save_default_double_click_action(action: str) -> None:
     default_double_click_action_path().write_text(action)
 
 
+def terminal_font_size_path() -> Path:
+    return data_dir() / "terminal_font_size.txt"
+
+
+def load_terminal_font_size() -> int | None:
+    """The embedded terminal's font point size (widgets/terminal_widget.py
+    and shell_launcher/connection_manager's SSH sessions, which both use
+    it). None means "use the default monospace size" -- TerminalWidget
+    leaves the font's point size unset in that case rather than being
+    given a specific stored value.
+    """
+    path = terminal_font_size_path()
+    if not path.is_file():
+        return None
+    try:
+        return int(path.read_text().strip())
+    except ValueError:
+        return None
+
+
+def save_terminal_font_size(size: int | None) -> None:
+    path = terminal_font_size_path()
+    if size is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(str(size))
+
+
 def rclone_path_path() -> Path:
     return data_dir() / "rclone_path.txt"
 

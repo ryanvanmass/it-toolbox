@@ -47,13 +47,22 @@ class TerminalWidget(QPlainTextEdit):
     finished = Signal()
     _output_ready = Signal(bytes)  # background-thread -> main-thread bridge (Windows only)
 
-    def __init__(self, argv: list[str], cols: int = 100, rows: int = 30, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        argv: list[str],
+        cols: int = 100,
+        rows: int = 30,
+        font_point_size: int | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         font = QFont("Monospace")
         font.setStyleHint(QFont.StyleHint.TypeWriter)
+        if font_point_size is not None:
+            font.setPointSize(font_point_size)
         self.setFont(font)
 
         self._cols = cols

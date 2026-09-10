@@ -1,4 +1,5 @@
 from it_toolbox.core.shell_discovery import Shell
+from it_toolbox.modules.shell_launcher.ui import main_view as shell_launcher_main_view
 from it_toolbox.modules.shell_launcher.ui.main_view import SHELL_ROLE, ShellLauncherView
 
 
@@ -34,6 +35,18 @@ def test_double_clicking_a_shell_launches_a_real_terminal_tab(qtbot, monkeypatch
     assert view._tabs.tabText(0) == "test-shell"
     terminal = view._tabs.widget(0)
     qtbot.waitUntil(lambda: bool(terminal.toPlainText().strip()), timeout=3000)
+    terminal.close_session()
+
+
+def test_launching_a_shell_applies_the_configured_terminal_font_size(qtbot, monkeypatch):
+    monkeypatch.setattr(shell_launcher_main_view.settings, "load_terminal_font_size", lambda: 16)
+    shell = Shell(name="test-shell", argv=("/bin/sh",))
+    view = _make_view(qtbot, monkeypatch, shells=[shell])
+
+    view._on_item_double_clicked(view._list.topLevelItem(0), 0)
+
+    terminal = view._tabs.widget(0)
+    assert terminal.font().pointSize() == 16
     terminal.close_session()
 
 

@@ -34,6 +34,24 @@ def test_terminal_renders_shell_prompt(qtbot):
     term.close_session()
 
 
+def test_terminal_uses_default_font_size_when_not_specified(qtbot):
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+
+    default_size = term.font().pointSize()
+
+    term.close_session()
+    assert default_size > 0  # whatever Qt's own default monospace size is, just not "unset"
+
+
+def test_terminal_applies_a_configured_font_point_size(qtbot):
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24, font_point_size=18)
+    qtbot.addWidget(term)
+
+    assert term.font().pointSize() == 18
+    term.close_session()
+
+
 def test_terminal_echoes_typed_command_output(qtbot):
     term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
     qtbot.addWidget(term)
