@@ -90,6 +90,12 @@ class RdpSessionWorker:
         call with no coalescing of its own."""
         self._input_queue.put(("resize", width, height))
 
+    def send_clipboard_text(self, text: str | None) -> None:
+        """Safe to call from the Qt thread. Announces the local
+        clipboard's text content to the remote session — call whenever the
+        local clipboard changes."""
+        self._input_queue.put(("clipboard_text", text))
+
     def _drain_input_queue(self) -> None:
         while True:
             try:
@@ -109,6 +115,8 @@ class RdpSessionWorker:
                 self._session.send_key_unicode(*args)
             elif kind == "resize":
                 self._session.request_resize(*args)
+            elif kind == "clipboard_text":
+                self._session.announce_clipboard_text(*args)
 
     def _run(self) -> None:
         self._session.on_frame = self._on_frame

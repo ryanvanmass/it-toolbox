@@ -16,7 +16,7 @@ to the remote desktop's native resolution before being sent.
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
@@ -85,8 +85,22 @@ class RdpWidget(QWidget):
         self._worker.signals.disconnected.connect(self._on_disconnected)
         self._worker.start()
 
+        # QApplication.clipboard() is a process-wide singleton, not scoped
+        # to this widget/tab — with multiple RDP tabs open, every local
+        # copy is announced to every open session, not just the focused
+        # one. No existing precedent in this codebase scopes clipboard by
+        # tab/focus; accepted as-is for this first iteration.
+        QApplication.clipboard().dataChanged.connect(self._on_local_clipboard_changed)
+
     def _on_connected(self) -> None:
         self._status_label.hide()
+        # Push whatever's already on the local clipboard once, so a
+        # session that connects with existing clipboard content doesn't
+        # have to wait for the *next* copy before paste-into-remote works.
+        self._worker.send_clipboard_text(QApplication.clipboard().text() or None)
+
+    def _on_local_clipboard_changed(self) -> None:
+        self._worker.send_clipboard_text(QApplication.clipboard().text() or None)
 
     def _on_frame_ready(self, pixels: bytes, width: int, height: int, stride: int) -> None:
         self._frame_bytes = pixels  # QImage below wraps this buffer without copying it
@@ -173,6 +187,15 @@ class RdpWidget(QWidget):
         """Matches the close_session() convention main_view uses to tear
         down any session tab (terminal, bucket browser, ...) uniformly."""
         self._closing = True
+        # QApplication.clipboard() outlives this widget (process-wide
+        # singleton) -- unlike every other signal source this widget
+        # listens to, which dies with its own RdpSessionWorker, a dangling
+        # connection here would leak and could call into a half-destroyed
+        # widget on the next local copy.
+        try:
+            QApplication.clipboard().dataChanged.disconnect(self._on_local_clipboard_changed)
+        except (TypeError, RuntimeError):
+            pass
         self._worker.stop()
 
     # --- input: widget-space -> remote desktop-space, then forwarded ----
