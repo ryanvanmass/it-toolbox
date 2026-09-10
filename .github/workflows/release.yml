@@ -12,8 +12,11 @@ jobs:
   package-linux:
     uses: ./.github/workflows/package-linux.yml
 
+  package-windows:
+    uses: ./.github/workflows/package-windows.yml
+
   release:
-    needs: package-linux
+    needs: [package-linux, package-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +26,11 @@ jobs:
           name: linux-packages
           path: dist/packages
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/packages
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -30,3 +38,4 @@ jobs:
           files: |
             dist/packages/*.deb
             dist/packages/*.rpm
+            dist/packages/*.exe
