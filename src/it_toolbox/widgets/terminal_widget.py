@@ -229,6 +229,26 @@ class TerminalWidget(QPlainTextEdit):
         self._screen.resize(rows, cols)
         self._pty.resize(cols, rows)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        super().resizeEvent(event)
+        # The pty/pyte screen is otherwise a fixed cols x rows grid (100x30
+        # by default) with no connection at all to this widget's actual
+        # pixel size -- a real terminal emulator always keeps the two in
+        # sync (via TIOCSWINCH, which resizeTerminal's _pty.resize already
+        # sends), so a full-screen program like nano or vim only ever
+        # redraws to fill whatever size the pty *reports*, regardless of
+        # how large the widget itself has grown to. Without this, the
+        # rendered content stays pinned to its size at construction time,
+        # leaving the rest of the widget as dead, unused space.
+        metrics = self.fontMetrics()
+        char_width = metrics.horizontalAdvance("M") or 1
+        char_height = metrics.height() or 1
+        viewport_size = self.viewport().size()
+        cols = max(1, viewport_size.width() // char_width)
+        rows = max(1, viewport_size.height() // char_height)
+        if (cols, rows) != (self._cols, self._rows):
+            self.resizeTerminal(cols, rows)
+
     def close_session(self) -> None:
         if self._notifier is not None:
             self._notifier.setEnabled(False)
