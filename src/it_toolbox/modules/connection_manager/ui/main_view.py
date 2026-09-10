@@ -601,6 +601,19 @@ class ConnectionManagerView(QWidget):
         )
 
     def _populate_glinet_hosts(self) -> None:
+        # python-glinet isn't installed -- Settings' "GL.iNet" section
+        # already reports this; nothing under this root could actually be
+        # opened (GlinetDashboardWidget itself degrades to a "not
+        # installed" message), so don't clutter the tree with a root that
+        # leads nowhere. Same treatment as the QEMU root.
+        if not glinet_client.is_available():
+            if self._glinet_root_item is not None:
+                index = self._tree.indexOfTopLevelItem(self._glinet_root_item)
+                if index != -1:
+                    self._tree.takeTopLevelItem(index)
+                self._glinet_root_item = None
+            return
+
         if self._glinet_root_item is None:
             self._glinet_root_item = QTreeWidgetItem(["GL.iNet"])
             self._glinet_root_item.setData(0, IS_GLINET_ROOT_ROLE, True)

@@ -35,10 +35,24 @@ def _make_view(
     glinet_hosts=(),
     instances=(),
     buckets=(),
+    qemu_available=True,
+    glinet_available=True,
 ):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
+    )
+    # The QEMU/GL.iNet roots only appear when their respective dependency
+    # (virsh / python-glinet) is available — default True here so existing
+    # tests (written before this gating existed) don't depend on whether
+    # this sandbox happens to have either installed.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.qemu_client.is_available",
+        lambda: qemu_available,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.glinet_client.is_available",
+        lambda: glinet_available,
     )
     # QEMU hosts, manual connections, and GL.iNet hosts are loaded
     # unconditionally (independent of GCP sign-in) — stub all three out so
@@ -1068,6 +1082,38 @@ def test_populate_glinet_hosts_creates_items(qtbot, monkeypatch):
     item = glinet_root.child(0)
     assert item.text(0) == "Travel Router"
     assert item.data(0, GLINET_HOST_ROLE) == host
+
+
+def test_glinet_root_is_hidden_when_pyglinet_unavailable(qtbot, monkeypatch):
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        glinet_hosts=[
+            {"name": host.name, "url": host.url, "username": host.username,
+             "verify_ssl": host.verify_ssl, "password_encrypted": None}
+        ],
+        glinet_available=False,
+    )
+
+    for i in range(view._tree.topLevelItemCount()):
+        assert view._tree.topLevelItem(i).text(0) != "GL.iNet"
+    assert view._glinet_root_item is None
+
+
+def test_glinet_root_disappears_if_pyglinet_becomes_unavailable_on_repopulate(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, glinet_available=True)
+    assert view._glinet_root_item is not None
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.glinet_client.is_available",
+        lambda: False,
+    )
+    view._populate_glinet_hosts()
+
+    assert view._glinet_root_item is None
+    for i in range(view._tree.topLevelItemCount()):
+        assert view._tree.topLevelItem(i).text(0) != "GL.iNet"
 
 
 def test_glinet_hosts_roundtrip_through_settings(qtbot, monkeypatch):
