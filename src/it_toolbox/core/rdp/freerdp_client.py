@@ -45,6 +45,7 @@ from it_toolbox.core.rdp._freerdp3_bindings import (
 from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_s_wPubSub as WPubSub,
 )
+from it_toolbox.core.rdp.cliprdr import CLIPRDR_FLAG_DEFAULT_MASK, ClipboardChannel, CliprdrClientContext
 from it_toolbox.core.rdp.disp import DispClientContext, DisplayChannel
 
 RDP_CLIENT_INTERFACE_VERSION = 1  # freerdp/client.h
@@ -212,6 +213,15 @@ _core_lib.freerdp_settings_set_bool.restype = ctypes.c_int32
 _core_lib.gdi_init.argtypes = [ctypes.POINTER(RdpFreerdp), ctypes.c_uint32]
 _core_lib.gdi_init.restype = ctypes.c_int32
 
+# BOOL freerdp_client_load_channels(freerdp* instance);  (freerdp/client.h)
+# Required for cliprdr specifically — unlike disp (a Dynamic Virtual
+# Channel, which loads automatically once negotiated), cliprdr is a
+# static channel and is never added to the channel list without this
+# explicit call. Confirmed exported from libfreerdp-client3 (not
+# libfreerdp3) via `nm -D` against this project's real installed copy.
+_client_lib.freerdp_client_load_channels.argtypes = [ctypes.POINTER(RdpFreerdp)]
+_client_lib.freerdp_client_load_channels.restype = ctypes.c_int32
+
 # BOOL freerdp_check_event_handles(rdpContext* context);
 _core_lib.freerdp_check_event_handles.argtypes = [ctypes.POINTER(RdpContext)]
 _core_lib.freerdp_check_event_handles.restype = ctypes.c_int32
@@ -347,6 +357,17 @@ def _configure_settings(
     _core_lib.freerdp_settings_set_bool(settings, SETTING_RDP_SECURITY, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_SUPPORT_DISPLAY_CONTROL, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_DYNAMIC_RESOLUTION_UPDATE, 1)
+    # RedirectClipboard/ClipboardFeatureMask have no stable literal in a
+    # checked-in header (same situation as DesktopWidth/DesktopHeight
+    # below — FreeRDP's settings-key enum is CMake-template-generated, not
+    # a static file), so resolve both by name at runtime like those are.
+    # ClipboardFeatureMask is already FreeRDP's own compiled-in default
+    # for a fresh settings object; set explicitly anyway rather than rely
+    # on that being unstated.
+    redirect_clipboard_key = _settings_key_for_name("FreeRDP_RedirectClipboard")
+    clipboard_feature_mask_key = _settings_key_for_name("FreeRDP_ClipboardFeatureMask")
+    _core_lib.freerdp_settings_set_bool(settings, redirect_clipboard_key, 1)
+    _core_lib.freerdp_settings_set_uint32(settings, clipboard_feature_mask_key, CLIPRDR_FLAG_DEFAULT_MASK)
 
 
 def _settings_key_for_name(name: str) -> int:
@@ -433,6 +454,7 @@ class FreeRdpSession:
         self._context: ctypes.POINTER(RdpContext) | None = None
         self.on_frame: callable | None = None  # called with no args after each EndPaint
         self.display = DisplayChannel()
+        self.clipboard = ClipboardChannel()
         # Kept alive for the lifetime of the session — ctypes does not keep
         # a reference to a CFUNCTYPE instance on its own, and libfreerdp
         # holds these pointers for as long as the connection is open.
@@ -464,6 +486,11 @@ class FreeRdpSession:
         if name in (b"disp", b"Microsoft::Windows::RDS::DisplayControl"):
             disp_context = ctypes.cast(event_args.contents.pInterface, ctypes.POINTER(DispClientContext))
             self.display.bind(disp_context)
+        elif name == b"cliprdr":
+            clip_context = ctypes.cast(
+                event_args.contents.pInterface, ctypes.POINTER(CliprdrClientContext)
+            )
+            self.clipboard.bind(clip_context)
 
     def request_resize(self, width: int, height: int) -> None:
         """Ask the server to resize the remote desktop, and resize the
@@ -479,6 +506,16 @@ class FreeRdpSession:
         gdi = self._context.contents.gdi
         _core_lib.gdi_resize(gdi, width, height)
         self.display.request_resize(width, height)
+
+    def announce_clipboard_text(self, text: str | None) -> None:
+        """Announce (or re-announce) the local clipboard's text content to
+        the remote session — call whenever the local clipboard changes.
+        Call only from the thread driving the connection (see
+        rdp_session_worker.py's _drain_input_queue). No-ops (just caches)
+        until the cliprdr channel has finished its own readiness
+        handshake — see ClipboardChannel.announce_text.
+        """
+        self.clipboard.announce_text(text)
 
     def connect(
         self,
@@ -509,6 +546,16 @@ class FreeRdpSession:
             b"ChannelConnected",
             ctypes.cast(self._channel_connected_cb, ctypes.c_void_p),
         )
+        # Required for cliprdr specifically (a static channel) — see the
+        # freerdp_client_load_channels binding's comment above. Must run
+        # after settings are configured, before freerdp_connect().
+        if not _client_lib.freerdp_client_load_channels(context.contents.instance):
+            self._context = None
+            error = context
+            try:
+                _raise_last_error(error, "freerdp_client_load_channels failed")
+            finally:
+                _client_lib.freerdp_client_context_free(context)
         if not _core_lib.freerdp_connect(context.contents.instance):
             self._context = None
             error = context  # capture before freeing, for the error message

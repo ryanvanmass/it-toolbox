@@ -233,38 +233,101 @@ against a real server, ideally adding a log line at the point
 confirms whether/when the channel actually binds, rather than inferring
 it indirectly from whether the resolution visibly changed.
 
-## Clipboard sync — attempted, reverted, worth knowing before retrying
+## Clipboard sync — local→remote text, re-attempted with real reference source (2026-09-09)
 
-A full bidirectional clipboard bridge (`core/rdp/cliprdr.py`,
-`CliprdrClientContext` + the `CLIPRDR_FORMAT_LIST`/`FORMAT_DATA_*`
-message structs, wired through `RdpSessionWorker`/`RdpWidget` to Qt's
-`QClipboard`) was built and partially verified, then **reverted** at the
-user's request rather than shipped half-working. Do this over with
-better tooling before re-attempting rather than repeating the same
-trial-and-error:
+The first attempt at this feature (below, kept for history) was reverted
+after local→remote paste never worked and the root cause was never found.
+This session re-implemented it — local→remote text only, remote→local
+still out of scope — grounded in the real, current FreeRDP source fetched
+directly from `github.com/FreeRDP/FreeRDP` (the header structs, the
+channel-plugin internals, and — the piece unavailable last time — the X11
+reference client, `client/X11/xf_cliprdr.c`) rather than guesswork. That
+surfaced three concrete requirements the previous attempt likely got wrong
+or never knew about:
+
+1. **`cliprdr` is a static channel and must be explicitly loaded.**
+   `freerdp_client_load_channels(instance)` — confirmed exported from
+   `libfreerdp-client3.so.3` via `nm -D` against this project's real
+   installed copy — must be called after settings are configured, before
+   `freerdp_connect()`. Nothing in this codebase called it before now;
+   `disp` (a DVC) never needed it, which is exactly what this doc's own
+   "Dynamic resolution resizing" section above already flagged as a gap.
+2. **`RedirectClipboard` and `ClipboardFeatureMask` settings**, resolved
+   by name at runtime via the existing `_settings_key_for_name()` helper
+   (same treatment as `DesktopWidth`/`DesktopHeight` — neither has a
+   stable literal in a checked-in header). Verified against this
+   machine's real installed `libfreerdp3.so.3`: `"FreeRDP_RedirectClipboard"`
+   resolves to `4800`, `"FreeRDP_ClipboardFeatureMask"` to `4801`.
+   `ClipboardFeatureMask` is already FreeRDP's own compiled-in default for
+   a fresh settings object; set explicitly anyway.
+3. **`ClientCapabilities` must be sent explicitly, with `CB_USE_LONG_FORMAT_NAMES`
+   requested, in response to `MonitorReady`** — confirmed by reading
+   `xf_cliprdr_monitor_ready()`, which always does exactly this before
+   sending its format list. `cliprdr_main.c`'s own fallback path forces
+   `useLongFormatNames = FALSE` whenever the server never sends its own
+   capabilities PDU (legal and common — the protocol comment there
+   explicitly says the server capabilities PDU is optional), so skipping
+   this call is a real, previously-untested-but-now-confirmed way for the
+   first attempt's symptom (`ClientFormatList` "succeeds" but the server
+   never follows up with a `ServerFormatDataRequest`) to happen.
+
+New module `core/rdp/cliprdr.py` (mirrors `disp.py`'s shape): hand-written
+`CliprdrClientContext` + `CLIPRDR_HEADER`/`CLIPRDR_CAPABILITIES`/
+`CLIPRDR_FORMAT_LIST`/`CLIPRDR_FORMAT_DATA_REQUEST`/`CLIPRDR_FORMAT_DATA_RESPONSE`
+structs, sourced from the real current headers, not memory. `ClipboardChannel`
+binds on the `"cliprdr"` `ChannelConnected` event (confirmed still its
+literal short name, no DVC-style full-name gotcha, same as before), sends
+capabilities + an initial format list on `MonitorReady`, and responds to
+`ServerFormatDataRequest` with the current local clipboard text
+(UTF-16LE-encoded `CF_UNICODETEXT`, matching the exact field-population
+requirements confirmed by reading `cliprdr_client_format_data_response`'s
+own serializer). `ServerFormatList` is intentionally left unimplemented —
+this client only ever announces its own clipboard, never reads the
+server's.
+
+Wired through `FreeRdpSession.announce_clipboard_text()` →
+`RdpSessionWorker.send_clipboard_text()` (queued the same way mouse/
+keyboard/resize events are) → `RdpWidget`, which connects
+`QApplication.clipboard().dataChanged` to push every local copy, plus one
+push on `_on_connected` so a session that connects with existing clipboard
+content doesn't need a fresh copy first. `close_session()` disconnects
+that signal — a new cleanup requirement, since `QApplication.clipboard()`
+is a process-wide singleton that outlives any single tab, unlike every
+other signal source this widget listens to.
+
+**Known, accepted v1 behavior**: with multiple RDP tabs open, every local
+copy is broadcast to every open session (not scoped to the focused tab) —
+no existing precedent in this codebase scopes clipboard by tab/focus.
+
+**Not yet verified against a live server** — this dev environment still
+has none available, same limitation as the first attempt. Whoever tests
+this: set the `WLOG_LEVEL=DEBUG` environment variable before launching —
+`cliprdr_main.c` already logs every step (capabilities exchange, format
+list send, format data request/response) at `WLOG_DEBUG`, so this
+surfaces exactly what's happening on the wire with no code changes, unlike
+the first attempt which had to guess blind.
+
+### First attempt — reverted, kept for history
+
+A full bidirectional clipboard bridge was built and partially verified,
+then reverted at the user's request rather than shipped half-working:
 
 - **Remote→local text sync worked**, verified twice against the real
-  remote server with fresh (non-stale) data each time.
+  remote server with fresh (non-stale) data each time. (Not reimplemented
+  in the 2026-09-09 rework above — still explicitly out of scope.)
 - **Local→remote (pasting local content into the remote session) did
-  not work**, and the root cause was never found. The client-side
-  `ClientFormatList` call returns success (`0`/`CHANNEL_RC_OK`), but the
-  server never follows up with a `ServerFormatDataRequest` — ruled out
-  timing (tested with a 6s wait) and widget-focus mixups (confirmed via
-  screenshot the target window stayed empty). Best remaining guesses,
-  untested: something in the `CLIPRDR_FORMAT_LIST` wire serialization
-  (the `formats` array / `dataLen` handling), or a capability-
-  negotiation default (`CB_USE_LONG_FORMAT_NAMES`) that needs setting
-  explicitly via `ClientCapabilities` rather than relying on whatever
-  FreeRDP defaults to unset.
-- Getting further would need either a packet capture (Wireshark on the
-  `cliprdr` static channel) to see the actual wire bytes, or reading
-  FreeRDP's own `client/cliprdr_main.c` reference implementation (not
-  vendored in this repo — only headers were available), rather than
-  more guessing from the header alone.
-- One thing confirmed *not* the bug, worth not re-litigating: `cliprdr`
-  is a static channel and its `ChannelConnected` name genuinely is
-  `"cliprdr"` (unlike `disp`, see above) — channel binding itself
-  worked fine on the first try.
+  not work**, and the root cause was never found at the time. The
+  client-side `ClientFormatList` call returned success (`0`/`CHANNEL_RC_OK`),
+  but the server never followed up with a `ServerFormatDataRequest` —
+  timing and widget-focus mixups were both ruled out. The two guesses
+  recorded as untested — a `CLIPRDR_FORMAT_LIST` serialization issue, or
+  a missing explicit `CB_USE_LONG_FORMAT_NAMES` capability negotiation —
+  are addressed directly above; the second is now confirmed as a real,
+  necessary step via the reference client, not just a guess.
+- One thing confirmed *not* the bug, still true: `cliprdr` is a static
+  channel and its `ChannelConnected` name genuinely is `"cliprdr"`
+  (unlike `disp`) — channel binding itself worked fine on the first try,
+  both times.
 
 ## Fixed resolution option, for GCP/IAP-tunnel connections (2026-09-08)
 
@@ -436,7 +499,9 @@ instead of producing a negative or out-of-range remote coordinate.
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
-- Clipboard sync (see above) — reverted, not on this branch.
+- Clipboard sync, local→remote text (see above) — implemented on
+  `feature/rdp-clipboard-local-to-remote`, not yet verified against a live
+  server. Remote→local (and non-text formats/files) still out of scope.
 - Everything verified so far has been manual smoke-testing (the CLI
   harness and throwaway Qt scripts), not automated tests — there's
   still no pytest coverage for `core/rdp/` itself (only the
