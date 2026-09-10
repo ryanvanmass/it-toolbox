@@ -91,6 +91,46 @@ def save_manual_connections(connections: list[dict]) -> None:
     manual_connections_path().write_text(json.dumps(connections))
 
 
+def instance_ssh_username_overrides_path() -> Path:
+    return data_dir() / "instance_ssh_username_overrides.json"
+
+
+def load_instance_ssh_username_overrides() -> dict[tuple[str, str, str], str]:
+    """Per-GCP-instance SSH usernames remembered after "Upload Public
+    Key…" granted access under an account other than the global default
+    (see connection_manager/ui/main_view.py's
+    _instance_ssh_username_overrides) -- the global default may have no
+    access at all on that instance, so a later SSH connection should use
+    the account actually granted instead. Stored as a list of
+    {"project_id", "zone", "name", "username"} dicts (JSON object keys
+    must be strings, so the natural (project_id, zone, name) tuple can't
+    be used as a key directly) and returned keyed by that tuple for the
+    caller's convenience.
+    """
+    path = instance_ssh_username_overrides_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    overrides: dict[tuple[str, str, str], str] = {}
+    for entry in raw:
+        try:
+            overrides[(entry["project_id"], entry["zone"], entry["name"])] = entry["username"]
+        except (KeyError, TypeError):
+            continue
+    return overrides
+
+
+def save_instance_ssh_username_overrides(overrides: dict[tuple[str, str, str], str]) -> None:
+    raw = [
+        {"project_id": project_id, "zone": zone, "name": name, "username": username}
+        for (project_id, zone, name), username in overrides.items()
+    ]
+    instance_ssh_username_overrides_path().write_text(json.dumps(raw))
+
+
 def default_username_path() -> Path:
     return data_dir() / "default_username.txt"
 

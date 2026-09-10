@@ -286,6 +286,38 @@ def test_default_rdp_resolution_ignores_a_malformed_file(monkeypatch, tmp_path):
     assert settings.load_default_rdp_resolution() is None
 
 
+def test_instance_ssh_username_overrides_is_empty_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_instance_ssh_username_overrides() == {}
+
+
+def test_save_and_load_instance_ssh_username_overrides(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    overrides = {("p1", "us-central1-a", "vm-1"): "alice", ("p2", "europe-west1-b", "vm-2"): "bob"}
+
+    settings.save_instance_ssh_username_overrides(overrides)
+
+    assert settings.load_instance_ssh_username_overrides() == overrides
+
+
+def test_instance_ssh_username_overrides_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.instance_ssh_username_overrides_path().write_text("not-json")
+    assert settings.load_instance_ssh_username_overrides() == {}
+
+
+def test_instance_ssh_username_overrides_skips_malformed_entries(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.instance_ssh_username_overrides_path().write_text(
+        '[{"project_id": "p1", "zone": "us-central1-a", "name": "vm-1", "username": "alice"}, '
+        '{"project_id": "p2"}]'
+    )
+
+    overrides = settings.load_instance_ssh_username_overrides()
+
+    assert overrides == {("p1", "us-central1-a", "vm-1"): "alice"}
+
+
 def test_terminal_font_size_is_none_when_never_set(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     assert settings.load_terminal_font_size() is None

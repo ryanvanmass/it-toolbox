@@ -138,11 +138,12 @@ class ConnectionManagerView(QWidget):
         # has no access at all under the global default username, so a
         # subsequent SSH connection should use the account we just
         # actually granted access to instead of silently trying (and
-        # failing under) the unrelated default. Session-only: re-derived
-        # from a fresh upload each run rather than persisted, since it's
-        # just a connect-time convenience, not a record of what's really
-        # on the instance (which GCP itself already tracks).
-        self._instance_ssh_username_overrides: dict[tuple[str, str, str], str] = {}
+        # failing under) the unrelated default. Persisted to disk (see
+        # _on_ssh_key_uploaded's save call) so it survives a restart —
+        # the grant itself is permanent (GCP instance metadata), so
+        # forgetting the account to connect as on every relaunch would
+        # just reintroduce the same failure this override exists to fix.
+        self._instance_ssh_username_overrides = settings.load_instance_ssh_username_overrides()
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
@@ -1017,6 +1018,7 @@ class ConnectionManagerView(QWidget):
             self._instance_ssh_username_overrides[
                 (instance.project_id, instance.zone, instance.name)
             ] = username
+            settings.save_instance_ssh_username_overrides(self._instance_ssh_username_overrides)
         QMessageBox.information(
             self,
             "Public Key Uploaded",

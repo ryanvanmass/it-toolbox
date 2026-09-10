@@ -34,6 +34,7 @@ def _make_view(
     instances=(),
     buckets=(),
     qemu_available=True,
+    instance_ssh_username_overrides=None,
 ):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
@@ -56,6 +57,20 @@ def _make_view(
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.settings.load_manual_connections",
         lambda: list(manual_connections),
+    )
+    # Same hermeticity reasoning as above — stub both the load (so a
+    # stale real instance_ssh_username_overrides.json on this machine
+    # can't leak into a test) and the save (so a test exercising the
+    # Upload Public Key flow doesn't write one for real).
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "load_instance_ssh_username_overrides",
+        lambda: dict(instance_ssh_username_overrides or {}),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "save_instance_ssh_username_overrides",
+        lambda overrides: None,
     )
     # _apply_project_selection now pre-loads every project's VMs/buckets
     # in the background immediately (not just on first expand) — stub
@@ -822,6 +837,62 @@ def test_upload_ssh_key_matching_the_default_username_creates_no_override(qtbot,
     view._on_ssh_key_uploaded(instance, "alice")
 
     assert view._instance_ssh_username_overrides == {}
+
+
+def test_upload_ssh_key_override_is_persisted_to_disk(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_ssh_username_overrides",
+        lambda overrides: saved.append(dict(overrides)),
+    )
+
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    assert saved == [{("p1", "us-central1-a", "vm-1"): "alice"}]
+
+
+def test_matching_username_upload_does_not_write_to_disk(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "alice")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_ssh_username_overrides",
+        lambda overrides: saved.append(overrides),
+    )
+
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    assert saved == []
+
+
+def test_view_loads_persisted_ssh_username_overrides_on_startup(qtbot, monkeypatch):
+    stored = {("p1", "us-central1-a", "vm-1"): "alice"}
+
+    view = _make_view(qtbot, monkeypatch, instance_ssh_username_overrides=stored)
+
+    assert view._instance_ssh_username_overrides == stored
 
 
 def test_double_clicking_a_gcp_instance_starts_a_session_with_resolved_kind(qtbot, monkeypatch):
