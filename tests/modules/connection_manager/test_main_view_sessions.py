@@ -469,6 +469,135 @@ def test_double_clicking_a_bucket_opens_a_browser_tab(qtbot, monkeypatch):
     assert view._tabs.tabText(0) == "my-bucket"
 
 
+# -- Double-click default action --------------------------------------------
+
+
+def test_resolve_double_click_kind_windows_os_hint_is_rdp(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING",
+                         os_hint="windows")
+
+    assert view._resolve_double_click_kind(instance) == "rdp"
+
+
+def test_resolve_double_click_kind_linux_os_hint_is_ssh(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING",
+                         os_hint="linux")
+
+    assert view._resolve_double_click_kind(instance) == "ssh"
+
+
+def test_resolve_double_click_kind_uses_settings_default_when_os_hint_unknown(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.settings, "load_default_double_click_action", lambda: "ssh")
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING",
+                         os_hint=None)
+
+    assert view._resolve_double_click_kind(instance) == "ssh"
+
+
+def test_resolve_double_click_kind_asks_when_os_hint_unknown_and_action_is_ask(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.settings, "load_default_double_click_action", lambda: "ask")
+    view = _make_view(qtbot, monkeypatch)
+    asked = []
+    monkeypatch.setattr(view, "_ask_double_click_kind", lambda instance: asked.append(instance) or "rdp")
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING",
+                         os_hint=None)
+
+    result = view._resolve_double_click_kind(instance)
+
+    assert result == "rdp"
+    assert asked == [instance]
+
+
+def test_resolve_double_click_kind_windows_os_hint_never_asks(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.settings, "load_default_double_click_action", lambda: "ask")
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        view, "_ask_double_click_kind", lambda instance: (_ for _ in ()).throw(AssertionError())
+    )
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING",
+                         os_hint="windows")
+
+    assert view._resolve_double_click_kind(instance) == "rdp"
+
+
+def test_double_clicking_a_gcp_instance_starts_a_session_with_resolved_kind(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import INSTANCE_ROLE
+
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING",
+                         os_hint="windows")
+    started = []
+    monkeypatch.setattr(view, "_start_session_from_instance", lambda i, k: started.append((i, k)))
+    item = QTreeWidgetItem(["vm"])
+    item.setData(0, INSTANCE_ROLE, instance)
+
+    view._on_tree_item_double_clicked(item, 0)
+
+    assert started == [(instance, "rdp")]
+
+
+def test_double_clicking_a_gcp_instance_with_cancelled_ask_starts_nothing(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.main_view import INSTANCE_ROLE
+
+    monkeypatch.setattr(main_view_module.settings, "load_default_double_click_action", lambda: "ask")
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(view, "_ask_double_click_kind", lambda instance: None)
+    started = []
+    monkeypatch.setattr(view, "_start_session_from_instance", lambda i, k: started.append((i, k)))
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING",
+                         os_hint=None)
+    item = QTreeWidgetItem(["vm"])
+    item.setData(0, INSTANCE_ROLE, instance)
+
+    view._on_tree_item_double_clicked(item, 0)
+
+    assert started == []
+
+
+def test_double_clicking_a_manual_connection_uses_its_own_kind(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import MANUAL_CONNECTION_ROLE
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="ssh")
+    started = []
+    monkeypatch.setattr(
+        view, "_start_session_from_manual_connection", lambda c: started.append(c)
+    )
+    item = QTreeWidgetItem(["my-box"])
+    item.setData(0, MANUAL_CONNECTION_ROLE, connection)
+
+    view._on_tree_item_double_clicked(item, 0)
+
+    assert started == [connection]
+
+
+def test_double_clicking_a_qemu_vm_launches_spice_directly(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import HOST_ROLE, VM_ROLE
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+    connected = []
+    monkeypatch.setattr(view, "_connect_qemu", lambda h, v: connected.append((h, v)))
+    item = QTreeWidgetItem(["myvm"])
+    item.setData(0, HOST_ROLE, host)
+    item.setData(0, VM_ROLE, vm)
+
+    view._on_tree_item_double_clicked(item, 0)
+
+    assert connected == [(host, vm)]
+
+
 def test_closing_a_bucket_browser_tab_just_removes_it(qtbot, monkeypatch):
     import it_toolbox.widgets.bucket_browser_widget as browser_module
 

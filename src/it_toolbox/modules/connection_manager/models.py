@@ -17,6 +17,11 @@ class Instance:
     project_id: str
     status: str
     network_interface: str = "nic0"
+    # "windows", "linux", or None if undetected -- best-effort guess from
+    # the boot disk's license URLs, see gcp_client.list_instances. Used to
+    # pick a sensible default double-click connection type (RDP/SSH)
+    # without asking when it's obvious.
+    os_hint: str | None = None
 
 
 @dataclass(frozen=True)

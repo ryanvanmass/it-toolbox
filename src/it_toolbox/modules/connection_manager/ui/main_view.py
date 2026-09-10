@@ -693,6 +693,62 @@ class ConnectionManagerView(QWidget):
         bucket = item.data(0, BUCKET_ROLE)
         if bucket is not None:
             self._open_bucket_browser(bucket)
+            return
+
+        instance = item.data(0, INSTANCE_ROLE)
+        if instance is not None:
+            kind = self._resolve_double_click_kind(instance)
+            if kind is not None:
+                self._start_session_from_instance(instance, kind)
+            return
+
+        manual_connection = item.data(0, MANUAL_CONNECTION_ROLE)
+        if manual_connection is not None:
+            # Manual connections already know their own kind -- no
+            # ambiguity, so (unlike a GCP instance) there's nothing to
+            # resolve via Settings/os_hint here.
+            self._start_session_from_manual_connection(manual_connection)
+            return
+
+        vm = item.data(0, VM_ROLE)
+        if vm is not None:
+            # QEMU's only session type is SPICE -- always launch it
+            # directly, no default-action resolution needed.
+            host = item.data(0, HOST_ROLE)
+            self._connect_qemu(host, vm)
+            return
+
+    def _resolve_double_click_kind(self, instance: Instance) -> str | None:
+        """RDP/SSH for a double-clicked GCP instance, or None if the user
+        cancelled an "ask each time" prompt. Prefers instance.os_hint
+        (detected from the boot disk's license, see gcp_client.py) over
+        the Settings-configured default, since it's actually accurate
+        instead of a guess.
+        """
+        if instance.os_hint == "windows":
+            return "rdp"
+        if instance.os_hint == "linux":
+            return "ssh"
+
+        action = settings.load_default_double_click_action()
+        if action in ("rdp", "ssh"):
+            return action
+        return self._ask_double_click_kind(instance)
+
+    def _ask_double_click_kind(self, instance: Instance) -> str | None:
+        box = QMessageBox(self)
+        box.setWindowTitle("Connect")
+        box.setText(f"Connect to {instance.name} via:")
+        rdp_button = box.addButton("RDP", QMessageBox.ButtonRole.AcceptRole)
+        ssh_button = box.addButton("SSH", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is rdp_button:
+            return "rdp"
+        if clicked is ssh_button:
+            return "ssh"
+        return None
 
     def _open_bucket_browser(self, bucket: GcsBucket) -> None:
         browser = BucketBrowserWidget(bucket, get_credentials=gcp_auth.get_credentials)

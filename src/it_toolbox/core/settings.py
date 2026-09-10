@@ -152,6 +152,28 @@ def save_default_rdp_resolution(resolution: tuple[int, int] | None) -> None:
         path.write_text(f"{width}x{height}")
 
 
+def default_double_click_action_path() -> Path:
+    return data_dir() / "default_double_click_action.txt"
+
+
+def load_default_double_click_action() -> str:
+    """"rdp", "ssh", or "ask" (the default). Only consulted for a GCP
+    instance whose OS couldn't be inferred from its boot disk license (see
+    gcp_client.list_instances' os_hint) -- Manual connections already know
+    their own kind, and QEMU VMs always launch SPICE, so neither needs
+    this.
+    """
+    path = default_double_click_action_path()
+    if not path.is_file():
+        return "ask"
+    value = path.read_text().strip()
+    return value if value in ("rdp", "ssh", "ask") else "ask"
+
+
+def save_default_double_click_action(action: str) -> None:
+    default_double_click_action_path().write_text(action)
+
+
 def rclone_path_path() -> Path:
     return data_dir() / "rclone_path.txt"
 

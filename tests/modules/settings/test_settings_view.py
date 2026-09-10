@@ -25,6 +25,7 @@ def _make_view(
     platform_system="Linux",
     qemu_available=False,
     default_rdp_resolution=None,
+    default_double_click_action="ask",
     jumpcloud_key_configured=False,
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
@@ -39,6 +40,9 @@ def _make_view(
     monkeypatch.setattr(rclone_client, "rclone_executable", lambda: "/usr/bin/rclone")
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
+    monkeypatch.setattr(
+        settings, "load_default_double_click_action", lambda: default_double_click_action
+    )
     monkeypatch.setattr(
         settings, "jumpcloud_api_key_path", lambda: _FakePath(jumpcloud_key_configured)
     )
@@ -349,6 +353,30 @@ def test_changing_rdp_resolution_back_to_match_window_size_clears_it(qtbot, monk
     view._rdp_resolution_combo.setCurrentText("Match window size")
 
     assert saved == [None]
+
+
+def test_double_click_action_section_defaults_to_ask_each_time(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, default_double_click_action="ask")
+
+    assert view._double_click_action_combo.currentText() == "Ask each time"
+
+
+def test_double_click_action_section_preselects_the_saved_action(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, default_double_click_action="rdp")
+
+    assert view._double_click_action_combo.currentText() == "RDP"
+
+
+def test_changing_double_click_action_saves_it(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        settings, "save_default_double_click_action", lambda value: saved.append(value)
+    )
+
+    view._double_click_action_combo.setCurrentText("SSH")
+
+    assert saved == ["ssh"]
 
 
 def test_freerdp_section_not_applicable_off_windows(qtbot, monkeypatch):

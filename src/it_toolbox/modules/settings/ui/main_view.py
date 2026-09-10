@@ -52,6 +52,15 @@ RDP_RESOLUTION_PRESETS: list[tuple[str, tuple[int, int] | None]] = [
     ("3840 × 2160", (3840, 2160)),
 ]
 
+# (dropdown label, stored value) — see
+# settings.load_default_double_click_action()'s docstring for exactly
+# when this is consulted.
+DOUBLE_CLICK_ACTION_PRESETS: list[tuple[str, str]] = [
+    ("Ask each time", "ask"),
+    ("RDP", "rdp"),
+    ("SSH", "ssh"),
+]
+
 
 class SettingsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -72,6 +81,7 @@ class SettingsView(QWidget):
         self._content_layout.addWidget(self._build_jumpcloud_section())
         self._content_layout.addWidget(self._build_qemu_section())
         self._content_layout.addWidget(self._build_rdp_display_section())
+        self._content_layout.addWidget(self._build_double_click_action_section())
         self._content_layout.addWidget(self._build_freerdp_section())
         self._content_layout.addStretch(1)
         scroll_area.setWidget(content)
@@ -371,6 +381,41 @@ class SettingsView(QWidget):
     def _on_rdp_resolution_changed(self, index: int) -> None:
         _, resolution = RDP_RESOLUTION_PRESETS[index]
         settings.save_default_rdp_resolution(resolution)
+
+    # -- Double-click action --------------------------------------------------
+
+    def _build_double_click_action_section(self) -> QGroupBox:
+        box = QGroupBox("Double-Click Action")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Default connection type when double-clicking a GCP instance whose "
+            "OS couldn't be detected from its boot disk. Manual connections always "
+            "use their own configured type, and QEMU VMs always launch SPICE, so "
+            "neither is affected by this setting."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._double_click_action_combo = QComboBox()
+        for label, _ in DOUBLE_CLICK_ACTION_PRESETS:
+            self._double_click_action_combo.addItem(label)
+
+        current = settings.load_default_double_click_action()
+        for index, (_, value) in enumerate(DOUBLE_CLICK_ACTION_PRESETS):
+            if value == current:
+                self._double_click_action_combo.setCurrentIndex(index)
+                break
+
+        self._double_click_action_combo.currentIndexChanged.connect(
+            self._on_double_click_action_changed
+        )
+        layout.addWidget(self._double_click_action_combo)
+        return box
+
+    def _on_double_click_action_changed(self, index: int) -> None:
+        _, action = DOUBLE_CLICK_ACTION_PRESETS[index]
+        settings.save_default_double_click_action(action)
 
     # -- FreeRDP (Windows) ------------------------------------------------
 
