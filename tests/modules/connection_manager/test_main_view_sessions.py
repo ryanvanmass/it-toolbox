@@ -529,6 +529,45 @@ def test_resolve_double_click_kind_windows_os_hint_never_asks(qtbot, monkeypatch
     assert view._resolve_double_click_kind(instance) == "rdp"
 
 
+# -- Set Password: Windows-only (resetWindowsPassword 404s on Linux) --------
+
+
+def test_instance_supports_password_reset_is_true_for_windows(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_password_reset,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="windows"
+    )
+
+    assert _instance_supports_password_reset(instance) is True
+
+
+def test_instance_supports_password_reset_is_false_for_linux(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_password_reset,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+
+    assert _instance_supports_password_reset(instance) is False
+
+
+def test_instance_supports_password_reset_is_true_when_os_hint_unknown(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_password_reset,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint=None
+    )
+
+    assert _instance_supports_password_reset(instance) is True
+
+
 def test_double_clicking_a_gcp_instance_starts_a_session_with_resolved_kind(qtbot, monkeypatch):
     from it_toolbox.modules.connection_manager.ui.main_view import INSTANCE_ROLE
 

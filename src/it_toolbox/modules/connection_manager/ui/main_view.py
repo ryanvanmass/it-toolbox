@@ -95,6 +95,19 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
 
 
+def _instance_supports_password_reset(instance: Instance) -> bool:
+    """gcp_client.reset_windows_password() calls Compute Engine's
+    resetWindowsPassword API, which only exists for Windows instances —
+    it 404s against a Linux one. Gate the "Set Password…" menu item on
+    the same os_hint used to pick RDP/SSH defaults elsewhere
+    (_resolve_double_click_kind) rather than always offering an action
+    that's certain to fail for a known-Linux VM. An instance with no
+    os_hint (undetected) still gets the option, since we can't be sure
+    it doesn't apply.
+    """
+    return instance.os_hint != "linux"
+
+
 class ConnectionManagerView(QWidget):
     def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
         super().__init__(parent)
@@ -635,8 +648,10 @@ class ConnectionManagerView(QWidget):
         turn_on_action = menu.addAction("Turn On")
         turn_off_action = menu.addAction("Turn Off")
         force_shutdown_action = menu.addAction("Force Shutdown…")
-        menu.addSeparator()
-        set_password_action = menu.addAction("Set Password…")
+        set_password_action = None
+        if _instance_supports_password_reset(instance):
+            menu.addSeparator()
+            set_password_action = menu.addAction("Set Password…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
@@ -648,7 +663,7 @@ class ConnectionManagerView(QWidget):
             self._run_instance_power_action(instance, "stop")
         elif chosen is force_shutdown_action:
             self._run_instance_power_action(instance, "force_stop")
-        elif chosen is set_password_action:
+        elif set_password_action is not None and chosen is set_password_action:
             self._on_set_instance_password_clicked(instance)
 
     def _show_qemu_root_context_menu(self, pos) -> None:
