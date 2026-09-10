@@ -1111,6 +1111,44 @@ def test_connect_qemu_warns_instead_of_crashing_when_spice_unavailable(qtbot, mo
     assert view._active_sessions == {}
 
 
+def test_gcp_rdp_connect_warns_instead_of_crashing_when_freerdp_unavailable(qtbot, monkeypatch):
+    # Regression test: RdpWidget is None on any machine missing FreeRDP's
+    # native libraries (see the try/except import at the top of
+    # main_view.py). _start_session_from_instance must degrade to a clear
+    # warning, not crash trying to embed an RDP session that can't exist.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", None)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox, "warning", staticmethod(lambda *a: warnings.append(a))
+    )
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm", zone="us-central1-a", project_id="p1", status="RUNNING")
+
+    view._start_session_from_instance(instance, "rdp")
+
+    assert len(warnings) == 1
+    assert view._tabs.count() == 0
+
+
+def test_manual_rdp_connect_warns_instead_of_crashing_when_freerdp_unavailable(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", None)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox, "warning", staticmethod(lambda *a: warnings.append(a))
+    )
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=3389, kind="rdp")
+
+    view._start_session_from_manual_connection(connection)
+
+    assert len(warnings) == 1
+    assert view._tabs.count() == 0
+
+
 def test_qemu_power_action_calls_client_and_refreshes_vm_list(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 

@@ -1,8 +1,9 @@
 # Cutting a release
 
-it-toolbox is distributed as source (`pip install` from a git checkout) —
-there's no packaged build step yet. A "release" here is a version bump plus
-a GitHub Release, which exists so the app's Settings page (App Updates
+it-toolbox is distributed as source (`pip install` from a git checkout)
+on Windows/macOS, plus a `.deb`/`.rpm` on Linux (amd64 only — see
+"Linux packages" below). A "release" here is a version bump plus a
+GitHub Release, which exists so the app's Settings page (App Updates
 section) has something to compare the installed version against.
 
 ## Steps
@@ -24,9 +25,27 @@ section) has something to compare the installed version against.
    git push origin vX.Y.Z
    ```
 
-   Pushing the tag triggers `.github/workflows/release.yml`, which
-   publishes a GitHub Release for `vX.Y.Z` with auto-generated release
-   notes (from commits since the previous tag).
+   Pushing the tag triggers `.github/workflows/release.yml`, which builds
+   the Linux `.deb`/`.rpm` (via `.github/workflows/package-linux.yml`)
+   and publishes a GitHub Release for `vX.Y.Z` with auto-generated
+   release notes (from commits since the previous tag) plus those two
+   packages attached as downloadable assets.
+
+## Linux packages
+
+`packaging/linux/build.sh` builds both packages by vendoring a full venv
+(`pip install`'d packages, not a from-scratch Python interpreter — a
+system `python3 (>= 3.11)` is still a real dependency) at its actual
+final install path (`/usr/share/it-toolbox/venv`), then wraps it with
+[`fpm`](https://github.com/jordansissel/fpm) plus a `.desktop` entry and
+icon from `packaging/linux/`. It's runnable standalone (needs `python3`,
+`fpm`, and `rpm` on `PATH`, plus `sudo` — it writes to real `/usr/share`
+on the build host, which is fine on a CI runner or anything else you're
+treating as disposable for the build) — useful for iterating on the
+packaging itself without needing a real tag push;
+`.github/workflows/package-linux.yml` runs the exact same script and can
+be triggered manually (`workflow_dispatch`, no release side effect) to
+test changes in CI before they ever touch `release.yml`.
 
 ## Why the script doesn't push
 
