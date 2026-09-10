@@ -42,8 +42,18 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
-from it_toolbox.widgets.rdp_widget import RdpWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
+
+try:
+    # RdpWidget pulls in the FreeRDP native libraries at import time
+    # (core/rdp/freerdp_client.py's module-level _load() raises OSError if
+    # they aren't found) — importing it unconditionally here would crash
+    # the *entire app* at startup on any machine missing them, not just
+    # disable the RDP feature. GCP/SSH, Cloud Storage, QEMU/SPICE etc. all
+    # work fine without this; only "Connect via RDP" needs it.
+    from it_toolbox.widgets.rdp_widget import RdpWidget
+except (ImportError, OSError):
+    RdpWidget = None
 
 try:
     # SpiceWidget pulls in PyGObject/spice-glib (core/spice/spice_session_worker.py
@@ -53,9 +63,13 @@ try:
     # just disable the QEMU/SPICE feature. VM discovery/power actions
     # (qemu_client.py, pure subprocess/virsh) don't need this and stay
     # available regardless; only the actual "Connect via SPICE" action is
-    # gated on SpiceWidget being importable.
+    # gated on SpiceWidget being importable. ValueError (not just
+    # ImportError) is the realistic failure mode: PyGObject itself can be
+    # present while the spice-glib GObject-Introspection typelib specifically
+    # is missing, which surfaces as gi.require_version() raising ValueError,
+    # not an ImportError.
     from it_toolbox.widgets.spice_widget import SpiceWidget
-except ImportError:
+except (ImportError, ValueError):
     SpiceWidget = None
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
@@ -763,6 +777,15 @@ class ConnectionManagerView(QWidget):
         self._tabs.setCurrentIndex(index)
 
     def _start_session_from_instance(self, instance: Instance, kind: str) -> None:
+        if kind == "rdp" and RdpWidget is None:
+            QMessageBox.warning(
+                self,
+                "RDP unavailable",
+                "Embedded RDP needs FreeRDP's native libraries, which aren't available on "
+                "this machine — see docs/embedded-rdp-status.md.",
+            )
+            return
+
         username = settings.load_default_username()
         if username is None:
             username, ok = QInputDialog.getText(
@@ -1005,6 +1028,15 @@ class ConnectionManagerView(QWidget):
     # -- Connect: manually-configured RDP/SSH, direct (no tunnel) ---------
 
     def _start_session_from_manual_connection(self, connection: ManualConnection) -> None:
+        if connection.kind == "rdp" and RdpWidget is None:
+            QMessageBox.warning(
+                self,
+                "RDP unavailable",
+                "Embedded RDP needs FreeRDP's native libraries, which aren't available on "
+                "this machine — see docs/embedded-rdp-status.md.",
+            )
+            return
+
         username = connection.username or settings.load_default_username()
         if username is None:
             username, ok = QInputDialog.getText(
