@@ -31,6 +31,21 @@ section) has something to compare the installed version against.
    release notes (from commits since the previous tag) plus those two
    packages attached as downloadable assets.
 
+## Windows packages
+
+`packaging/windows/build.ps1` builds a Windows installer the same way
+`packaging/linux/build.sh` builds the `.deb`/`.rpm`: bundles Python's
+official "embeddable" distribution (not a frozen/PyInstaller-style
+binary — still a plain, unmodified interpreter) with it-toolbox and its
+dependencies `pip install`'d into it at build time, then wraps it with
+[Inno Setup](https://jrsoftware.org/isinfo.php) into a `setup.exe`.
+`.github/workflows/package-windows.yml` runs the exact same script, and
+can be triggered manually (`workflow_dispatch`, no release side effect)
+— **not yet wired into `release.yml`**, since none of this has been
+verified against a real Windows environment yet (this project's own dev
+work happens on Linux). Wire it in once a `workflow_dispatch` run has
+actually been inspected and the installer confirmed to work.
+
 ## Linux packages
 
 `packaging/linux/build.sh` builds both packages by vendoring a full venv
