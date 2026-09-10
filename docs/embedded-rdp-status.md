@@ -299,13 +299,25 @@ other signal source this widget listens to.
 copy is broadcast to every open session (not scoped to the focused tab) —
 no existing precedent in this codebase scopes clipboard by tab/focus.
 
-**Not yet verified against a live server** — this dev environment still
-has none available, same limitation as the first attempt. Whoever tests
-this: set the `WLOG_LEVEL=DEBUG` environment variable before launching —
-`cliprdr_main.c` already logs every step (capabilities exchange, format
-list send, format data request/response) at `WLOG_DEBUG`, so this
-surfaces exactly what's happening on the wire with no code changes, unlike
-the first attempt which had to guess blind.
+**Verified end-to-end against a real server** (2026-09-09, Windows Server
+2025, provided by the user for exactly this test): connected via the
+`core/rdp/freerdp_client.py` CLI layer directly (`WLOG_LEVEL=DEBUG` set),
+drove the session with synthetic input to open Notepad, called
+`announce_clipboard_text("hello from it-toolbox clipboard test")`, then
+sent a Ctrl+V keystroke into the remote session. The full protocol
+round trip fired exactly as designed:
+`cliprdr_process_format_data_request: ServerFormatDataRequest (0x0000000d
+[CF_UNICODETEXT])` → our `ClientFormatDataResponse` → `cliprdr_packet_send:
+Cliprdr Sending (82 bytes)` (37 characters, UTF-16LE + null terminator +
+the 6-byte header — the exact expected size) — and a captured frame
+confirmed the text actually appeared in Notepad, character-for-character.
+This is precisely the step that never fired in the first attempt
+(`ServerFormatDataRequest` never arriving after `ClientFormatList`) — the
+three fixes above (explicit channel load, the two settings, and sending
+`ClientCapabilities` with `CB_USE_LONG_FORMAT_NAMES` before the format
+list) resolved it. Multi-tab clipboard scoping (see above) and
+remote→local are still unverified/out of scope, but local→remote text is
+now confirmed working, not just protocol-plausible.
 
 ### First attempt — reverted, kept for history
 
@@ -499,9 +511,9 @@ instead of producing a negative or out-of-range remote coordinate.
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
-- Clipboard sync, local→remote text (see above) — implemented on
-  `feature/rdp-clipboard-local-to-remote`, not yet verified against a live
-  server. Remote→local (and non-text formats/files) still out of scope.
+- Clipboard sync, local→remote text (see above) — implemented and verified
+  end-to-end against a real server on `feature/rdp-clipboard-local-to-remote`.
+  Remote→local (and non-text formats/files) still out of scope.
 - Everything verified so far has been manual smoke-testing (the CLI
   harness and throwaway Qt scripts), not automated tests — there's
   still no pytest coverage for `core/rdp/` itself (only the
