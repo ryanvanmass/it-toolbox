@@ -11,7 +11,7 @@ import sys
 import threading
 
 import pyte
-from PySide6.QtCore import QSocketNotifier, Qt, Signal
+from PySide6.QtCore import QEvent, QSocketNotifier, Qt, Signal
 from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
@@ -150,6 +150,19 @@ class TerminalWidget(QPlainTextEdit):
         self.setExtraSelections([selection])
 
     # -- writing keystrokes ------------------------------------------------
+
+    def event(self, e) -> bool:  # noqa: N802 - Qt override signature
+        # Same fix as RdpWidget/SpiceWidget's own event() override --
+        # QWidget's default focus-traversal intercepts Key_Tab/Key_Backtab
+        # at this level, before keyPressEvent() ever runs, so shell
+        # tab-completion silently never reached the pty: Tab just moved
+        # Qt focus to whatever widget was next in line instead. Forward
+        # these directly and report the event as handled so that
+        # focus-traversal never runs.
+        if e.type() == QEvent.Type.KeyPress and e.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(e)
+            return True
+        return super().event(e)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
