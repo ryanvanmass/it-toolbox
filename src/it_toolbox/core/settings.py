@@ -236,6 +236,52 @@ def resolve_jumpcloud_ssh_key_path() -> Path | None:
     return load_jumpcloud_ssh_key_path() or default_ssh_key_path()
 
 
+def gcp_ssh_key_path_path() -> Path:
+    return data_dir() / "gcp_ssh_key_path.txt"
+
+
+def load_gcp_ssh_key_path() -> Path | None:
+    """An explicit SSH key configured to prefill GCP's "Upload Public
+    Key…" instance action (connection_manager/ui/main_view.py) with. Can
+    point at either a private key or its matching .pub file --
+    resolve_gcp_ssh_public_key() normalizes either. None means fall back
+    to default_ssh_key_path()'s ~/.ssh/id_ed25519 / id_rsa search, same
+    as JumpCloud's own SSH key setting does.
+    """
+    path = gcp_ssh_key_path_path()
+    if not path.is_file():
+        return None
+    text = path.read_text().strip()
+    return Path(text) if text else None
+
+
+def save_gcp_ssh_key_path(ssh_key_path: str | None) -> None:
+    path = gcp_ssh_key_path_path()
+    if ssh_key_path and ssh_key_path.strip():
+        path.write_text(ssh_key_path.strip())
+    else:
+        path.unlink(missing_ok=True)
+
+
+def resolve_gcp_ssh_public_key() -> str | None:
+    """The public key text to prefill in GCP's Upload Public Key action --
+    from the explicitly configured path above, falling back to the same
+    ~/.ssh/id_ed25519 / id_rsa default JumpCloud's own SSH key setting
+    falls back to. Accepts either a private key path or its .pub file
+    directly. None if nothing resolves or the matching .pub file doesn't
+    exist (e.g. a private key with no sibling .pub file).
+    """
+    key_path = load_gcp_ssh_key_path() or default_ssh_key_path()
+    if key_path is None:
+        return None
+    public_key_path = (
+        key_path if key_path.suffix == ".pub" else key_path.parent / f"{key_path.name}.pub"
+    )
+    if not public_key_path.is_file():
+        return None
+    return public_key_path.read_text().strip() or None
+
+
 def jumpcloud_api_key_path() -> Path:
     return data_dir() / "jumpcloud_api_key.age"
 

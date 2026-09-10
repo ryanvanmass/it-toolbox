@@ -202,6 +202,63 @@ def test_default_ssh_key_path_none_when_neither_exists(monkeypatch, tmp_path):
     assert settings.default_ssh_key_path() is None
 
 
+def test_gcp_ssh_key_path_override_round_trips(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_gcp_ssh_key_path() is None
+
+    settings.save_gcp_ssh_key_path(str(tmp_path / "custom_key"))
+    assert settings.load_gcp_ssh_key_path() == tmp_path / "custom_key"
+
+    settings.save_gcp_ssh_key_path(None)
+    assert settings.load_gcp_ssh_key_path() is None
+
+
+def test_resolve_gcp_ssh_public_key_uses_explicit_override(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, name="custom_key")
+    settings.save_gcp_ssh_key_path(str(key_path))
+
+    public_key = settings.resolve_gcp_ssh_public_key()
+
+    assert public_key == (tmp_path / "custom_key.pub").read_text().strip()
+
+
+def test_resolve_gcp_ssh_public_key_accepts_a_pub_file_directly(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    _write_ssh_keypair(tmp_path, name="custom_key")
+    settings.save_gcp_ssh_key_path(str(tmp_path / "custom_key.pub"))
+
+    public_key = settings.resolve_gcp_ssh_public_key()
+
+    assert public_key == (tmp_path / "custom_key.pub").read_text().strip()
+
+
+def test_resolve_gcp_ssh_public_key_falls_back_to_default_ssh_key_path(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, name="id_ed25519")
+    monkeypatch.setattr(settings, "default_ssh_key_path", lambda: key_path)
+
+    public_key = settings.resolve_gcp_ssh_public_key()
+
+    assert public_key == (tmp_path / "id_ed25519.pub").read_text().strip()
+
+
+def test_resolve_gcp_ssh_public_key_is_none_when_nothing_resolves(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "default_ssh_key_path", lambda: None)
+
+    assert settings.resolve_gcp_ssh_public_key() is None
+
+
+def test_resolve_gcp_ssh_public_key_is_none_when_pub_file_missing(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    private_only = tmp_path / "no_pub_key"
+    private_only.write_text("not a real key, just needs to exist")
+    settings.save_gcp_ssh_key_path(str(private_only))
+
+    assert settings.resolve_gcp_ssh_public_key() is None
+
+
 def test_default_rdp_resolution_is_none_when_never_set(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     assert settings.load_default_rdp_resolution() is None

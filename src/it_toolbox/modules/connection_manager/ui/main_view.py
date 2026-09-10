@@ -95,6 +95,31 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
 
 
+def _instance_supports_password_reset(instance: Instance) -> bool:
+    """gcp_client.reset_windows_password() calls Compute Engine's
+    resetWindowsPassword API, which only exists for Windows instances —
+    it 404s against a Linux one. Gate the "Set Password…" menu item on
+    the same os_hint used to pick RDP/SSH defaults elsewhere
+    (_resolve_double_click_kind) rather than always offering an action
+    that's certain to fail for a known-Linux VM. An instance with no
+    os_hint (undetected) still gets the option, since we can't be sure
+    it doesn't apply.
+    """
+    return instance.os_hint != "linux"
+
+
+def _instance_supports_ssh_key_upload(instance: Instance) -> bool:
+    """The Linux counterpart to _instance_supports_password_reset — GCP's
+    Linux images have SSH password auth disabled by default, so access is
+    granted via an SSH public key in instance metadata instead (see
+    gcp_client.add_ssh_key), not a password. Gate "Upload Public Key…" on
+    the same os_hint, the mirror image of the password-reset gate; an
+    unknown os_hint gets both options, since we can't be sure which
+    applies.
+    """
+    return instance.os_hint != "windows"
+
+
 class ConnectionManagerView(QWidget):
     def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
         super().__init__(parent)
@@ -108,6 +133,16 @@ class ConnectionManagerView(QWidget):
         # modules (see ConnectionManagerModule / MainWindow).
         self._owned_tab_widgets: set[QWidget] = set()
         self._next_session_id = 1
+        # Remembers the account an "Upload Public Key…" grant was made
+        # for, per instance — see _on_ssh_key_uploaded. An instance often
+        # has no access at all under the global default username, so a
+        # subsequent SSH connection should use the account we just
+        # actually granted access to instead of silently trying (and
+        # failing under) the unrelated default. Session-only: re-derived
+        # from a fresh upload each run rather than persisted, since it's
+        # just a connect-time convenience, not a record of what's really
+        # on the instance (which GCP itself already tracks).
+        self._instance_ssh_username_overrides: dict[tuple[str, str, str], str] = {}
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
@@ -635,8 +670,16 @@ class ConnectionManagerView(QWidget):
         turn_on_action = menu.addAction("Turn On")
         turn_off_action = menu.addAction("Turn Off")
         force_shutdown_action = menu.addAction("Force Shutdown…")
-        menu.addSeparator()
-        set_password_action = menu.addAction("Set Password…")
+        show_password_reset = _instance_supports_password_reset(instance)
+        show_key_upload = _instance_supports_ssh_key_upload(instance)
+        set_password_action = None
+        upload_key_action = None
+        if show_password_reset or show_key_upload:
+            menu.addSeparator()
+            if show_password_reset:
+                set_password_action = menu.addAction("Set Password…")
+            if show_key_upload:
+                upload_key_action = menu.addAction("Upload Public Key…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
@@ -648,8 +691,10 @@ class ConnectionManagerView(QWidget):
             self._run_instance_power_action(instance, "stop")
         elif chosen is force_shutdown_action:
             self._run_instance_power_action(instance, "force_stop")
-        elif chosen is set_password_action:
+        elif set_password_action is not None and chosen is set_password_action:
             self._on_set_instance_password_clicked(instance)
+        elif upload_key_action is not None and chosen is upload_key_action:
+            self._on_upload_ssh_key_clicked(instance)
 
     def _show_qemu_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -786,7 +831,13 @@ class ConnectionManagerView(QWidget):
             )
             return
 
-        username = settings.load_default_username()
+        username = None
+        if kind == "ssh":
+            username = self._instance_ssh_username_overrides.get(
+                (instance.project_id, instance.zone, instance.name)
+            )
+        if username is None:
+            username = settings.load_default_username()
         if username is None:
             username, ok = QInputDialog.getText(
                 self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
@@ -913,6 +964,65 @@ class ConnectionManagerView(QWidget):
 
     def _on_instance_action_error(self, error: Exception) -> None:
         QMessageBox.warning(self, "Instance action failed", str(error))
+
+    def _on_upload_ssh_key_clicked(self, instance: Instance) -> None:
+        # Same "ask, don't silently pick one" reasoning as Set Password's
+        # username prompt above.
+        username, ok = QInputDialog.getText(
+            self,
+            "Upload Public Key",
+            f"Username to grant SSH access as on {instance.name}:",
+            QLineEdit.EchoMode.Normal,
+            settings.load_default_username() or "",
+        )
+        if not ok or not username.strip():
+            return
+        username = username.strip()
+
+        # Pre-filled from the Settings-configured default (or the same
+        # ~/.ssh/id_ed25519 / id_rsa discovery JumpCloud's own SSH key
+        # setting falls back to) so the common case needs no manual
+        # pasting — still editable/clearable for a one-off different key.
+        public_key, ok = QInputDialog.getText(
+            self,
+            "Upload Public Key",
+            f"Public key to authorize for {username}@{instance.name}:",
+            QLineEdit.EchoMode.Normal,
+            settings.resolve_gcp_ssh_public_key() or "",
+        )
+        if not ok or not public_key.strip():
+            return
+        public_key = public_key.strip()
+
+        async_utils.run_in_background(
+            lambda: gcp_client.add_ssh_key(
+                gcp_auth.get_credentials(),
+                instance.project_id,
+                instance.zone,
+                instance.name,
+                username,
+                public_key,
+            ),
+            on_result=lambda _: self._on_ssh_key_uploaded(instance, username),
+            on_error=self._on_instance_action_error,
+        )
+
+    def _on_ssh_key_uploaded(self, instance: Instance, username: str) -> None:
+        # If this granted access under a different account than the global
+        # default, a subsequent "Connect via SSH" should use *this*
+        # account -- the default may well have no access on this instance
+        # at all, which is the whole reason a different username was
+        # entered above. See _start_session_from_instance's lookup.
+        if username != settings.load_default_username():
+            self._instance_ssh_username_overrides[
+                (instance.project_id, instance.zone, instance.name)
+            ] = username
+        QMessageBox.information(
+            self,
+            "Public Key Uploaded",
+            f"Granted SSH access to {instance.name} as {username}. It can take up to a "
+            "minute for the guest agent to apply it before connecting will work.",
+        )
 
     # -- Connect: tunnel, then embed SSH or launch external RDP ---------------
 
