@@ -85,7 +85,7 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     captured = {}
 
     class _CapturingWorker(_FakeWorker):
-        def __init__(self, host, port, username, password, domain="", desktop_size=None):
+        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None):
             super().__init__()
             captured["desktop_size"] = desktop_size
 
@@ -95,6 +95,42 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     qtbot.addWidget(widget)
 
     assert captured["desktop_size"] == (1920, 1080)
+
+
+def test_keyboard_layout_is_passed_to_the_worker(qtbot, monkeypatch):
+    captured = {}
+
+    class _CapturingWorker(_FakeWorker):
+        def __init__(
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+        ):
+            super().__init__()
+            captured["keyboard_layout"] = keyboard_layout
+
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _CapturingWorker)
+
+    widget = RdpWidget("host", 3389, "user", "pass", keyboard_layout=0x040C)
+    qtbot.addWidget(widget)
+
+    assert captured["keyboard_layout"] == 0x040C
+
+
+def test_keyboard_layout_defaults_to_english_us(qtbot, monkeypatch):
+    captured = {}
+
+    class _CapturingWorker(_FakeWorker):
+        def __init__(
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+        ):
+            super().__init__()
+            captured["keyboard_layout"] = keyboard_layout
+
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _CapturingWorker)
+
+    widget = RdpWidget("host", 3389, "user", "pass")
+    qtbot.addWidget(widget)
+
+    assert captured["keyboard_layout"] == 0x0409
 
 
 def test_resizing_with_a_fixed_desktop_size_does_not_request_a_resize(qtbot, fixed_resolution_rdp_widget):

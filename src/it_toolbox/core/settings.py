@@ -192,6 +192,37 @@ def save_default_rdp_resolution(resolution: tuple[int, int] | None) -> None:
         path.write_text(f"{width}x{height}")
 
 
+def rdp_keyboard_layout_path() -> Path:
+    return data_dir() / "rdp_keyboard_layout.txt"
+
+
+def load_rdp_keyboard_layout() -> int:
+    """The Windows keyboard layout ID declared to the RDP server for
+    embedded RDP sessions -- see core/rdp/freerdp_client.py's
+    KEYBOARD_LAYOUT_ENGLISH_US for why this must be declared at all
+    (left unset, Shift+punctuation like `"`/`:` silently breaks). Defaults
+    to English (US) (0x0409), matching that constant, but the *server*
+    must actually have the declared layout installed to interpret
+    scancodes with it -- a non-English-language Windows image may not
+    have English (US) installed, reproducing the exact same symptom
+    despite a validly-declared layout, and needs a different one picked
+    here instead. Not core/rdp/freerdp_client.py's own default directly
+    -- this module must stay importable without FreeRDP's native
+    libraries present (that module loads them at import time).
+    """
+    path = rdp_keyboard_layout_path()
+    if not path.is_file():
+        return 0x0409
+    try:
+        return int(path.read_text().strip(), 0)
+    except ValueError:
+        return 0x0409
+
+
+def save_rdp_keyboard_layout(layout: int) -> None:
+    rdp_keyboard_layout_path().write_text(hex(layout))
+
+
 def default_double_click_action_path() -> Path:
     return data_dir() / "default_double_click_action.txt"
 

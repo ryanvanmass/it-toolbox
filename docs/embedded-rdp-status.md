@@ -549,6 +549,25 @@ characters — turned out to be two independent bugs:
    live server — the actual fix for real Shift+punctuation typing still
    needs to be confirmed against one.
 
+## Keyboard layout is now a Settings override (2026-09-10)
+
+The hardcoded `KeyboardLayout = 0x0409` (English (US)) fix above was
+confirmed live against the original VM, but a second VM hit the exact
+same Shift+punctuation symptom despite it — the declared layout is only
+useful if the *server* actually has it installed, and a non-English-
+language Windows image may simply not have English (US) available.
+There's no way for the client to know what's installed on an arbitrary
+target server ahead of time, so this can't be auto-detected/fixed once
+and for all the way the original bug could.
+
+Made it a Settings option instead (`settings.load_rdp_keyboard_layout`,
+default unchanged at English (US)/`0x0409`), threaded through
+`RdpWidget` -> `RdpSessionWorker` -> `FreeRdpSession.connect` ->
+`_configure_settings`, the identical shape `desktop_size` already uses.
+A "RDP Keyboard Layout" section (10 common-layout presets) lets a user
+hitting this on a specific VM pick the layout that's actually installed
+there instead.
+
 ## What's still open
 
 - Confirm the keyboard-layout fix above actually resolves Shift+punctuation

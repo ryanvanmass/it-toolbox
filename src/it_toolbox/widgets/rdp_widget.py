@@ -18,6 +18,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QWidget
 
+from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
 
@@ -46,6 +47,7 @@ class RdpWidget(QWidget):
         password: str,
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
+        keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -78,7 +80,9 @@ class RdpWidget(QWidget):
         self._resize_debounce.setInterval(250)
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
-        self._worker = RdpSessionWorker(host, port, username, password, domain, desktop_size)
+        self._worker = RdpSessionWorker(
+            host, port, username, password, domain, desktop_size, keyboard_layout
+        )
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
         self._worker.signals.error.connect(self._on_error)
