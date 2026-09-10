@@ -30,7 +30,12 @@ dev = [
     "pytest-qt",
 ]
 
-[project.scripts]
+[project.gui-scripts]
+# gui-scripts (not scripts) so pip generates a GUI-subsystem launcher on
+# Windows -- a console one would flash/show a console window behind the
+# actual Qt GUI. No effect on Linux/macOS, where console_scripts and
+# gui_scripts produce identical plain shebang wrapper scripts (the
+# subsystem distinction is Windows-only).
 it-toolbox = "it_toolbox.__main__:main"
 
 [tool.setuptools.packages.find]
