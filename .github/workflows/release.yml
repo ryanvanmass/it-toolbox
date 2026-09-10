@@ -9,12 +9,24 @@ permissions:
   contents: write
 
 jobs:
+  package-linux:
+    uses: ./.github/workflows/package-linux.yml
+
   release:
+    needs: package-linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/packages
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          files: |
+            dist/packages/*.deb
+            dist/packages/*.rpm
