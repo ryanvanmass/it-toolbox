@@ -227,3 +227,22 @@ def test_default_rdp_resolution_ignores_a_malformed_file(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     settings.default_rdp_resolution_path().write_text("not-a-resolution")
     assert settings.load_default_rdp_resolution() is None
+
+
+def test_default_double_click_action_is_ask_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_default_double_click_action() == "ask"
+
+
+def test_save_and_load_default_double_click_action(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_default_double_click_action("rdp")
+    assert settings.load_default_double_click_action() == "rdp"
+    settings.save_default_double_click_action("ssh")
+    assert settings.load_default_double_click_action() == "ssh"
+
+
+def test_default_double_click_action_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.default_double_click_action_path().write_text("not-a-real-action")
+    assert settings.load_default_double_click_action() == "ask"

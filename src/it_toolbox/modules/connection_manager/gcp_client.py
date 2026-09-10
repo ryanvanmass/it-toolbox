@@ -80,6 +80,24 @@ def list_projects(credentials: Credentials) -> list[GcpProject]:
     return sorted(projects, key=lambda p: p.display_name.lower())
 
 
+def _os_hint_from_disks(disks: list[dict]) -> str | None:
+    """Best-effort Windows-vs-Linux guess from the boot disk's license URLs
+    (e.g. ".../licenses/windows-server-2022-dc") -- the Compute Engine API
+    has no plain "OS" field on an instance, but every real image carries
+    at least one license entry, and Windows images are unambiguous by
+    name. None means inconclusive (no boot disk found, or no license
+    entries at all) -- callers fall back to a user-configured default in
+    that case rather than guessing further.
+    """
+    boot_disk = next((d for d in disks if d.get("boot")), None)
+    if boot_disk is None:
+        return None
+    licenses = boot_disk.get("licenses", [])
+    if any("windows" in lic.lower() for lic in licenses):
+        return "windows"
+    return "linux" if licenses else None
+
+
 def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
     instances: list[Instance] = []
     page_token = None
@@ -109,6 +127,7 @@ def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
                         project_id=project_id,
                         status=instance.get("status", "UNKNOWN"),
                         network_interface=network_interface,
+                        os_hint=_os_hint_from_disks(instance.get("disks", [])),
                     )
                 )
         page_token = data.get("nextPageToken")

@@ -93,6 +93,98 @@ def test_start_instance_raises_on_http_error(monkeypatch):
         pass
 
 
+def _aggregated_list_response(instance_overrides):
+    instance = {
+        "name": "my-vm",
+        "status": "RUNNING",
+        "networkInterfaces": [{"name": "nic0"}],
+    }
+    instance.update(instance_overrides)
+    return _FakeResponse(
+        json_data={"items": {"zones/us-central1-a": {"instances": [instance]}}}
+    )
+
+
+def test_list_instances_detects_windows_from_boot_disk_license(monkeypatch):
+    response = _aggregated_list_response(
+        {
+            "disks": [
+                {
+                    "boot": True,
+                    "licenses": [
+                        "https://www.googleapis.com/compute/v1/projects/windows-cloud/"
+                        "global/licenses/windows-server-2022-dc"
+                    ],
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(gcp_client.requests, "get", lambda *a, **k: response)
+
+    (instance,) = gcp_client.list_instances(_FakeCredentials(), "proj")
+
+    assert instance.os_hint == "windows"
+
+
+def test_list_instances_detects_linux_from_boot_disk_license(monkeypatch):
+    response = _aggregated_list_response(
+        {
+            "disks": [
+                {
+                    "boot": True,
+                    "licenses": [
+                        "https://www.googleapis.com/compute/v1/projects/debian-cloud/"
+                        "global/licenses/debian-11-bullseye"
+                    ],
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(gcp_client.requests, "get", lambda *a, **k: response)
+
+    (instance,) = gcp_client.list_instances(_FakeCredentials(), "proj")
+
+    assert instance.os_hint == "linux"
+
+
+def test_list_instances_os_hint_none_when_no_boot_disk(monkeypatch):
+    response = _aggregated_list_response({"disks": [{"boot": False, "licenses": ["x"]}]})
+    monkeypatch.setattr(gcp_client.requests, "get", lambda *a, **k: response)
+
+    (instance,) = gcp_client.list_instances(_FakeCredentials(), "proj")
+
+    assert instance.os_hint is None
+
+
+def test_list_instances_os_hint_none_when_no_disks(monkeypatch):
+    response = _aggregated_list_response({})
+    monkeypatch.setattr(gcp_client.requests, "get", lambda *a, **k: response)
+
+    (instance,) = gcp_client.list_instances(_FakeCredentials(), "proj")
+
+    assert instance.os_hint is None
+
+
+def test_os_hint_from_disks_directly():
+    assert gcp_client._os_hint_from_disks([]) is None
+    assert gcp_client._os_hint_from_disks([{"boot": True, "licenses": []}]) is None
+    assert (
+        gcp_client._os_hint_from_disks([{"boot": True, "licenses": [".../windows-11-dc"]}])
+        == "windows"
+    )
+    assert (
+        gcp_client._os_hint_from_disks([{"boot": True, "licenses": [".../ubuntu-2204-lts"]}])
+        == "linux"
+    )
+    # A non-boot disk is ignored even if it has licenses.
+    assert (
+        gcp_client._os_hint_from_disks(
+            [{"boot": False, "licenses": [".../windows-11-dc"]}, {"boot": True, "licenses": []}]
+        )
+        is None
+    )
+
+
 def test_reset_windows_password_returns_username_and_password(monkeypatch):
     calls = []
 
