@@ -283,35 +283,19 @@ class RdpWidget(QWidget):
     def _forward_key_event(self, event, down: bool) -> None:
         key = Qt.Key(event.key())
         modifiers = event.modifiers()
-        text = event.text()
 
-        # Root cause, found from a live repro: Shift+symbol (e.g. Shift+;
-        # -> ":") typed correctly into a GUI text field within the RDP
-        # session, but not into a PowerShell/console prompt in that same
-        # session -- a real, specific Windows behavior, not a bug that
-        # would show up identically everywhere. GUI text controls get
-        # their character from WM_CHAR, already translated upstream; a
-        # console app resolves the raw Shift+scancode pair itself via its
-        # own (evidently less forgiving) low-level keyboard-state
-        # translation. Sending the already-resolved Unicode character
-        # instead sidesteps that translation on the server entirely --
-        # exactly what scancodes.py's own module docstring already
-        # documents this path for ("works correctly across keyboard
-        # layouts"), except every printable key previously had a
-        # SCANCODES entry, so this path was never actually reached for
-        # ordinary typing. Ctrl/Alt are excluded here (checked, not just
-        # inferred from empty event.text()) because those combos are
-        # shortcuts a console/app needs the real key, not a character --
-        # Ctrl+C for SIGINT is the obvious one that would otherwise break.
-        is_shortcut_combo = bool(
-            modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
-        )
-        if text and not is_shortcut_combo and all(char.isprintable() for char in text):
-            for char in text:
-                logger.debug("key %s modifiers=%s -> unicode=%r down=%s", key, modifiers, char, down)
-                self._worker.send_key_unicode(ord(char), down)
-            return
-
+        # REVERTED: routing printable keys through send_key_unicode (RDP's
+        # "Unicode" keyboard input, which Windows synthesizes as a
+        # VK_PACKET key event) broke typing in PowerShell/cmd *entirely* --
+        # not just Shift+symbol. Windows console input is built around real
+        # scancode events; VK_PACKET is a documented weak spot for raw
+        # console input specifically (unlike GUI controls, which handle it
+        # fine via WM_CHAR). So scancode has to stay the primary path for
+        # everything with a SCANCODES entry, unicode only as the true
+        # fallback for characters with no dedicated Qt key constant at all
+        # -- back to this file's original shape. The actual Shift+symbol-
+        # in-console bug (confirmed real, and still open) needs a different
+        # fix than swapping the transport.
         scancode = SCANCODES.get(key)
         if scancode is not None:
             code, extended = scancode
@@ -320,3 +304,11 @@ class RdpWidget(QWidget):
                 key, modifiers, code, extended, down,
             )
             self._worker.send_key_scancode(code, extended, down)
+            return
+        text = event.text()
+        for char in text:
+            if char.isprintable():
+                logger.debug(
+                    "key %s modifiers=%s -> unicode=%r down=%s", key, modifiers, char, down
+                )
+                self._worker.send_key_unicode(ord(char), down)

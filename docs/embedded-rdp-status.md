@@ -588,28 +588,34 @@ translation, reading each key as a separate synthetic event -- and is
 evidently less forgiving about it than the WM_CHAR path GUI controls
 already get for free.
 
-`scancodes.py`'s own module docstring already said the fix: "[Unicode
-input] sidesteps scancode/shift mapping entirely and works correctly
-across keyboard layouts" -- but no printable character ever actually
-used that path, because every one (letters, digits, punctuation) had
-its own `SCANCODES` entry, so `_forward_key_event` always took the
-scancode branch first. Restructured it to prefer sending the
-already-resolved Unicode character for any printable key with no
-Ctrl/Alt held (Ctrl/Alt excluded on purpose -- those are shortcuts like
-Ctrl+C for SIGINT, not literal text, and still need the real scancode
-for a console/app to recognize them as one); scancode is now only used
-for non-printable/control keys (arrows, Enter, Tab, function keys, ...)
-and Ctrl/Alt-modified combos. `SpiceWidget` is unaffected -- its own
-docstring already documents that SPICE's InputsChannel has no
-equivalent Unicode fast path to fall back to.
+`scancodes.py`'s own module docstring already said one possible fix:
+"[Unicode input] sidesteps scancode/shift mapping entirely and works
+correctly across keyboard layouts" -- but no printable character ever
+actually used that path, because every one (letters, digits,
+punctuation) had its own `SCANCODES` entry, so `_forward_key_event`
+always took the scancode branch first. **Tried and reverted**:
+restructured it to prefer sending the already-resolved Unicode
+character for any printable key with no Ctrl/Alt held. Live-tested
+result: this broke typing in PowerShell/cmd *entirely*, not just
+Shift+symbol -- RDP's Unicode keyboard input synthesizes a Windows
+`VK_PACKET` key event, and raw console input (unlike GUI controls,
+which handle it fine via `WM_CHAR`) is a documented weak spot for
+`VK_PACKET`-based synthetic keystrokes; it isn't reliably recognized
+as a real keystroke at all there. So scancode has to stay the primary
+path for anything with a `SCANCODES` entry -- back to this file's
+original shape, Shift+symbol-in-console bug included and still
+unresolved. The real fix needs to stay within scancode-based input,
+not swap the transport.
 
 ## What's still open
 
-- Confirm the Shift+symbol-in-console fix above against the actual
-  reporting VM's PowerShell prompt -- reasoned from Windows' documented
-  WM_CHAR vs. raw-console-input behavior and this app's own prior
-  Unicode-path docstring, not verified live (can't be, from this
-  sandbox).
+- **The actual Shift+symbol-in-console bug is still open.** Confirmed
+  real (GUI textbox works, PowerShell/cmd in the same session doesn't,
+  `mstsc` against the same VM works, declared layout already matches
+  the VM's own) and confirmed NOT fixable by switching to Unicode
+  input (see above -- that broke console typing entirely instead).
+  Needs a fix that keeps scancode+Shift as the transport; not yet
+  identified.
 - The keyboard-layout Settings override (previous section) turned out
   not to be what actually needed fixing for this specific report, but
   is still worth keeping for a case where a target VM's declared
