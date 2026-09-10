@@ -282,25 +282,41 @@ class RdpWidget(QWidget):
 
     def _forward_key_event(self, event, down: bool) -> None:
         key = Qt.Key(event.key())
+        modifiers = event.modifiers()
+        text = event.text()
+
+        # Root cause, found from a live repro: Shift+symbol (e.g. Shift+;
+        # -> ":") typed correctly into a GUI text field within the RDP
+        # session, but not into a PowerShell/console prompt in that same
+        # session -- a real, specific Windows behavior, not a bug that
+        # would show up identically everywhere. GUI text controls get
+        # their character from WM_CHAR, already translated upstream; a
+        # console app resolves the raw Shift+scancode pair itself via its
+        # own (evidently less forgiving) low-level keyboard-state
+        # translation. Sending the already-resolved Unicode character
+        # instead sidesteps that translation on the server entirely --
+        # exactly what scancodes.py's own module docstring already
+        # documents this path for ("works correctly across keyboard
+        # layouts"), except every printable key previously had a
+        # SCANCODES entry, so this path was never actually reached for
+        # ordinary typing. Ctrl/Alt are excluded here (checked, not just
+        # inferred from empty event.text()) because those combos are
+        # shortcuts a console/app needs the real key, not a character --
+        # Ctrl+C for SIGINT is the obvious one that would otherwise break.
+        is_shortcut_combo = bool(
+            modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+        )
+        if text and not is_shortcut_combo and all(char.isprintable() for char in text):
+            for char in text:
+                logger.debug("key %s modifiers=%s -> unicode=%r down=%s", key, modifiers, char, down)
+                self._worker.send_key_unicode(ord(char), down)
+            return
+
         scancode = SCANCODES.get(key)
         if scancode is not None:
             code, extended = scancode
-            # DEBUG-only, off by default (see __main__.py's IT_TOOLBOX_LOG_LEVEL) --
-            # a live report of Shift+symbol producing the wrong character on one
-            # specific VM (but not with mstsc against the same VM, and not with
-            # this same client against a different VM) couldn't be chased further
-            # without seeing the actual key/modifier/scancode sequence as it's
-            # computed, since none of that is visible from outside this method.
             logger.debug(
                 "key %s modifiers=%s -> scancode=0x%02X extended=%s down=%s",
-                key, event.modifiers(), code, extended, down,
+                key, modifiers, code, extended, down,
             )
             self._worker.send_key_scancode(code, extended, down)
-            return
-        text = event.text()
-        for char in text:
-            if char.isprintable():
-                logger.debug(
-                    "key %s modifiers=%s -> unicode=%r down=%s", key, event.modifiers(), char, down
-                )
-                self._worker.send_key_unicode(ord(char), down)

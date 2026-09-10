@@ -568,11 +568,52 @@ A "RDP Keyboard Layout" section (10 common-layout presets) lets a user
 hitting this on a specific VM pick the layout that's actually installed
 there instead.
 
+## Shift+symbol in console apps: scancode+Shift vs Unicode input (2026-09-10)
+
+Live investigation of the "second VM" report above ruled out a layout
+mismatch entirely: the declared layout (English (US)) matched the VM's
+own Windows language settings exactly, and Windows' own Remote Desktop
+Connection (`mstsc`) typed Shift+symbol correctly against the very same
+VM. So it was a bug in this client specifically, not a server-config
+issue -- but every character/scancode/modifier looked individually
+correct, which didn't fit until one more fact came in: **it worked when
+typed into a GUI text field within the RDP session, but not into a
+PowerShell/console prompt in that same session.**
+
+That's the real signature. A GUI text control gets an already-resolved
+character via `WM_CHAR` -- generated upstream in Windows' input
+pipeline. A console app (PowerShell, cmd) instead resolves the raw
+Shift+scancode pair itself, via its own lower-level keyboard-state
+translation, reading each key as a separate synthetic event -- and is
+evidently less forgiving about it than the WM_CHAR path GUI controls
+already get for free.
+
+`scancodes.py`'s own module docstring already said the fix: "[Unicode
+input] sidesteps scancode/shift mapping entirely and works correctly
+across keyboard layouts" -- but no printable character ever actually
+used that path, because every one (letters, digits, punctuation) had
+its own `SCANCODES` entry, so `_forward_key_event` always took the
+scancode branch first. Restructured it to prefer sending the
+already-resolved Unicode character for any printable key with no
+Ctrl/Alt held (Ctrl/Alt excluded on purpose -- those are shortcuts like
+Ctrl+C for SIGINT, not literal text, and still need the real scancode
+for a console/app to recognize them as one); scancode is now only used
+for non-printable/control keys (arrows, Enter, Tab, function keys, ...)
+and Ctrl/Alt-modified combos. `SpiceWidget` is unaffected -- its own
+docstring already documents that SPICE's InputsChannel has no
+equivalent Unicode fast path to fall back to.
+
 ## What's still open
 
-- Confirm the keyboard-layout fix above actually resolves Shift+punctuation
-  typing against a real server — verified only that the setting is
-  correctly applied, not the live typing behavior itself.
+- Confirm the Shift+symbol-in-console fix above against the actual
+  reporting VM's PowerShell prompt -- reasoned from Windows' documented
+  WM_CHAR vs. raw-console-input behavior and this app's own prior
+  Unicode-path docstring, not verified live (can't be, from this
+  sandbox).
+- The keyboard-layout Settings override (previous section) turned out
+  not to be what actually needed fixing for this specific report, but
+  is still worth keeping for a case where a target VM's declared
+  layout genuinely doesn't match what's installed there.
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).

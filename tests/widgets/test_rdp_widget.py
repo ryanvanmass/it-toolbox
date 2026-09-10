@@ -311,27 +311,81 @@ def test_shift_tab_is_forwarded_and_does_not_steal_focus(qtbot, rdp_widget_with_
 
 def test_regular_keys_still_forward_normally_alongside_tab_handling(rdp_widget):
     # Regression guard: the new event() override must not interfere with
-    # ordinary keys that aren't Tab/Backtab.
+    # ordinary keys that aren't Tab/Backtab. A plain printable letter with
+    # no Ctrl/Alt held now goes through the unicode path (see below), not
+    # scancode -- that's the point being guarded here, not a specific
+    # wire format.
     key = Qt.Key.Key_A
     from PySide6.QtGui import QKeyEvent
 
     event = QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, "a")
     rdp_widget.keyPressEvent(event)
 
-    assert (0x1E, False, True) in rdp_widget._worker.scancode_calls
+    assert (ord("a"), True) in rdp_widget._worker.unicode_calls
+
+
+# -- Shift+symbol: unicode, not scancode+shift ------------------------------
+#
+# Root cause of a live report: Shift+symbol (e.g. Shift+; -> ":") typed
+# correctly into a GUI text field within an RDP session, but not into a
+# PowerShell/console prompt in that same session. GUI controls get an
+# already-resolved character via WM_CHAR; a console app resolves the raw
+# Shift+scancode pair itself via its own low-level keyboard-state
+# translation, which is where this broke. Sending the already-resolved
+# Unicode character instead sidesteps that translation on the server
+# entirely -- exactly what scancodes.py's own docstring already says this
+# path is for, except no printable key ever used to reach it (every one
+# had its own SCANCODES entry). Ctrl/Alt combos are excluded on purpose --
+# those are shortcuts (Ctrl+C for SIGINT, say), not literal text, and still
+# need the real scancode for a console/app to recognize them as such.
+
+
+def test_shift_symbol_now_uses_unicode_not_scancode(rdp_widget):
+    from PySide6.QtGui import QKeyEvent
+
+    event = QKeyEvent(
+        QKeyEvent.Type.KeyPress, Qt.Key.Key_Semicolon, Qt.KeyboardModifier.ShiftModifier, ":"
+    )
+    rdp_widget.keyPressEvent(event)
+
+    assert (ord(":"), True) in rdp_widget._worker.unicode_calls
+    assert rdp_widget._worker.scancode_calls == []
+
+
+def test_ctrl_modified_printable_key_still_uses_scancode(rdp_widget):
+    # Even if event.text() happened to carry a plain printable character
+    # under Ctrl (platform-dependent -- some report the raw letter, some
+    # a control byte, some nothing), Ctrl must force the scancode path so
+    # a real shortcut like Ctrl+C still reaches a console/app as one.
+    from PySide6.QtGui import QKeyEvent
+
+    event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier, "c")
+    rdp_widget.keyPressEvent(event)
+
+    assert (0x2E, False, True) in rdp_widget._worker.scancode_calls
+    assert rdp_widget._worker.unicode_calls == []
 
 
 # -- Debug logging: every forwarded key logs what was actually computed -----
 #
-# Added to chase a live report of Shift+symbol (e.g. Shift+; -> ":") typing
-# the wrong character on one specific VM, but working fine there with mstsc,
-# and working fine with this same client against a different VM -- nothing
-# about the key/modifier/scancode sequence as it's actually computed is
-# otherwise visible from outside _forward_key_event, so there was no way to
-# make further progress without being able to capture it from a live repro.
+# Added to chase the same live report above -- nothing about the key/
+# modifier/scancode-or-unicode decision is otherwise visible from outside
+# _forward_key_event, so there was no way to make further progress without
+# being able to capture it from a live repro.
 
 
 def test_scancode_key_forwarding_is_logged(rdp_widget, caplog):
+    from PySide6.QtGui import QKeyEvent
+
+    with caplog.at_level("DEBUG", logger="it_toolbox.widgets.rdp_widget"):
+        event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Left, Qt.KeyboardModifier.NoModifier)
+        rdp_widget.keyPressEvent(event)
+
+    messages = [r.message for r in caplog.records]
+    assert any("0x4b" in m.lower() and "down=True" in m for m in messages)
+
+
+def test_unicode_key_forwarding_is_logged(rdp_widget, caplog):
     from PySide6.QtGui import QKeyEvent
 
     with caplog.at_level("DEBUG", logger="it_toolbox.widgets.rdp_widget"):
@@ -341,18 +395,4 @@ def test_scancode_key_forwarding_is_logged(rdp_widget, caplog):
         rdp_widget.keyPressEvent(event)
 
     messages = [r.message for r in caplog.records]
-    assert any("0x27" in m and "down=True" in m for m in messages)
-
-
-def test_unicode_fallback_key_forwarding_is_logged(rdp_widget, caplog):
-    from PySide6.QtGui import QKeyEvent
-
-    with caplog.at_level("DEBUG", logger="it_toolbox.widgets.rdp_widget"):
-        # Key_unknown has no SCANCODES entry, forcing the unicode fallback
-        # path -- mirrors how a real layout-dependent symbol with no
-        # dedicated Qt key constant would be forwarded.
-        event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_unknown, Qt.KeyboardModifier.NoModifier, "€")
-        rdp_widget.keyPressEvent(event)
-
-    messages = [r.message for r in caplog.records]
-    assert any("'€'" in m and "down=True" in m for m in messages)
+    assert any("':'" in m and "down=True" in m for m in messages)
