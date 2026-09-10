@@ -172,8 +172,18 @@ class TerminalWidget(QPlainTextEdit):
         # this resolves to Ctrl+V (Windows/Linux) it would otherwise be
         # swallowed as the literal ^V control byte, which is where "can't
         # paste into the terminal" came from — Ctrl+V never reached
-        # anything but that byte.
-        if event.matches(QKeySequence.StandardKey.Paste):
+        # anything but that byte. Ctrl+Shift+V is also accepted directly
+        # (real terminal emulators — GNOME Terminal, Konsole, etc. — bind
+        # paste there instead of/alongside Ctrl+V, precisely because Ctrl+V
+        # is already a real, differently-meaningful control byte to a
+        # shell): QKeySequence.StandardKey.Paste never matches it, so
+        # without this it fell through to the same Ctrl+letter branch and
+        # sent ^V instead of pasting, exactly the bug this whole check
+        # exists to avoid for plain Ctrl+V.
+        if event.matches(QKeySequence.StandardKey.Paste) or (
+            modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+            and key == Qt.Key.Key_V
+        ):
             self._paste_clipboard()
             return
 

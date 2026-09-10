@@ -102,6 +102,30 @@ def test_paste_shortcut_writes_clipboard_text_to_the_shell(qtbot):
     term.close_session()
 
 
+def test_ctrl_shift_v_pastes_instead_of_sending_a_control_byte(qtbot):
+    # Regression test: Ctrl+Shift+V never matches
+    # QKeySequence.StandardKey.Paste, so without an explicit check it fell
+    # through to the Ctrl+letter branch and sent a literal ^V control byte
+    # to the shell instead of pasting -- many real terminal emulators
+    # (GNOME Terminal, Konsole, ...) bind paste there specifically because
+    # plain Ctrl+V is already meaningful to a shell/readline.
+    QApplication.clipboard().setText("echo pasted_via_ctrl_shift_v\n")
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+    qtbot.waitUntil(lambda: bool(term.toPlainText().strip()), timeout=3000)
+
+    term.keyPressEvent(
+        QKeyEvent(
+            QKeyEvent.Type.KeyPress,
+            Qt.Key.Key_V,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+    )
+
+    qtbot.waitUntil(lambda: "pasted_via_ctrl_shift_v" in term.toPlainText(), timeout=3000)
+    term.close_session()
+
+
 def test_paste_with_empty_clipboard_writes_nothing(qtbot, monkeypatch):
     QApplication.clipboard().setText("")
     term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
