@@ -227,3 +227,76 @@ def test_default_rdp_resolution_ignores_a_malformed_file(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     settings.default_rdp_resolution_path().write_text("not-a-resolution")
     assert settings.load_default_rdp_resolution() is None
+
+
+def test_glinet_hosts_empty_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_glinet_hosts() == []
+
+
+def test_save_and_load_glinet_hosts_round_trips(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    hosts = [
+        {"name": "Travel Router", "url": "https://192.168.8.1/rpc", "username": "root",
+         "verify_ssl": False, "password_encrypted": "c29tZWJhc2U2NA=="},
+        {"name": "Office Router", "url": "https://192.168.9.1/rpc", "username": "admin",
+         "verify_ssl": True, "password_encrypted": None},
+    ]
+    settings.save_glinet_hosts(hosts)
+    assert settings.load_glinet_hosts() == hosts
+
+
+def test_save_and_load_glinet_password_round_trips_through_real_encryption(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path)
+    monkeypatch.setattr(settings, "resolve_glinet_ssh_key_path", lambda: key_path)
+
+    encrypted = settings.encrypt_glinet_password("routerpassword")
+
+    # Ciphertext must not contain the plaintext password anywhere.
+    assert b"routerpassword" not in encrypted
+    assert settings.decrypt_glinet_password(encrypted) == "routerpassword"
+
+
+def test_decrypt_glinet_password_with_passphrase_protected_ssh_key(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, passphrase=b"hunter2")
+    monkeypatch.setattr(settings, "resolve_glinet_ssh_key_path", lambda: key_path)
+
+    encrypted = settings.encrypt_glinet_password("routerpassword")
+
+    assert settings.decrypt_glinet_password(encrypted, passphrase="hunter2") == "routerpassword"
+
+
+def test_decrypt_glinet_password_passphrase_protected_without_passphrase_raises(
+    monkeypatch, tmp_path
+):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, passphrase=b"hunter2")
+    monkeypatch.setattr(settings, "resolve_glinet_ssh_key_path", lambda: key_path)
+
+    encrypted = settings.encrypt_glinet_password("routerpassword")
+
+    with pytest.raises(settings.SecretDecryptionError):
+        settings.decrypt_glinet_password(encrypted)
+
+
+def test_decrypt_glinet_password_wrong_key_raises(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, name="id_ed25519_a")
+    monkeypatch.setattr(settings, "resolve_glinet_ssh_key_path", lambda: key_path)
+    encrypted = settings.encrypt_glinet_password("routerpassword")
+
+    other_key_path = _write_ssh_keypair(tmp_path, name="id_ed25519_b")
+    monkeypatch.setattr(settings, "resolve_glinet_ssh_key_path", lambda: other_key_path)
+
+    with pytest.raises(settings.SecretDecryptionError):
+        settings.decrypt_glinet_password(encrypted)
+
+
+def test_encrypt_glinet_password_no_ssh_key_found_raises(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "resolve_glinet_ssh_key_path", lambda: None)
+
+    with pytest.raises(settings.SecretDecryptionError):
+        settings.encrypt_glinet_password("routerpassword")

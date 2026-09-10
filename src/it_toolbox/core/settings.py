@@ -218,6 +218,30 @@ def jumpcloud_api_key_path() -> Path:
     return data_dir() / "jumpcloud_api_key.age"
 
 
+def _encrypt_secret(secret: str, key_path: Path) -> bytes:
+    """age-encrypts `secret` to key_path's matching *public* key
+    (<key_path>.pub). Shared by JumpCloud's single global API key and
+    GL.iNet's per-host passwords — the encryption itself doesn't care what
+    it's protecting or how many of them there are.
+    """
+    public_key_path = key_path.parent / f"{key_path.name}.pub"
+    if not public_key_path.is_file():
+        raise SecretDecryptionError(f"No matching public key found at {public_key_path}.")
+    recipient = ssh.Recipient.from_str(public_key_path.read_text().strip())
+    return encrypt(secret.encode(), [recipient])
+
+
+def _decrypt_secret(ciphertext: bytes, key_path: Path, passphrase: str | None) -> str:
+    identity = _load_ssh_identity(key_path, passphrase)
+    try:
+        return decrypt(ciphertext, [identity]).decode()
+    except Exception as exc:  # noqa: BLE001 - age's own DecryptError, wrong-key case
+        raise SecretDecryptionError(
+            f"Couldn't decrypt the stored secret with {key_path} — it may have been "
+            "encrypted with a different SSH key."
+        ) from exc
+
+
 def _load_ssh_identity(key_path: Path, passphrase: str | None) -> ssh.Identity:
     raw = key_path.read_bytes()
     try:
@@ -256,14 +280,7 @@ def load_jumpcloud_api_key(passphrase: str | None = None) -> str | None:
             "No SSH private key found to decrypt the stored JumpCloud API key "
             "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa, and any explicitly configured path)."
         )
-    identity = _load_ssh_identity(key_path, passphrase)
-    try:
-        return decrypt(path.read_bytes(), [identity]).decode()
-    except Exception as exc:  # noqa: BLE001 - age's own DecryptError, wrong-key case
-        raise SecretDecryptionError(
-            f"Couldn't decrypt the stored JumpCloud API key with {key_path} — "
-            "it may have been encrypted with a different SSH key."
-        ) from exc
+    return _decrypt_secret(path.read_bytes(), key_path, passphrase)
 
 
 def save_jumpcloud_api_key(api_key: str | None) -> None:
@@ -281,9 +298,60 @@ def save_jumpcloud_api_key(api_key: str | None) -> None:
             "No SSH key found to encrypt the JumpCloud API key with "
             "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa, and any explicitly configured path)."
         )
-    public_key_path = key_path.parent / f"{key_path.name}.pub"
-    if not public_key_path.is_file():
-        raise SecretDecryptionError(f"No matching public key found at {public_key_path}.")
+    path.write_bytes(_encrypt_secret(api_key.strip(), key_path))
 
-    recipient = ssh.Recipient.from_str(public_key_path.read_text().strip())
-    path.write_bytes(encrypt(api_key.strip().encode(), [recipient]))
+
+def resolve_glinet_ssh_key_path() -> Path | None:
+    """GL.iNet host passwords always use the same default SSH key
+    resolution as JumpCloud (no separate override setting for v1) — this
+    thin wrapper exists purely as an independent monkeypatch seam in tests.
+    """
+    return default_ssh_key_path()
+
+
+def encrypt_glinet_password(password: str) -> bytes:
+    """Raises SecretDecryptionError if no SSH key (or matching .pub) is found."""
+    key_path = resolve_glinet_ssh_key_path()
+    if key_path is None:
+        raise SecretDecryptionError(
+            "No SSH key found to encrypt the GL.iNet host password with "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _encrypt_secret(password, key_path)
+
+
+def decrypt_glinet_password(encrypted: bytes, passphrase: str | None = None) -> str:
+    key_path = resolve_glinet_ssh_key_path()
+    if key_path is None or not key_path.is_file():
+        raise SecretDecryptionError(
+            "No SSH private key found to decrypt the stored GL.iNet host password "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _decrypt_secret(encrypted, key_path, passphrase)
+
+
+def glinet_hosts_path() -> Path:
+    return data_dir() / "glinet_hosts.json"
+
+
+def load_glinet_hosts() -> list[dict]:
+    """Registered GL.iNet hosts, as raw dicts — kept free of any dependency
+    on modules/connection_manager.models.GlinetHost, same reasoning as
+    load_qemu_hosts. "password_encrypted" is a base64 str (or None) here,
+    never decrypted — decryption only happens right before a dashboard is
+    actually opened, so populating the tree never triggers a passphrase
+    prompt.
+    """
+    path = glinet_hosts_path()
+    if not path.is_file():
+        return []
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_glinet_hosts(hosts: list[dict]) -> None:
+    """hosts' "password_encrypted" must already be a base64 str or None —
+    callers encrypt via encrypt_glinet_password() before calling this."""
+    glinet_hosts_path().write_text(json.dumps(hosts))

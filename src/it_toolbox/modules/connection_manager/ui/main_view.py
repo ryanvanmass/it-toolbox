@@ -1,3 +1,5 @@
+import base64
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,12 +21,13 @@ from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.qemu_tunnel import QemuTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
-from it_toolbox.modules.connection_manager import gcp_client, qemu_client
+from it_toolbox.modules.connection_manager import gcp_client, glinet_client, qemu_client
 from it_toolbox.modules.connection_manager.models import (
     RDP_PORT,
     SSH_PORT,
     GcpProject,
     GcsBucket,
+    GlinetHost,
     Instance,
     ManualConnection,
     QemuHost,
@@ -32,6 +35,9 @@ from it_toolbox.modules.connection_manager.models import (
 )
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError
 from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
+from it_toolbox.modules.connection_manager.ui.manage_glinet_hosts_dialog import (
+    ManageGlinetHostsDialog,
+)
 from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import ManageHostsDialog
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
@@ -40,6 +46,7 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
+from it_toolbox.widgets.glinet_dashboard_widget import GlinetDashboardWidget
 from it_toolbox.widgets.rdp_widget import RdpWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
@@ -68,6 +75,8 @@ VM_ROLE = Qt.ItemDataRole.UserRole + 8
 IS_MANUAL_ROOT_ROLE = Qt.ItemDataRole.UserRole + 9
 MANUAL_CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 10
 IS_LOADING_ROLE = Qt.ItemDataRole.UserRole + 11
+IS_GLINET_ROOT_ROLE = Qt.ItemDataRole.UserRole + 12
+GLINET_HOST_ROLE = Qt.ItemDataRole.UserRole + 13
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
@@ -92,6 +101,7 @@ class ConnectionManagerView(QWidget):
         self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
         self._manual_root_item: QTreeWidgetItem | None = None
+        self._glinet_root_item: QTreeWidgetItem | None = None
 
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
@@ -139,11 +149,13 @@ class ConnectionManagerView(QWidget):
         self._gcp_refresh_timer.timeout.connect(self._refresh_all_gcp_data)
         self._gcp_refresh_timer.start()
 
-        # QEMU hosts and manually-configured connections are independent
-        # connection families — shown regardless of GCP sign-in state,
-        # unlike everything below this point which requires the gcloud CLI.
+        # QEMU hosts, manually-configured connections, and GL.iNet hosts are
+        # independent connection families — shown regardless of GCP sign-in
+        # state, unlike everything below this point which requires the
+        # gcloud CLI.
         self._populate_qemu_hosts()
         self._populate_manual_connections()
+        self._populate_glinet_hosts()
 
         if not gcp_auth.is_available():
             self._sign_in_button.setEnabled(False)
@@ -242,6 +254,7 @@ class ConnectionManagerView(QWidget):
         self._tree.clear()
         self._qemu_root_item = None
         self._manual_root_item = None
+        self._glinet_root_item = None
         gcp_category = QTreeWidgetItem(["GCP"])
         gcp_category.setData(0, IS_GCP_ROOT_ROLE, True)
         self._tree.addTopLevelItem(gcp_category)
@@ -265,6 +278,7 @@ class ConnectionManagerView(QWidget):
         gcp_category.setExpanded(True)
         self._populate_qemu_hosts()
         self._populate_manual_connections()
+        self._populate_glinet_hosts()
 
     def _on_select_projects_clicked(self) -> None:
         # Re-fetch rather than reusing self._all_projects (populated once at
@@ -549,6 +563,107 @@ class ConnectionManagerView(QWidget):
         self._save_manual_connections(dialog.connections())
         self._populate_manual_connections()
 
+    # -- GL.iNet hosts ------------------------------------------------------
+
+    @staticmethod
+    def _load_glinet_hosts() -> list[GlinetHost]:
+        hosts = []
+        for h in settings.load_glinet_hosts():
+            encoded = h.get("password_encrypted")
+            hosts.append(
+                GlinetHost(
+                    name=h["name"],
+                    url=h["url"],
+                    username=h.get("username", "root"),
+                    verify_ssl=h.get("verify_ssl", False),
+                    password_encrypted=base64.b64decode(encoded) if encoded else None,
+                )
+            )
+        return hosts
+
+    @staticmethod
+    def _save_glinet_hosts(hosts: list[GlinetHost]) -> None:
+        settings.save_glinet_hosts(
+            [
+                {
+                    "name": h.name,
+                    "url": h.url,
+                    "username": h.username,
+                    "verify_ssl": h.verify_ssl,
+                    "password_encrypted": (
+                        base64.b64encode(h.password_encrypted).decode()
+                        if h.password_encrypted
+                        else None
+                    ),
+                }
+                for h in hosts
+            ]
+        )
+
+    def _populate_glinet_hosts(self) -> None:
+        if self._glinet_root_item is None:
+            self._glinet_root_item = QTreeWidgetItem(["GL.iNet"])
+            self._glinet_root_item.setData(0, IS_GLINET_ROOT_ROLE, True)
+            self._tree.addTopLevelItem(self._glinet_root_item)
+        self._glinet_root_item.takeChildren()
+        for host in self._load_glinet_hosts():
+            item = QTreeWidgetItem([host.name])
+            item.setData(0, GLINET_HOST_ROLE, host)
+            item.setToolTip(0, host.url)
+            self._glinet_root_item.addChild(item)
+
+    def _on_manage_glinet_hosts_clicked(self) -> None:
+        dialog = ManageGlinetHostsDialog(self._load_glinet_hosts(), parent=self)
+        dialog.exec()
+        hosts = []
+        for host, new_password in zip(dialog.hosts(), dialog.new_passwords(), strict=True):
+            if new_password:
+                host = GlinetHost(
+                    name=host.name,
+                    url=host.url,
+                    username=host.username,
+                    verify_ssl=host.verify_ssl,
+                    password_encrypted=settings.encrypt_glinet_password(new_password),
+                )
+            hosts.append(host)
+        self._save_glinet_hosts(hosts)
+        self._populate_glinet_hosts()
+
+    def _open_glinet_dashboard(self, host: GlinetHost) -> None:
+        if glinet_client.GlInet is None:
+            QMessageBox.warning(
+                self,
+                "GL.iNet unavailable",
+                "python-glinet isn't installed — see Settings for install instructions.",
+            )
+            return
+
+        password = self._resolve_glinet_password(host)
+        if password is None:
+            return
+
+        dashboard = GlinetDashboardWidget(host, password)
+        self._owned_tab_widgets.add(dashboard)
+        index = self._tabs.addTab(dashboard, host.name)
+        self._tabs.setCurrentIndex(index)
+
+    def _resolve_glinet_password(self, host: GlinetHost) -> str | None:
+        if host.password_encrypted is not None:
+            try:
+                return settings.decrypt_glinet_password(host.password_encrypted)
+            except settings.SecretDecryptionError:
+                pass  # fall through to the interactive prompt below
+
+        password, ok = QInputDialog.getText(
+            self,
+            "GL.iNet Password",
+            f"Password for {host.username}@{host.name}:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return None
+        return password
+
     # -- Tree context menu: connect -------------------------------------------
 
     def _on_tree_context_menu(self, pos) -> None:
@@ -576,6 +691,15 @@ class ConnectionManagerView(QWidget):
         manual_connection = item.data(0, MANUAL_CONNECTION_ROLE)
         if manual_connection is not None:
             self._show_manual_connection_context_menu(pos, manual_connection)
+            return
+
+        if item.data(0, IS_GLINET_ROOT_ROLE):
+            self._show_glinet_root_context_menu(pos)
+            return
+
+        glinet_host = item.data(0, GLINET_HOST_ROLE)
+        if glinet_host is not None:
+            self._show_glinet_host_context_menu(pos, glinet_host)
             return
 
         # A GCP project node — PROJECT_ID_ROLE set, but neither a VMs/
@@ -663,6 +787,18 @@ class ConnectionManagerView(QWidget):
         if chosen is connect_action:
             self._start_session_from_manual_connection(connection)
 
+    def _show_glinet_root_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Manage Hosts…").triggered.connect(self._on_manage_glinet_hosts_clicked)
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _show_glinet_host_context_menu(self, pos, host: GlinetHost) -> None:
+        menu = QMenu(self)
+        open_action = menu.addAction("Open Dashboard")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is open_action:
+            self._open_glinet_dashboard(host)
+
     def _build_gcp_root_menu(self) -> QMenu | None:
         if self._account is None:
             return None
@@ -680,6 +816,11 @@ class ConnectionManagerView(QWidget):
         bucket = item.data(0, BUCKET_ROLE)
         if bucket is not None:
             self._open_bucket_browser(bucket)
+            return
+
+        glinet_host = item.data(0, GLINET_HOST_ROLE)
+        if glinet_host is not None:
+            self._open_glinet_dashboard(glinet_host)
 
     def _open_bucket_browser(self, bucket: GcsBucket) -> None:
         browser = BucketBrowserWidget(bucket, get_credentials=gcp_auth.get_credentials)

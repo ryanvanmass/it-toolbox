@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
-from it_toolbox.modules.connection_manager import qemu_client
+from it_toolbox.modules.connection_manager import glinet_client, qemu_client
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
 from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
 
@@ -71,6 +71,7 @@ class SettingsView(QWidget):
         self._content_layout.addWidget(self._build_gcloud_section())
         self._content_layout.addWidget(self._build_jumpcloud_section())
         self._content_layout.addWidget(self._build_qemu_section())
+        self._content_layout.addWidget(self._build_glinet_section())
         self._content_layout.addWidget(self._build_rdp_display_section())
         self._content_layout.addWidget(self._build_freerdp_section())
         self._content_layout.addStretch(1)
@@ -335,6 +336,27 @@ class SettingsView(QWidget):
                 "  Fedora/RHEL:   sudo dnf install libvirt-client"
             )
         layout.addWidget(self._qemu_status_label)
+
+        return box
+
+    # -- GL.iNet --------------------------------------------------------------
+
+    def _build_glinet_section(self) -> QGroupBox:
+        box = QGroupBox("GL.iNet")
+        layout = QVBoxLayout(box)
+
+        if glinet_client.is_available():
+            self._glinet_status_label = QLabel(
+                "python-glinet found — GL.iNet router dashboards are available."
+            )
+        else:
+            self._glinet_status_label = QLabel(
+                "python-glinet not installed — GL.iNet dashboards won't work until it's "
+                "installed (pip install python-glinet; GPLv3-licensed, so it isn't bundled "
+                "with it-toolbox — see docs/glinet-dashboard-status.md)."
+            )
+            self._glinet_status_label.setWordWrap(True)
+        layout.addWidget(self._glinet_status_label)
 
         return box
 
