@@ -144,7 +144,7 @@ def test_download_and_install_windows_update_launches_the_silent_installer_then_
     installer_call, relaunch_call = _FakePopen.calls
     assert installer_call[1:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
     assert installer_call[0].endswith(".exe")
-    assert relaunch_call == [str(tmp_path / "IT Toolbox" / "Scripts" / "it-toolbox.exe")]
+    assert relaunch_call == [str(tmp_path / "IT Toolbox" / "pythonw.exe"), "-m", "it_toolbox"]
 
 
 def test_download_and_install_windows_update_raises_on_nonzero_exit(monkeypatch, tmp_path):
