@@ -32,11 +32,23 @@ rm -f dist/it_toolbox-*.whl
 #    tooling (fpm's --input-type virtualenv, virtualenv-tools3, ...)
 #    needed at all. Confirmed directly: `head -1 venv/bin/it-toolbox`
 #    after this step shows the real final path, not the build path.
+# A glob, not "dist/it_toolbox-${VERSION}-py3-none-any.whl" -- `build`
+# normalizes pyproject.toml's raw version string to PEP 440 canonical
+# form for the actual wheel filename (e.g. "0.3.0-beta.1" -> "0.3.0b1"),
+# so building that filename from $VERSION directly doesn't match what
+# actually landed in dist/. Safe as a plain glob since the `rm -f
+# dist/it_toolbox-*.whl` above guarantees at most one matches.
+WHEEL=(dist/it_toolbox-*-py3-none-any.whl)
+if [[ ! -f "${WHEEL[0]}" ]]; then
+    echo "No wheel found in dist/ matching it_toolbox-*-py3-none-any.whl" >&2
+    exit 1
+fi
+
 sudo rm -rf "$PREFIX"
 sudo mkdir -p "$PREFIX"
 sudo python3 -m venv "$PREFIX/venv"
 sudo "$PREFIX/venv/bin/pip" install --upgrade pip
-sudo "$PREFIX/venv/bin/pip" install "dist/it_toolbox-${VERSION}-py3-none-any.whl"
+sudo "$PREFIX/venv/bin/pip" install "${WHEEL[0]}"
 sudo find "$PREFIX/venv" -name "__pycache__" -exec rm -rf {} +
 
 # 3. Stage the /usr/bin wrapper, .desktop entry, and icon.
@@ -84,8 +96,17 @@ RPM_DEPENDS=(
   --depends libXtst --depends libXrandr --depends libXdamage
   --depends nss --depends alsa-lib --depends dbus-libs --depends fontconfig
 )
+# RPM's Version field flatly rejects "-" (it's the NVR separator), and
+# both dpkg and rpm treat "~" as the portable, standard way to encode
+# "this is a pre-release, sort it before the plain version" -- so
+# "0.3.0-beta.1" (fine for pyproject.toml/PEP 440 and the wheel filename
+# above) becomes "0.3.0~beta.1" specifically for the packages' own
+# version field. A plain release version has no "-" to replace, so this
+# is a no-op for those.
+PACKAGE_VERSION="${VERSION//-/\~}"
+
 COMMON_ARGS=(
-  -s dir -n it-toolbox -v "$VERSION"
+  -s dir -n it-toolbox -v "$PACKAGE_VERSION"
   --license Apache-2.0
   --description "Cross-platform IT tooling desktop app"
   --url "https://github.com/ryanvanmass/it-toolbox"
