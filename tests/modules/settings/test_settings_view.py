@@ -127,6 +127,125 @@ def test_check_updates_handles_network_error(qtbot, monkeypatch):
     assert view._check_updates_button.isEnabled()
 
 
+def test_install_update_button_hidden_on_non_windows(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Linux")
+    monkeypatch.setattr(
+        update_checker,
+        "get_latest_release",
+        lambda: update_checker.ReleaseInfo(
+            version="2.0.0",
+            html_url="https://example.com/v2",
+            windows_installer_url="https://example.com/setup.exe",
+        ),
+    )
+
+    view._check_updates_button.click()
+
+    qtbot.waitUntil(lambda: "Update available" in view._update_status_label.text())
+    assert view._install_update_button.isHidden()
+
+
+def test_install_update_button_hidden_without_a_windows_asset(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
+    monkeypatch.setattr(
+        update_checker,
+        "get_latest_release",
+        lambda: update_checker.ReleaseInfo(version="2.0.0", html_url="https://example.com/v2"),
+    )
+
+    view._check_updates_button.click()
+
+    qtbot.waitUntil(lambda: "Update available" in view._update_status_label.text())
+    assert view._install_update_button.isHidden()
+
+
+def test_install_update_button_shown_on_windows_with_installer_asset(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
+    monkeypatch.setattr(
+        update_checker,
+        "get_latest_release",
+        lambda: update_checker.ReleaseInfo(
+            version="2.0.0",
+            html_url="https://example.com/v2",
+            windows_installer_url="https://example.com/setup.exe",
+        ),
+    )
+
+    view._check_updates_button.click()
+
+    qtbot.waitUntil(lambda: "Update available" in view._update_status_label.text())
+    assert not view._install_update_button.isHidden()
+    assert view._pending_installer_url == "https://example.com/setup.exe"
+
+
+def test_install_update_declined_does_not_download(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
+    view._pending_installer_url = "https://example.com/setup.exe"
+    view._install_update_button.show()
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox,
+        "question",
+        lambda *a, **k: settings_main_view.QMessageBox.StandardButton.No,
+    )
+    calls = []
+    monkeypatch.setattr(
+        update_checker, "download_and_install_windows_update", lambda url: calls.append(url)
+    )
+
+    view._install_update_button.click()
+
+    assert calls == []
+
+
+def test_install_update_accepted_downloads_installs_and_quits(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
+    view._pending_installer_url = "https://example.com/setup.exe"
+    view._install_update_button.show()
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox,
+        "question",
+        lambda *a, **k: settings_main_view.QMessageBox.StandardButton.Yes,
+    )
+    calls = []
+    monkeypatch.setattr(
+        update_checker, "download_and_install_windows_update", lambda url: calls.append(url)
+    )
+    quit_calls = []
+    # Patching this instance's own _quit_application (rather than the
+    # real, test-session-wide QApplication singleton's .quit()/.instance())
+    # keeps this test from disturbing anything pytest-qt's own internals
+    # depend on for every other test in this process.
+    monkeypatch.setattr(view, "_quit_application", lambda: quit_calls.append(True))
+
+    view._install_update_button.click()
+
+    qtbot.waitUntil(lambda: quit_calls == [True])
+    assert calls == ["https://example.com/setup.exe"]
+
+
+def test_install_update_failure_shows_error_and_reenables_buttons(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
+    view._pending_installer_url = "https://example.com/setup.exe"
+    view._install_update_button.show()
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox,
+        "question",
+        lambda *a, **k: settings_main_view.QMessageBox.StandardButton.Yes,
+    )
+
+    def _raise(url):
+        raise update_checker.UpdateInstallError("installer exploded")
+
+    monkeypatch.setattr(update_checker, "download_and_install_windows_update", _raise)
+
+    view._install_update_button.click()
+
+    qtbot.waitUntil(lambda: "Update install failed" in view._update_status_label.text())
+    assert "installer exploded" in view._update_status_label.text()
+    assert view._install_update_button.isEnabled()
+    assert view._check_updates_button.isEnabled()
+
+
 def test_rclone_section_shows_found_path_when_available(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, rclone_available=True)
 
