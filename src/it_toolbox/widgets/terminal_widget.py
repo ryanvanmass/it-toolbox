@@ -12,7 +12,7 @@ import threading
 
 import pyte
 from PySide6.QtCore import QEvent, QSocketNotifier, Qt, Signal
-from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QFontDatabase, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
 from it_toolbox.widgets.pty_backend import PtyHandle
@@ -59,8 +59,15 @@ class TerminalWidget(QPlainTextEdit):
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        font = QFont("Monospace")
-        font.setStyleHint(QFont.StyleHint.TypeWriter)
+        # QFont("Monospace") is a Linux/fontconfig generic-alias name --
+        # Windows has no font literally called that, and Qt's substitution
+        # for an unrecognized family name there is not guaranteed to give
+        # metrics (self.fontMetrics(), used by resizeEvent below) that
+        # match what's actually rendered. QFontDatabase's FixedFont is the
+        # correct, cross-platform-safe way to ask for "the system's real
+        # monospace font" -- resolves to Consolas on Windows, an
+        # appropriate default elsewhere -- with no name-lookup ambiguity.
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         if font_point_size is not None:
             font.setPointSize(font_point_size)
         self.setFont(font)
@@ -243,9 +250,15 @@ class TerminalWidget(QPlainTextEdit):
         metrics = self.fontMetrics()
         char_width = metrics.horizontalAdvance("M") or 1
         char_height = metrics.height() or 1
-        viewport_size = self.viewport().size()
-        cols = max(1, viewport_size.width() // char_width)
-        rows = max(1, viewport_size.height() // char_height)
+        # QPlainTextEdit's document has its own margin around the text
+        # (QTextDocument.documentMargin(), 4px on each side by default) --
+        # real usable space for character cells is inside that, not the
+        # full viewport.
+        margin = self.document().documentMargin()
+        available_width = max(0, self.viewport().width() - 2 * margin)
+        available_height = max(0, self.viewport().height() - 2 * margin)
+        cols = max(1, int(available_width // char_width))
+        rows = max(1, int(available_height // char_height))
         if (cols, rows) != (self._cols, self._rows):
             self.resizeTerminal(cols, rows)
 
