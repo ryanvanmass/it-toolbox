@@ -454,3 +454,23 @@ def save_jumpcloud_api_key(api_key: str | None) -> None:
 
     recipient = ssh.Recipient.from_str(public_key_path.read_text().strip())
     path.write_bytes(encrypt(api_key.strip().encode(), [recipient]))
+
+
+def include_prerelease_updates_path() -> Path:
+    return data_dir() / "include_prerelease_updates.txt"
+
+
+def load_include_prerelease_updates() -> bool:
+    """Whether Settings > App Updates should also offer pre-release
+    (beta) builds -- off by default. File-present-means-enabled, same
+    shape as this file's other settings even though this is the first
+    genuinely boolean one."""
+    return include_prerelease_updates_path().is_file()
+
+
+def save_include_prerelease_updates(enabled: bool) -> None:
+    path = include_prerelease_updates_path()
+    if enabled:
+        path.write_text("1")
+    else:
+        path.unlink(missing_ok=True)

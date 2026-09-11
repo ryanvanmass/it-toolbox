@@ -74,7 +74,9 @@ def test_shows_installed_version_on_load(qtbot, monkeypatch):
 
 def test_check_updates_reports_no_releases_yet(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
-    monkeypatch.setattr(update_checker, "get_latest_release", lambda: None)
+    monkeypatch.setattr(
+        update_checker, "get_latest_release", lambda include_prerelease=False: None
+    )
 
     view._check_updates_button.click()
 
@@ -88,7 +90,9 @@ def test_check_updates_reports_up_to_date(qtbot, monkeypatch):
     monkeypatch.setattr(
         update_checker,
         "get_latest_release",
-        lambda: update_checker.ReleaseInfo(version="1.0.0", html_url="https://example.com"),
+        lambda include_prerelease=False: update_checker.ReleaseInfo(
+            version="1.0.0", html_url="https://example.com"
+        ),
     )
 
     view._check_updates_button.click()
@@ -102,7 +106,9 @@ def test_check_updates_reports_available_update_and_shows_link(qtbot, monkeypatc
     monkeypatch.setattr(
         update_checker,
         "get_latest_release",
-        lambda: update_checker.ReleaseInfo(version="2.0.0", html_url="https://example.com/v2"),
+        lambda include_prerelease=False: update_checker.ReleaseInfo(
+            version="2.0.0", html_url="https://example.com/v2"
+        ),
     )
 
     view._check_updates_button.click()
@@ -116,7 +122,7 @@ def test_check_updates_reports_available_update_and_shows_link(qtbot, monkeypatc
 def test_check_updates_handles_network_error(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
 
-    def _raise():
+    def _raise(include_prerelease=False):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(update_checker, "get_latest_release", _raise)
@@ -127,12 +133,53 @@ def test_check_updates_handles_network_error(qtbot, monkeypatch):
     assert view._check_updates_button.isEnabled()
 
 
+def test_include_prerelease_checkbox_defaults_to_unchecked(qtbot, monkeypatch):
+    monkeypatch.setattr(settings, "load_include_prerelease_updates", lambda: False)
+    view = _make_view(qtbot, monkeypatch)
+
+    assert not view._include_prerelease_checkbox.isChecked()
+
+
+def test_include_prerelease_checkbox_preselects_saved_value(qtbot, monkeypatch):
+    monkeypatch.setattr(settings, "load_include_prerelease_updates", lambda: True)
+    view = _make_view(qtbot, monkeypatch)
+
+    assert view._include_prerelease_checkbox.isChecked()
+
+
+def test_toggling_include_prerelease_checkbox_saves_it(qtbot, monkeypatch):
+    monkeypatch.setattr(settings, "load_include_prerelease_updates", lambda: False)
+    saved = []
+    monkeypatch.setattr(settings, "save_include_prerelease_updates", lambda v: saved.append(v))
+    view = _make_view(qtbot, monkeypatch)
+
+    view._include_prerelease_checkbox.setChecked(True)
+
+    assert saved == [True]
+
+
+def test_check_updates_passes_include_prerelease_flag(qtbot, monkeypatch):
+    monkeypatch.setattr(settings, "load_include_prerelease_updates", lambda: True)
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0")
+    calls = []
+
+    def _fake_get_latest_release(include_prerelease=False):
+        calls.append(include_prerelease)
+        return update_checker.ReleaseInfo(version="1.0.0", html_url="https://example.com")
+
+    monkeypatch.setattr(update_checker, "get_latest_release", _fake_get_latest_release)
+
+    view._check_updates_button.click()
+
+    qtbot.waitUntil(lambda: calls == [True])
+
+
 def test_install_update_button_hidden_on_non_windows(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Linux")
     monkeypatch.setattr(
         update_checker,
         "get_latest_release",
-        lambda: update_checker.ReleaseInfo(
+        lambda include_prerelease=False: update_checker.ReleaseInfo(
             version="2.0.0",
             html_url="https://example.com/v2",
             windows_installer_url="https://example.com/setup.exe",
@@ -150,7 +197,9 @@ def test_install_update_button_hidden_without_a_windows_asset(qtbot, monkeypatch
     monkeypatch.setattr(
         update_checker,
         "get_latest_release",
-        lambda: update_checker.ReleaseInfo(version="2.0.0", html_url="https://example.com/v2"),
+        lambda include_prerelease=False: update_checker.ReleaseInfo(
+            version="2.0.0", html_url="https://example.com/v2"
+        ),
     )
 
     view._check_updates_button.click()
@@ -164,7 +213,7 @@ def test_install_update_button_shown_on_windows_with_installer_asset(qtbot, monk
     monkeypatch.setattr(
         update_checker,
         "get_latest_release",
-        lambda: update_checker.ReleaseInfo(
+        lambda include_prerelease=False: update_checker.ReleaseInfo(
             version="2.0.0",
             html_url="https://example.com/v2",
             windows_installer_url="https://example.com/setup.exe",

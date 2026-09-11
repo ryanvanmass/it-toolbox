@@ -85,6 +85,35 @@ def test_get_latest_release_finds_the_windows_exe_asset(monkeypatch):
     assert release.windows_installer_url == "https://example.com/setup.exe"
 
 
+def test_get_latest_release_include_prerelease_hits_the_list_endpoint(monkeypatch):
+    captured_urls = []
+
+    def _fake_get(url, timeout):
+        captured_urls.append(url)
+        return _FakeResponse(
+            json_data=[
+                {"tag_name": "v2.0.0-beta.1", "html_url": "https://example.com/beta"},
+                {"tag_name": "v1.0.0", "html_url": "https://example.com/stable"},
+            ]
+        )
+
+    monkeypatch.setattr(update_checker.requests, "get", _fake_get)
+
+    release = update_checker.get_latest_release(include_prerelease=True)
+
+    assert captured_urls == [update_checker._RELEASES_LIST_URL]
+    assert release.version == "2.0.0-beta.1"
+    assert release.html_url == "https://example.com/beta"
+
+
+def test_get_latest_release_include_prerelease_returns_none_when_list_is_empty(monkeypatch):
+    monkeypatch.setattr(
+        update_checker.requests, "get", lambda url, timeout: _FakeResponse(json_data=[])
+    )
+
+    assert update_checker.get_latest_release(include_prerelease=True) is None
+
+
 @pytest.mark.parametrize("json_data", [{"tag_name": "v1.2.3", "html_url": "https://example.com"}])
 def test_get_latest_release_windows_installer_url_is_none_without_an_exe_asset(
     monkeypatch, json_data

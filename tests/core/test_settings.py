@@ -376,3 +376,16 @@ def test_default_double_click_action_ignores_a_malformed_file(monkeypatch, tmp_p
     _use_tmp_data_dir(monkeypatch, tmp_path)
     settings.default_double_click_action_path().write_text("not-a-real-action")
     assert settings.load_default_double_click_action() == "ask"
+
+
+def test_include_prerelease_updates_defaults_to_false(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_include_prerelease_updates() is False
+
+
+def test_save_and_load_include_prerelease_updates(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_include_prerelease_updates(True)
+    assert settings.load_include_prerelease_updates() is True
+    settings.save_include_prerelease_updates(False)
+    assert settings.load_include_prerelease_updates() is False

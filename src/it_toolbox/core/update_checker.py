@@ -16,6 +16,11 @@ from packaging.version import InvalidVersion, Version
 PACKAGE_NAME = "it-toolbox"
 REPO = "ryanvanmass/it-toolbox"
 _LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+# /releases/latest (above) only ever returns the newest *non*-prerelease,
+# non-draft release -- this is the plain list endpoint instead, which
+# does include pre-releases (unauthenticated requests never see drafts
+# regardless, so no filtering needed there), sorted newest-created-first.
+_RELEASES_LIST_URL = f"https://api.github.com/repos/{REPO}/releases"
 _REQUEST_TIMEOUT = 10
 _DOWNLOAD_TIMEOUT_SEC = 60
 # Generous but bounded -- a silent Inno Setup install of this app's size
@@ -39,14 +44,30 @@ def get_installed_version() -> str:
     return metadata.version(PACKAGE_NAME)
 
 
-def get_latest_release() -> ReleaseInfo | None:
+def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
     """None means no release has been published yet (a real, expected
-    state right now — see docs/releasing.md), not an error."""
-    response = requests.get(_LATEST_RELEASE_URL, timeout=_REQUEST_TIMEOUT)
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    data = response.json()
+    state right now — see docs/releasing.md), not an error.
+
+    include_prerelease=True is Settings > App Updates' opt-in beta-testing
+    toggle (settings.load_include_prerelease_updates()) -- it switches
+    from GitHub's /releases/latest (which never returns a pre-release) to
+    the plain releases list and takes its first, newest entry instead,
+    pre-release or not.
+    """
+    if include_prerelease:
+        response = requests.get(_RELEASES_LIST_URL, timeout=_REQUEST_TIMEOUT)
+        response.raise_for_status()
+        releases = response.json()
+        if not releases:
+            return None
+        data = releases[0]
+    else:
+        response = requests.get(_LATEST_RELEASE_URL, timeout=_REQUEST_TIMEOUT)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        data = response.json()
+
     tag_name = data["tag_name"]
     version = tag_name.removeprefix("v")
     windows_installer_url = next(
