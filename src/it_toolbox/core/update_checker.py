@@ -6,6 +6,7 @@ tag pushed by hand, never by the app itself).
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -23,6 +24,12 @@ _LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 _RELEASES_LIST_URL = f"https://api.github.com/repos/{REPO}/releases"
 _REQUEST_TIMEOUT = 10
 _DOWNLOAD_TIMEOUT_SEC = 60
+# Matches gcp_client.download_object's chunk size -- also the unit
+# progress gets reported in, rather than per-byte, for the same reason:
+# an installer this size (~100-200MB) would otherwise fire the
+# cross-thread progress signal thousands of times a second for no
+# perceptible benefit to a status bar.
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 # Generous but bounded -- a silent Inno Setup install of this app's size
 # should take seconds, not minutes; this just guards against a hung
 # installer process rather than expecting to be hit in practice.
@@ -85,7 +92,9 @@ def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
     )
 
 
-def download_and_install_windows_update(installer_url: str) -> None:
+def download_and_install_windows_update(
+    installer_url: str, on_progress: Callable[[int, int], None] | None = None
+) -> None:
     """Downloads the Windows installer and runs it silently in place,
     then relaunches the app -- Windows-only (the caller is expected to
     only reach this from a platform-gated UI action, same convention as
@@ -99,18 +108,33 @@ def download_and_install_windows_update(installer_url: str) -> None:
     installer by hand. Nothing extra (ShellExecute/"runas") is needed to
     trigger it.
 
+    on_progress, if given, is called periodically during the download
+    with (bytes_downloaded, total_bytes) -- total_bytes is 0 if the
+    server didn't send a Content-Length. This function runs on a
+    background thread (see settings/ui/main_view.py's
+    run_in_background), so on_progress must itself be safe to call from
+    there -- the caller is expected to pass a Qt Signal's .emit (safe
+    cross-thread by Qt's own design), not touch any widget directly.
+
     Raises UpdateInstallError on download failure, a non-zero installer
     exit code, or a timeout waiting for it. On success, the new version
     has already been launched as a separate process before this returns
     -- the caller is expected to quit this process right after.
     """
-    response = requests.get(installer_url, timeout=_DOWNLOAD_TIMEOUT_SEC)
-    response.raise_for_status()
-
-    fd, installer_path_str = tempfile.mkstemp(suffix=".exe")
-    installer_path = Path(installer_path_str)
-    with os.fdopen(fd, "wb") as f:
-        f.write(response.content)
+    with requests.get(installer_url, timeout=_DOWNLOAD_TIMEOUT_SEC, stream=True) as response:
+        response.raise_for_status()
+        # Only created once the response is confirmed good -- a failed
+        # request (404, network error) shouldn't leak an empty temp file.
+        fd, installer_path_str = tempfile.mkstemp(suffix=".exe")
+        installer_path = Path(installer_path_str)
+        total = int(response.headers.get("Content-Length") or 0)
+        downloaded = 0
+        with os.fdopen(fd, "wb") as f:
+            for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if on_progress is not None:
+                    on_progress(downloaded, total)
 
     proc = subprocess.Popen(
         [str(installer_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
