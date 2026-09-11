@@ -33,6 +33,24 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 SetupIconFile=src\it_toolbox\resources\icons\it-toolbox.ico
 
+[InstallDelete]
+; Every release's build\pyembed tree is a complete, freshly-regenerated
+; Python environment (build.ps1 wipes and rebuilds it from scratch every
+; time), never an incremental patch onto a prior one -- mirrors
+; packaging/linux/build.sh's own `sudo rm -rf "$PREFIX"` before
+; rebuilding. Without this, [Files] below only ever *adds*/overwrites
+; files present in the new payload; it never removes anything an older
+; version left behind that the new one doesn't have. Confirmed
+; concretely: pip creates a *versioned* dist-info folder per install
+; (it_toolbox-X.Y.Zb.dist-info), so upgrading in place left both the old
+; and new version's dist-info sitting side by side in site-packages --
+; importlib.metadata.version() (core/update_checker.py's
+; get_installed_version(), shown in Settings and used to decide whether
+; an update is even available) has no guaranteed preference for the
+; newer one when duplicates exist, reproducing exactly "the app still
+; shows the previous version after updating."
+Type: filesandordirs; Name: "{app}"
+
 [Files]
 ; The embeddable Python distribution, with it-toolbox and its
 ; dependencies pip-installed into it at build time -- see build.ps1.
