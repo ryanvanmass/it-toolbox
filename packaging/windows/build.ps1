@@ -43,7 +43,16 @@ if (-not $PthFile) {
 #    install our wheel + its dependencies into this same tree.
 Invoke-WebRequest -Uri $GetPipUrl -OutFile "build\get-pip.py"
 & "$PyEmbedDir\python.exe" "build\get-pip.py"
-$Wheel = Get-ChildItem "dist\it_toolbox-$Version-py3-none-any.whl"
+# A glob, not "it_toolbox-$Version-py3-none-any.whl" -- `python -m build`
+# normalizes pyproject.toml's raw version string to PEP 440 canonical
+# form for the actual wheel filename (e.g. "0.3.0-beta.1" -> "0.3.0b1"),
+# so building that filename from $Version directly doesn't match what
+# actually landed in dist\. Safe as a plain glob since the wheel-removal
+# step above guarantees at most one matches.
+$Wheel = Get-ChildItem "dist\it_toolbox-*-py3-none-any.whl" | Select-Object -First 1
+if (-not $Wheel) {
+    throw "No wheel found in dist\ matching it_toolbox-*-py3-none-any.whl"
+}
 & "$PyEmbedDir\python.exe" -m pip install $Wheel.FullName
 
 # 5. Build the installer with Inno Setup.
