@@ -27,9 +27,25 @@ section) has something to compare the installed version against.
 
    Pushing the tag triggers `.github/workflows/release.yml`, which builds
    the Linux `.deb`/`.rpm` (via `.github/workflows/package-linux.yml`)
+   and the Windows installer (via `.github/workflows/package-windows.yml`)
    and publishes a GitHub Release for `vX.Y.Z` with auto-generated
-   release notes (from commits since the previous tag) plus those two
+   release notes (from commits since the previous tag) plus those
    packages attached as downloadable assets.
+
+## Pre-releases
+
+`scripts/release.sh` also accepts a pre-release suffix:
+`scripts/release.sh X.Y.Z-beta.N` (or `-alpha`/`-rc`/`-pre`/`-preview`,
+each with an optional trailing number). The steps are otherwise
+identical — push `main` and `vX.Y.Z-beta.N` the same way. `release.yml`
+detects the `-` in the pushed tag and marks the published Release as a
+pre-release, so it still builds and uploads real packages, but the
+result won't show up through GitHub's `/releases/latest` API — which is
+what `core/update_checker.py`'s `get_latest_release()` reads, so a
+pre-release never gets offered to users through the in-app updater. The
+`-` separator specifically (not `.` or nothing, both of which the
+version string itself would also tolerate) is required so that
+substring check in `release.yml` stays reliable.
 
 ## Windows packages
 
