@@ -40,11 +40,10 @@ binary — still a plain, unmodified interpreter) with it-toolbox and its
 dependencies `pip install`'d into it at build time, then wraps it with
 [Inno Setup](https://jrsoftware.org/isinfo.php) into a `setup.exe`.
 `.github/workflows/package-windows.yml` runs the exact same script, and
-can be triggered manually (`workflow_dispatch`, no release side effect)
-— **not yet wired into `release.yml`**, since none of this has been
-verified against a real Windows environment yet (this project's own dev
-work happens on Linux). Wire it in once a `workflow_dispatch` run has
-actually been inspected and the installer confirmed to work.
+can also be triggered manually (`workflow_dispatch`, no release side
+effect) to test packaging changes before they touch a real release. It's
+wired into `release.yml` and has shipped real installers since v0.2.6,
+confirmed working against a real Windows environment.
 
 ## Linux packages
 

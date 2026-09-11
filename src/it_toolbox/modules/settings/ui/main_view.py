@@ -10,11 +10,13 @@ from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -134,12 +136,22 @@ class SettingsView(QWidget):
         self._update_link_button.clicked.connect(self._open_latest_release)
         self._latest_release_url: str | None = None
 
+        # Windows-only for now -- the Linux .deb/.rpm packages need root,
+        # with no one clean unprivileged elevation path the way Inno
+        # Setup's requireAdministrator manifest gives Windows (see
+        # update_checker.download_and_install_windows_update).
+        self._install_update_button = QPushButton("Download && Install")
+        self._install_update_button.hide()
+        self._install_update_button.clicked.connect(self._on_install_update_clicked)
+        self._pending_installer_url: str | None = None
+
         self._check_updates_button = QPushButton("Check for Updates")
         self._check_updates_button.clicked.connect(self._on_check_updates_clicked)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self._check_updates_button)
         button_row.addWidget(self._update_link_button)
+        button_row.addWidget(self._install_update_button)
         button_row.addStretch(1)
 
         layout.addWidget(self._update_status_label)
@@ -150,6 +162,7 @@ class SettingsView(QWidget):
         self._check_updates_button.setEnabled(False)
         self._update_status_label.setText("Checking for updates…")
         self._update_link_button.hide()
+        self._install_update_button.hide()
         run_in_background(
             update_checker.get_latest_release,
             on_result=self._on_latest_release_checked,
@@ -172,6 +185,9 @@ class SettingsView(QWidget):
             )
             self._latest_release_url = release.html_url
             self._update_link_button.show()
+            if platform.system() == "Windows" and release.windows_installer_url is not None:
+                self._pending_installer_url = release.windows_installer_url
+                self._install_update_button.show()
         else:
             self._update_status_label.setText(f"Up to date (v{installed_version})")
 
@@ -182,6 +198,52 @@ class SettingsView(QWidget):
     def _open_latest_release(self) -> None:
         if self._latest_release_url is not None:
             QDesktopServices.openUrl(QUrl(self._latest_release_url))
+
+    def _on_install_update_clicked(self) -> None:
+        if self._pending_installer_url is None:
+            return
+        choice = QMessageBox.question(
+            self,
+            "Install Update",
+            "IT Toolbox will close to install the update, then reopen. "
+            "Windows may ask you to approve the installer.\n\n"
+            "Continue?",
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+
+        self._check_updates_button.setEnabled(False)
+        self._update_link_button.setEnabled(False)
+        self._install_update_button.setEnabled(False)
+        self._update_status_label.setText("Downloading update…")
+        installer_url = self._pending_installer_url
+        run_in_background(
+            lambda: update_checker.download_and_install_windows_update(installer_url),
+            on_result=self._on_update_installed,
+            on_error=self._on_update_install_error,
+        )
+
+    def _on_update_installed(self, _result: None) -> None:
+        # The new version was already launched as a separate process by
+        # download_and_install_windows_update -- this process's only job
+        # left is to get out of the way of the installer having just
+        # replaced its own files. Split into its own method (rather than
+        # calling QApplication.instance().quit() directly here) so tests
+        # can monkeypatch this one instance's behavior instead of the
+        # real, test-session-wide QApplication singleton that pytest-qt's
+        # own internals also depend on.
+        self._quit_application()
+
+    def _quit_application(self) -> None:
+        QApplication.instance().quit()
+
+    def _on_update_install_error(self, error: Exception) -> None:
+        self._check_updates_button.setEnabled(True)
+        self._update_link_button.setEnabled(True)
+        self._install_update_button.setEnabled(True)
+        self._update_status_label.setText(
+            f"Update install failed: {error} — you can still install it manually via View Release."
+        )
 
     # -- rclone -----------------------------------------------------------
 
