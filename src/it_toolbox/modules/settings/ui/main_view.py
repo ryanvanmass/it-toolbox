@@ -11,6 +11,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGroupBox,
@@ -154,17 +155,32 @@ class SettingsView(QWidget):
         button_row.addWidget(self._install_update_button)
         button_row.addStretch(1)
 
+        # Off by default -- GitHub's /releases/latest (the plain,
+        # non-opted-in path in update_checker.get_latest_release) never
+        # returns a pre-release on its own, so this only changes anything
+        # once someone deliberately wants to beta-test.
+        self._include_prerelease_checkbox = QCheckBox("Include pre-release (beta) updates")
+        self._include_prerelease_checkbox.setChecked(settings.load_include_prerelease_updates())
+        self._include_prerelease_checkbox.checkStateChanged.connect(
+            self._on_include_prerelease_changed
+        )
+
         layout.addWidget(self._update_status_label)
         layout.addLayout(button_row)
+        layout.addWidget(self._include_prerelease_checkbox)
         return box
+
+    def _on_include_prerelease_changed(self) -> None:
+        settings.save_include_prerelease_updates(self._include_prerelease_checkbox.isChecked())
 
     def _on_check_updates_clicked(self) -> None:
         self._check_updates_button.setEnabled(False)
         self._update_status_label.setText("Checking for updates…")
         self._update_link_button.hide()
         self._install_update_button.hide()
+        include_prerelease = self._include_prerelease_checkbox.isChecked()
         run_in_background(
-            update_checker.get_latest_release,
+            lambda: update_checker.get_latest_release(include_prerelease=include_prerelease),
             on_result=self._on_latest_release_checked,
             on_error=self._on_check_updates_error,
         )
