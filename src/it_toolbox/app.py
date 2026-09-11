@@ -1,4 +1,8 @@
+import sys
+from pathlib import Path
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
@@ -14,6 +18,14 @@ from PySide6.QtWidgets import (
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.registry import load_modules
 from it_toolbox.widgets.rdp_widget import RdpWidget
+
+# Windows' native window/taskbar chrome only ever renders a raster icon
+# (no SVG rasterizer in the picture at all) -- .ico is also a Qt-supported
+# QIcon source everywhere else, but .svg scales more cleanly on Linux
+# desktops that render it larger than any single baked-in .ico resolution,
+# so this still picks per-platform rather than standardizing on one.
+_ICON_NAME = "it-toolbox.ico" if sys.platform == "win32" else "it-toolbox.svg"
+_ICON_PATH = Path(__file__).resolve().parent / "resources" / "icons" / _ICON_NAME
 
 
 class _CurrentPageStackedWidget(QStackedWidget):
@@ -42,6 +54,11 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("IT Toolbox")
+        # Never previously set at all -- every window (and the taskbar/
+        # Alt-Tab entry) fell back to Qt/the OS's own generic placeholder
+        # icon instead of this app's actual logo.
+        if _ICON_PATH.is_file():
+            self.setWindowIcon(QIcon(str(_ICON_PATH)))
         self.resize(1000, 650)
 
         # One tab pane shared by every module, so sessions/terminals

@@ -40,3 +40,9 @@ it-toolbox = "it_toolbox.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# The app's own window icon (app.py) -- also the single source packaging/
+# {linux,windows}'s build scripts copy from for the desktop entry/installer
+# icon, so it has to actually ship in the wheel, not just exist in the repo.
+"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg"]
