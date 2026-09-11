@@ -35,6 +35,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # A tag like v0.3.0-beta.1 (matched by this workflow's own
+          # "v*.*.*" trigger glob, which isn't semver-aware) marks the
+          # published Release as a pre-release -- GitHub's
+          # /releases/latest API excludes those, so update_checker.py's
+          # get_latest_release() (and the in-app updater built on it)
+          # won't offer it to users the way a real stable tag would.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/packages/*.deb
             dist/packages/*.rpm
