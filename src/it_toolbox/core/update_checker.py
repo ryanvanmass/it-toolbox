@@ -118,8 +118,15 @@ def download_and_install_windows_update(installer_url: str) -> None:
     # introspect (see that file's own comment), so this known-fixed
     # location is looked up the same way settings/ui/main_view.py's
     # FreeRDP-fetch code looks up LOCALAPPDATA, rather than guessed at.
-    app_exe = Path(os.environ["ProgramFiles"]) / "IT Toolbox" / "Scripts" / "it-toolbox.exe"
-    subprocess.Popen([str(app_exe)])
+    # Deliberately pythonw.exe -m it_toolbox, not the
+    # {app}\Scripts\it-toolbox.exe launcher pip generates at build time --
+    # that launcher hardcodes the *absolute* interpreter path from build
+    # time (pip/distlib script stubs aren't relocatable), which breaks the
+    # instant this tree is copied anywhere else, same failure
+    # packaging/windows/it-toolbox.iss's own [Icons]/[Run] entries hit and
+    # now avoid the same way.
+    app_exe = Path(os.environ["ProgramFiles"]) / "IT Toolbox" / "pythonw.exe"
+    subprocess.Popen([str(app_exe), "-m", "it_toolbox"])
 
 
 def is_update_available(installed_version: str, latest_version: str) -> bool:
