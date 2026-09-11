@@ -7,6 +7,7 @@ is colored text, this one is monochrome) — a known, deliberate simplification
 to get a working embedded shell first rather than a fully-faithful one.
 """
 
+import logging
 import sys
 import threading
 
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QW
 from it_toolbox.widgets.pty_backend import PtyHandle
 
 _IS_WINDOWS = sys.platform == "win32"
+
+logger = logging.getLogger(__name__)
 
 # Keys without a meaningful event.text() get translated to the escape
 # sequence a real terminal would send for them.
@@ -71,6 +74,15 @@ class TerminalWidget(QPlainTextEdit):
         if font_point_size is not None:
             font.setPointSize(font_point_size)
         self.setFont(font)
+        logger.debug(
+            "terminal-resize: font requested family=%r pointSize=%d -> "
+            "effective family=%r pointSize=%d exactMatch=%s",
+            font.family(),
+            font.pointSize(),
+            self.font().family(),
+            self.font().pointSize(),
+            self.fontInfo().exactMatch(),
+        )
 
         self._cols = cols
         self._rows = rows
@@ -259,6 +271,21 @@ class TerminalWidget(QPlainTextEdit):
         available_height = max(0, self.viewport().height() - 2 * margin)
         cols = max(1, int(available_width // char_width))
         rows = max(1, int(available_height // char_height))
+        logger.debug(
+            "terminal-resize: widget=%dx%d viewport=%dx%d margin=%.1f "
+            "char=%dx%d -> cols=%d rows=%d (was %d,%d)",
+            self.width(),
+            self.height(),
+            self.viewport().width(),
+            self.viewport().height(),
+            margin,
+            char_width,
+            char_height,
+            cols,
+            rows,
+            self._cols,
+            self._rows,
+        )
         if (cols, rows) != (self._cols, self._rows):
             self.resizeTerminal(cols, rows)
 
