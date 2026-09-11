@@ -25,6 +25,7 @@ def _make_view(
     platform_system="Linux",
     qemu_available=False,
     default_rdp_resolution=None,
+    rdp_keyboard_layout=0x0409,
     terminal_font_size=None,
     default_double_click_action="ask",
     jumpcloud_key_configured=False,
@@ -43,6 +44,7 @@ def _make_view(
     monkeypatch.setattr(rclone_client, "rclone_executable", lambda: "/usr/bin/rclone")
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
+    monkeypatch.setattr(settings, "load_rdp_keyboard_layout", lambda: rdp_keyboard_layout)
     monkeypatch.setattr(settings, "load_terminal_font_size", lambda: terminal_font_size)
     monkeypatch.setattr(
         settings, "load_default_double_click_action", lambda: default_double_click_action
@@ -432,6 +434,28 @@ def test_changing_rdp_resolution_back_to_match_window_size_clears_it(qtbot, monk
     view._rdp_resolution_combo.setCurrentText("Match window size")
 
     assert saved == [None]
+
+
+def test_rdp_keyboard_layout_section_defaults_to_english_us(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, rdp_keyboard_layout=0x0409)
+
+    assert view._rdp_keyboard_layout_combo.currentText() == "English (US)"
+
+
+def test_rdp_keyboard_layout_section_preselects_the_saved_layout(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, rdp_keyboard_layout=0x040C)
+
+    assert view._rdp_keyboard_layout_combo.currentText() == "French"
+
+
+def test_changing_rdp_keyboard_layout_saves_it(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(settings, "save_rdp_keyboard_layout", lambda value: saved.append(value))
+
+    view._rdp_keyboard_layout_combo.setCurrentText("German")
+
+    assert saved == [0x0407]
 
 
 def test_terminal_font_size_section_defaults_to_default(qtbot, monkeypatch):
