@@ -47,6 +47,23 @@ pre-release never gets offered to users through the in-app updater. The
 version string itself would also tolerate) is required so that
 substring check in `release.yml` stays reliable.
 
+## After merging a PR
+
+Standing practice now, not just for packaging-specific changes: after
+merging a PR into `main`, cut the next pre-release beta
+(`scripts/release.sh X.Y.Z-beta.N+1`, then push `main` and the tag) and
+confirm the resulting build — and, for anything Windows/Linux-packaging-
+or launch-relevant, an actual install — before moving on. In one
+session this caught two real, previously invisible bugs that `pytest`
+alone had no way to catch, because neither is exercised by the test
+suite, only by an actual build-and-install: a wheel-filename mismatch
+that broke every pre-release build, and a Windows installer that
+produced a completely unlaunchable app (every Windows release shipped
+before that fix was affected). Use judgment for changes with no
+possible packaging/runtime-launch impact (e.g. a docs-only PR) — the
+point is catching what tests structurally can't, not cutting a beta on
+reflex for every single merge.
+
 ## Windows packages
 
 `packaging/windows/build.ps1` builds a Windows installer the same way
@@ -67,8 +84,11 @@ confirmed working against a real Windows environment.
 (`pip install`'d packages, not a from-scratch Python interpreter — a
 system `python3 (>= 3.11)` is still a real dependency) at its actual
 final install path (`/usr/share/it-toolbox/venv`), then wraps it with
-[`fpm`](https://github.com/jordansissel/fpm) plus a `.desktop` entry and
-icon from `packaging/linux/`. It's runnable standalone (needs `python3`,
+[`fpm`](https://github.com/jordansissel/fpm) plus a `.desktop` entry
+(`packaging/linux/it-toolbox.desktop`) and the app's own icon
+(`src/it_toolbox/resources/icons/` — bundled in the wheel so the
+*running app* can also load it for its own window icon, not just this
+packaging step). It's runnable standalone (needs `python3`,
 `fpm`, and `rpm` on `PATH`, plus `sudo` — it writes to real `/usr/share`
 on the build host, which is fine on a CI runner or anything else you're
 treating as disposable for the build) — useful for iterating on the

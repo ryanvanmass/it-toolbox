@@ -31,7 +31,7 @@ Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
-SetupIconFile=packaging\windows\icons\it-toolbox.ico
+SetupIconFile=src\it_toolbox\resources\icons\it-toolbox.ico
 
 [Files]
 ; The embeddable Python distribution, with it-toolbox and its
@@ -43,7 +43,10 @@ Source: "build\pyembed\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubd
 ; launcher stubs don't carry a custom icon, and {app}\Scripts\it-toolbox.exe
 ; (see the [Icons]/[Run] comment below for why that launcher is avoided
 ; entirely) isn't used for anything else that would've brought this in.
-Source: "packaging\windows\icons\it-toolbox.ico"; DestDir: "{app}"
+; The single canonical copy lives inside the package itself so the
+; *running app* can also load it at runtime for its own window icon
+; (app.py) -- not duplicated, just reused for this installer too.
+Source: "src\it_toolbox\resources\icons\it-toolbox.ico"; DestDir: "{app}"
 
 [Icons]
 ; Deliberately {app}\pythonw.exe -m it_toolbox, not

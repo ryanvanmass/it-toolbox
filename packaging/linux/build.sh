@@ -56,7 +56,10 @@ STAGE=$(mktemp -d)
 mkdir -p "$STAGE/usr/bin" "$STAGE/usr/share/applications" \
          "$STAGE/usr/share/icons/hicolor/scalable/apps"
 cp packaging/linux/it-toolbox.desktop "$STAGE/usr/share/applications/"
-cp packaging/linux/icons/it-toolbox.svg "$STAGE/usr/share/icons/hicolor/scalable/apps/"
+# The single canonical copy lives inside the package itself (src/it_toolbox
+# /resources/icons/) so the *running app* can also load it at runtime for
+# its own window icon (app.py) -- not duplicated here, just reused.
+cp src/it_toolbox/resources/icons/it-toolbox.svg "$STAGE/usr/share/icons/hicolor/scalable/apps/"
 cat > "$STAGE/usr/bin/it-toolbox" <<'WRAPPER'
 #!/bin/sh
 exec /usr/share/it-toolbox/venv/bin/it-toolbox "$@"
