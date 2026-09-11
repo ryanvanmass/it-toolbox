@@ -126,13 +126,31 @@ def test_get_latest_release_windows_installer_url_is_none_without_an_exe_asset(
 
 
 class _FakeDownloadResponse:
-    def __init__(self, content: bytes = b"fake-installer-bytes", status_code: int = 200) -> None:
-        self.content = content
+    def __init__(
+        self,
+        content: bytes = b"fake-installer-bytes",
+        status_code: int = 200,
+        content_length: int | None = None,
+    ) -> None:
+        self._content = content
         self.status_code = status_code
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
 
     def raise_for_status(self):
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size):
+        for i in range(0, len(self._content), chunk_size):
+            yield self._content[i : i + chunk_size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
 
 
 class _FakePopen:
@@ -162,7 +180,13 @@ def _reset_fake_popen():
 def test_download_and_install_windows_update_launches_the_silent_installer_then_relaunches(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(update_checker.requests, "get", lambda url, timeout: _FakeDownloadResponse())
+    monkeypatch.setattr(
+        update_checker.requests,
+        "get",
+        lambda url, timeout, stream=True: _FakeDownloadResponse(
+            content_length=len(b"fake-installer-bytes")
+        ),
+    )
     monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
     monkeypatch.setenv("ProgramFiles", str(tmp_path))
     _FakePopen.wait_results = [0]
@@ -176,8 +200,57 @@ def test_download_and_install_windows_update_launches_the_silent_installer_then_
     assert relaunch_call == [str(tmp_path / "IT Toolbox" / "pythonw.exe"), "-m", "it_toolbox"]
 
 
+def test_download_and_install_windows_update_reports_progress(monkeypatch, tmp_path):
+    content = b"x" * 30  # 3 chunks at chunk_size=10, to exercise multiple progress calls
+    monkeypatch.setattr(update_checker, "_DOWNLOAD_CHUNK_SIZE", 10)
+    monkeypatch.setattr(
+        update_checker.requests,
+        "get",
+        lambda url, timeout, stream=True: _FakeDownloadResponse(
+            content=content, content_length=len(content)
+        ),
+    )
+    monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    _FakePopen.wait_results = [0]
+    progress_calls = []
+
+    update_checker.download_and_install_windows_update(
+        "https://example.com/setup.exe", on_progress=lambda d, t: progress_calls.append((d, t))
+    )
+
+    assert progress_calls == [(10, 30), (20, 30), (30, 30)]
+
+
+def test_download_and_install_windows_update_progress_total_is_zero_without_content_length(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        update_checker.requests,
+        "get",
+        lambda url, timeout, stream=True: _FakeDownloadResponse(),  # no content_length
+    )
+    monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    _FakePopen.wait_results = [0]
+    progress_calls = []
+
+    update_checker.download_and_install_windows_update(
+        "https://example.com/setup.exe", on_progress=lambda d, t: progress_calls.append((d, t))
+    )
+
+    assert progress_calls
+    assert all(total == 0 for _downloaded, total in progress_calls)
+
+
 def test_download_and_install_windows_update_raises_on_nonzero_exit(monkeypatch, tmp_path):
-    monkeypatch.setattr(update_checker.requests, "get", lambda url, timeout: _FakeDownloadResponse())
+    monkeypatch.setattr(
+        update_checker.requests,
+        "get",
+        lambda url, timeout, stream=True: _FakeDownloadResponse(
+            content_length=len(b"fake-installer-bytes")
+        ),
+    )
     monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
     monkeypatch.setenv("ProgramFiles", str(tmp_path))
     _FakePopen.wait_results = [1]
@@ -190,7 +263,13 @@ def test_download_and_install_windows_update_raises_on_nonzero_exit(monkeypatch,
 
 
 def test_download_and_install_windows_update_raises_on_timeout(monkeypatch, tmp_path):
-    monkeypatch.setattr(update_checker.requests, "get", lambda url, timeout: _FakeDownloadResponse())
+    monkeypatch.setattr(
+        update_checker.requests,
+        "get",
+        lambda url, timeout, stream=True: _FakeDownloadResponse(
+            content_length=len(b"fake-installer-bytes")
+        ),
+    )
     monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
     monkeypatch.setenv("ProgramFiles", str(tmp_path))
     _FakePopen.wait_results = [subprocess.TimeoutExpired(cmd="setup.exe", timeout=300)]

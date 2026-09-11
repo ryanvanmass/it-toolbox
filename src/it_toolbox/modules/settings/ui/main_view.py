@@ -7,7 +7,7 @@ import platform
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -44,6 +45,21 @@ except (ImportError, OSError):
 
 _FREERDP_FETCH_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "fetch_freerdp_windows.ps1"
 _FREERDP_DEST_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
+
+
+class _DownloadProgressSignal(QObject):
+    """update_checker.download_and_install_windows_update's on_progress
+    runs on a background thread -- a QObject's Signal is the standard
+    safe way to get that back to the main thread (Qt auto-queues
+    delivery across threads), the same underlying mechanism
+    async_utils._WorkerSignals already relies on for on_result/on_error.
+    A tiny one-off QObject here rather than a change to the shared
+    run_in_background helper, since progress reporting is specific to
+    this one call site, not a general capability every background task
+    needs.
+    """
+
+    progress = Signal(int, int)  # bytes_downloaded, total_bytes (0 if unknown)
 
 # (dropdown label, stored value) — None means "match window size", the
 # default. See settings.load_default_rdp_resolution()'s docstring for why
@@ -155,6 +171,13 @@ class SettingsView(QWidget):
         button_row.addWidget(self._install_update_button)
         button_row.addStretch(1)
 
+        # Hidden outside an active download -- there's nothing else in
+        # this flow with meaningful progress to show (the silent install
+        # step that follows has no observable progress of its own, and is
+        # normally quick), so this only ever tracks the download.
+        self._update_download_progress_bar = QProgressBar()
+        self._update_download_progress_bar.hide()
+
         # Off by default -- GitHub's /releases/latest (the plain,
         # non-opted-in path in update_checker.get_latest_release) never
         # returns a pre-release on its own, so this only changes anything
@@ -167,6 +190,7 @@ class SettingsView(QWidget):
 
         layout.addWidget(self._update_status_label)
         layout.addLayout(button_row)
+        layout.addWidget(self._update_download_progress_bar)
         layout.addWidget(self._include_prerelease_checkbox)
         return box
 
@@ -178,6 +202,7 @@ class SettingsView(QWidget):
         self._update_status_label.setText("Checking for updates…")
         self._update_link_button.hide()
         self._install_update_button.hide()
+        self._update_download_progress_bar.hide()
         include_prerelease = self._include_prerelease_checkbox.isChecked()
         run_in_background(
             lambda: update_checker.get_latest_release(include_prerelease=include_prerelease),
@@ -232,12 +257,42 @@ class SettingsView(QWidget):
         self._update_link_button.setEnabled(False)
         self._install_update_button.setEnabled(False)
         self._update_status_label.setText("Downloading update…")
+        self._update_download_progress_bar.setRange(0, 0)  # indeterminate until a total is known
+        self._update_download_progress_bar.setValue(0)
+        self._update_download_progress_bar.show()
         installer_url = self._pending_installer_url
+
+        # Kept alive on self, not just a local -- this QObject must
+        # outlive the background download for its signal to have anywhere
+        # to deliver to; a local variable would be eligible for GC as soon
+        # as this method returns, well before the download finishes.
+        self._update_download_progress_signal = _DownloadProgressSignal()
+        self._update_download_progress_signal.progress.connect(self._on_update_download_progress)
+        report_progress = self._update_download_progress_signal.progress.emit
+
         run_in_background(
-            lambda: update_checker.download_and_install_windows_update(installer_url),
+            lambda: update_checker.download_and_install_windows_update(
+                installer_url, on_progress=report_progress
+            ),
             on_result=self._on_update_installed,
             on_error=self._on_update_install_error,
         )
+
+    def _on_update_download_progress(self, downloaded: int, total: int) -> None:
+        downloaded_mb = downloaded / (1024 * 1024)
+        if total > 0:
+            self._update_download_progress_bar.setRange(0, total)
+            self._update_download_progress_bar.setValue(downloaded)
+            percent = downloaded * 100 // total
+            total_mb = total / (1024 * 1024)
+            self._update_status_label.setText(
+                f"Downloading update… {percent}% ({downloaded_mb:.1f} / {total_mb:.1f} MB)"
+            )
+        else:
+            # No Content-Length from the server -- indeterminate bar
+            # (already the state _on_install_update_clicked left it in),
+            # just keep the byte count moving.
+            self._update_status_label.setText(f"Downloading update… ({downloaded_mb:.1f} MB)")
 
     def _on_update_installed(self, _result: None) -> None:
         # The new version was already launched as a separate process by
@@ -257,6 +312,7 @@ class SettingsView(QWidget):
         self._check_updates_button.setEnabled(True)
         self._update_link_button.setEnabled(True)
         self._install_update_button.setEnabled(True)
+        self._update_download_progress_bar.hide()
         self._update_status_label.setText(
             f"Update install failed: {error} — you can still install it manually via View Release."
         )

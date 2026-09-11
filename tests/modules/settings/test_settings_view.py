@@ -238,7 +238,9 @@ def test_install_update_declined_does_not_download(qtbot, monkeypatch):
     )
     calls = []
     monkeypatch.setattr(
-        update_checker, "download_and_install_windows_update", lambda url: calls.append(url)
+        update_checker,
+        "download_and_install_windows_update",
+        lambda url, on_progress=None: calls.append(url),
     )
 
     view._install_update_button.click()
@@ -257,7 +259,9 @@ def test_install_update_accepted_downloads_installs_and_quits(qtbot, monkeypatch
     )
     calls = []
     monkeypatch.setattr(
-        update_checker, "download_and_install_windows_update", lambda url: calls.append(url)
+        update_checker,
+        "download_and_install_windows_update",
+        lambda url, on_progress=None: calls.append(url),
     )
     quit_calls = []
     # Patching this instance's own _quit_application (rather than the
@@ -272,6 +276,53 @@ def test_install_update_accepted_downloads_installs_and_quits(qtbot, monkeypatch
     assert calls == ["https://example.com/setup.exe"]
 
 
+def test_install_update_shows_progress_bar_during_download(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
+    view._pending_installer_url = "https://example.com/setup.exe"
+    view._install_update_button.show()
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox,
+        "question",
+        lambda *a, **k: settings_main_view.QMessageBox.StandardButton.Yes,
+    )
+
+    def _fake_download(url, on_progress=None):
+        assert on_progress is not None
+        on_progress(50, 100)
+
+    monkeypatch.setattr(update_checker, "download_and_install_windows_update", _fake_download)
+    monkeypatch.setattr(view, "_quit_application", lambda: None)
+
+    assert view._update_download_progress_bar.isHidden()
+    view._install_update_button.click()
+
+    qtbot.waitUntil(lambda: not view._update_download_progress_bar.isHidden())
+    qtbot.waitUntil(lambda: view._update_download_progress_bar.value() == 50)
+    assert view._update_download_progress_bar.maximum() == 100
+    assert "50%" in view._update_status_label.text()
+
+
+def test_install_update_failure_hides_progress_bar(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
+    view._pending_installer_url = "https://example.com/setup.exe"
+    view._install_update_button.show()
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox,
+        "question",
+        lambda *a, **k: settings_main_view.QMessageBox.StandardButton.Yes,
+    )
+
+    def _raise(url, on_progress=None):
+        raise update_checker.UpdateInstallError("installer exploded")
+
+    monkeypatch.setattr(update_checker, "download_and_install_windows_update", _raise)
+
+    view._install_update_button.click()
+
+    qtbot.waitUntil(lambda: "Update install failed" in view._update_status_label.text())
+    assert view._update_download_progress_bar.isHidden()
+
+
 def test_install_update_failure_shows_error_and_reenables_buttons(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Windows")
     view._pending_installer_url = "https://example.com/setup.exe"
@@ -282,7 +333,7 @@ def test_install_update_failure_shows_error_and_reenables_buttons(qtbot, monkeyp
         lambda *a, **k: settings_main_view.QMessageBox.StandardButton.Yes,
     )
 
-    def _raise(url):
+    def _raise(url, on_progress=None):
         raise update_checker.UpdateInstallError("installer exploded")
 
     monkeypatch.setattr(update_checker, "download_and_install_windows_update", _raise)
