@@ -204,3 +204,63 @@ def test_shift_tab_does_not_steal_focus(qtbot, terminal_with_sibling):
     qtbot.keyClick(term, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
 
     assert term.hasFocus()
+
+
+# -- Resizing the widget resizes the pty/pyte grid to match -----------------
+#
+# Regression: the pty/pyte screen was a fixed cols x rows grid, entirely
+# disconnected from the widget's actual pixel size -- a full-screen program
+# like nano/vim only ever redraws to fill whatever size the pty *reports*
+# (via TIOCSWINCH), so growing the widget left everything past its size at
+# construction time as dead space instead of the display actually scaling
+# up to fill it.
+
+
+def test_growing_the_widget_grows_the_terminal_grid(qtbot):
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+    term.show()
+    qtbot.waitExposed(term)
+    qtbot.waitUntil(lambda: bool(term.toPlainText().strip()), timeout=3000)
+
+    term.resize(term.width() * 3, term.height() * 3)
+    qtbot.wait(50)
+
+    assert term._cols > 80
+    assert term._rows > 24
+    term.close_session()
+
+
+def test_shrinking_the_widget_shrinks_the_terminal_grid(qtbot):
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+    term.resize(1600, 1200)
+    term.show()
+    qtbot.waitExposed(term)
+    qtbot.waitUntil(lambda: bool(term.toPlainText().strip()), timeout=3000)
+    grown_cols, grown_rows = term._cols, term._rows
+
+    term.resize(term.width() // 4, term.height() // 4)
+    qtbot.wait(50)
+
+    assert term._cols < grown_cols
+    assert term._rows < grown_rows
+    term.close_session()
+
+
+def test_resizing_the_widget_sends_the_new_size_to_the_pty(qtbot, monkeypatch):
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+    term.show()
+    qtbot.waitExposed(term)
+    qtbot.waitUntil(lambda: bool(term.toPlainText().strip()), timeout=3000)
+
+    resize_calls = []
+    monkeypatch.setattr(term._pty, "resize", lambda cols, rows: resize_calls.append((cols, rows)))
+
+    term.resize(term.width() * 2, term.height() * 2)
+    qtbot.wait(50)
+
+    assert resize_calls
+    assert resize_calls[-1] == (term._cols, term._rows)
+    term.close_session()
