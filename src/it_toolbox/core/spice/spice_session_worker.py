@@ -22,6 +22,17 @@ which is thread-safe by design (unlike RdpSessionWorker's hand-rolled
 queue-plus-polling approach, needed there because FreeRDP's pump loop has
 no built-in cross-thread scheduling primitive of its own; spice-glib's
 GLib main loop already does).
+
+send_mouse_move specifically coalesces bursts instead of calling
+idle_add() once per Qt mouseMoveEvent -- a real, measured-to-matter
+difference from a native (non-Python) SPICE client: every idle_add()
+call here is a Python-GIL cross-thread handoff, and this process is
+Python end to end (PySide6 + PyGObject), unlike e.g. virt-viewer, a
+single native GTK+spice-gtk process with no GIL to contend for at all.
+Dragging something in the guest is exactly the scenario that floods this
+thread with mouseMoveEvents while the GLib loop thread is simultaneously
+trying to decode incoming display data and emit frames -- see
+send_mouse_move's own docstring below.
 """
 
 import threading
@@ -70,6 +81,8 @@ class SpiceSessionWorker:
         self._thread: threading.Thread | None = None
         self._last_emit_at = 0.0
         self._frame_timeout_pending = False
+        self._pending_mouse_pos: tuple[int, int] | None = None
+        self._mouse_move_idle_scheduled = False
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -87,7 +100,32 @@ class SpiceSessionWorker:
     # --- input — safe to call from the Qt thread ------------------------
 
     def send_mouse_move(self, x: int, y: int) -> None:
-        GLib.idle_add(self._session.send_mouse_move, x, y)
+        """Coalesces a burst of mouseMoveEvents (dragging something in the
+        guest generates a lot of these) into at most one pending
+        GLib.idle_add() at a time, instead of one idle_add() per event.
+        Only the most recent position is ever "lost" by coalescing --
+        exactly like the frame-capture throttle, nothing here needs the
+        pointer's full path, only where it ends up next. This runs on the
+        Qt thread; `_mouse_move_idle_scheduled` is also read/written from
+        the GLib loop thread inside _flush_mouse_move() below, but the
+        only possible race is a redundant extra idle_add() slipping
+        through occasionally (harmless -- it just re-sends the same/a
+        very close position) or, at worst, one coalescing opportunity
+        missed -- never a lost update, since `_pending_mouse_pos` always
+        holds the latest position and _flush_mouse_move() always sends
+        whatever's currently there.
+        """
+        self._pending_mouse_pos = (x, y)
+        if not self._mouse_move_idle_scheduled:
+            self._mouse_move_idle_scheduled = True
+            GLib.idle_add(self._flush_mouse_move)
+
+    def _flush_mouse_move(self) -> bool:
+        self._mouse_move_idle_scheduled = False
+        pos = self._pending_mouse_pos
+        if pos is not None:
+            self._session.send_mouse_move(*pos)
+        return GLib.SOURCE_REMOVE
 
     def send_mouse_button(self, button: str, down: bool) -> None:
         GLib.idle_add(self._session.send_mouse_button, button, down)
