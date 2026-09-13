@@ -7,31 +7,39 @@ Linux, so nothing here has ever been verified end-to-end until the
 
 ## What to test right now
 
-`v0.3.0-beta.6` (<https://github.com/ryanvanmass/it-toolbox/releases/tag/v0.3.0-beta.6>)
-bundles everything fixed so far. Checklist:
+As of `v0.3.0-beta.9` (<https://github.com/ryanvanmass/it-toolbox/releases/tag/v0.3.0-beta.9>),
+every item below has been confirmed working end to end on a real
+Windows machine, including the in-app update loop itself. Keep using
+this checklist on every future beta — regressions are cheap to catch
+here and expensive to catch any other way (see
+[Testing a packaging change without cutting a real release](#testing-a-packaging-change-without-cutting-a-real-release)).
 
-1. **Install it** (`it-toolbox-0.3.0-beta.6-setup.exe`, double-click, accept UAC).
+1. **Install it** (`it-toolbox-X.Y.Z-setup.exe`, double-click, accept UAC).
 2. **Launch it** from the Start Menu. If this fails with "Fatal Error in
    Launcher" / "Unable to create process using ...pythonw.exe...", see
    [Launcher pointed at a build-time-only path](#launcher-pointed-at-a-build-time-only-path)
-   below — that specific error should be gone as of beta.3, but confirm.
+   — fixed since beta.3.
 3. **Check the icon** — title bar and taskbar should show the real IT
-   Toolbox logo, not a generic placeholder. Fixed in beta.5.
+   Toolbox logo, not a generic placeholder. Fixed since beta.5.
 4. **Check the version** in Settings > App Updates matches what you just
-   installed (`0.3.0-beta.6`). This is the one most worth being careful
-   about — see [Stale version after an update](#stale-version-after-an-update).
+   installed. See [Stale version after an update](#stale-version-after-an-update)
+   if it doesn't — fixed since beta.6.
 5. **Exercise the in-app update loop itself**, not just a fresh install:
    - Settings > App Updates > check "Include pre-release (beta) updates".
    - Click "Check for Updates" — should say an update's available once a
      newer beta exists (ask if one hasn't been cut yet for this).
-   - Click "Download && Install" — confirm the dialog, watch the new
-     progress bar move, expect a UAC prompt when the silent install
-     actually kicks off, then the app should close and reopen on its own.
-   - This used to silently fail every time (confirmed on a real machine,
-     not theoretical) — see
+   - Click "Download && Install" — confirm the dialog, watch the
+     download progress bar move, expect a UAC prompt when the silent
+     install kicks off. The app closes almost immediately after that —
+     expect a brief gap with **no IT Toolbox window at all** while Inno
+     Setup does the actual file swap, then the new version launches on
+     its own. That gap is expected (see the progress-indicator follow-up
+     below), not a hang. See
      [Update never relaunches after installing](#update-never-relaunches-after-installing)
-     for what was actually happening and the fix, now in `main`.
-     Re-confirm this works end to end on the next beta.
+     for the history here — fixed since beta.8, but only if the
+     *currently running* app is beta.8 or later; updating from beta.6 or
+     beta.7 still runs their own broken update code and will reproduce
+     the original failure.
 
 ## Known-fixed issues (for reference if you see them again)
 
@@ -104,7 +112,7 @@ reported it was already dead. This was the exact risk flagged as
 "nobody's confirmed this works" in earlier revisions of this doc; it
 does not.
 
-**Fix** (in `main`, next beta after beta.7): the old process no longer
+**Fix** (PR #58, in `main` since beta.8): the old process no longer
 waits for the installer or relaunches the app itself. It launches the
 installer detached and quits immediately — freeing its own file handles
 *before* Inno ever reaches `[InstallDelete]`, so there's nothing left
@@ -114,8 +122,17 @@ since Inno itself is still running after the old app is gone. Trade-off:
 the app can no longer show an inline "install failed" message for a
 failure that happens after it quits — the "you can still install it
 manually via View Release" fallback text is the safety net for that
-now. **Not yet re-confirmed on a real machine** — that's the next thing
-to check when testing the next beta after beta.7.
+now.
+
+**Confirmed working on a real machine**: beta.8 (running the fixed
+code) updating in-app to beta.9 — app closed right after the UAC
+prompt, brief gap with no window (expected, see the progress-indicator
+follow-up below), then the new version launched on its own,
+`importlib.metadata.version()` correctly showing `0.3.0b9` afterward.
+Note this specifically requires the *installed, running* app to already
+have the fix — updating *from* beta.6 or beta.7 (which still run the
+old, broken code) reproduces the original failure, since the process
+doing the updating is what matters, not the version being installed.
 
 ### Missing/generic window icon
 
