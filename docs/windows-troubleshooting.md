@@ -150,6 +150,38 @@ package, so nothing at runtime could have loaded them on any platform.
 ship in the wheel), `app.py` loads the platform-appropriate one
 (`.ico` on Windows) and calls `setWindowIcon`.
 
+### A just-published beta doesn't show up as an available update
+
+**Symptom**: cut and push a new beta, confirm the release built
+successfully, then "Check for Updates" (with pre-release updates
+enabled) still doesn't offer it — offers an *older* beta instead, or
+nothing at all.
+
+**Cause**: `get_latest_release(include_prerelease=True)` used to take
+the first entry from GitHub's `/releases` list, on the assumption it's
+sorted newest-first. Confirmed false on a real repo: right after
+publishing v0.3.0-beta.10, `/releases` still listed it 4th — behind
+beta.9, beta.8, and beta.7 — despite beta.10 having the highest release
+ID *and* the latest `created_at`/`published_at` of everything in the
+list. GitHub's listing here just isn't reliably newest-first immediately
+after a publish (apparent indexing lag), so `releases[0]` could silently
+point at a stale release for a while.
+
+**Fix** (PR #60, in `main` since beta.10): `_newest_release()` now picks
+by comparing parsed versions across the whole list, not by position —
+sidesteps needing the list's order to be right at all.
+
+**If this comes up again**: check what the API is actually returning
+before assuming it's this app's own bug —
+
+```powershell
+python -c "import requests; [print(r['id'], r['tag_name'], r['created_at'], r['published_at']) for r in requests.get('https://api.github.com/repos/ryanvanmass/it-toolbox/releases').json()[:6]]"
+```
+
+If a release with a higher ID/timestamp is listed after ones with
+lower ones, that's this same GitHub-side ordering quirk, not a
+regression in `_newest_release()`.
+
 ### Pre-release build failures (fixed before any of the above shipped)
 
 Not something you should hit anymore, but if a *future* pre-release

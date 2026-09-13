@@ -103,6 +103,31 @@ def test_get_latest_release_include_prerelease_hits_the_list_endpoint(monkeypatc
     assert release.html_url == "https://example.com/beta"
 
 
+def test_get_latest_release_include_prerelease_picks_highest_version_not_first_entry(
+    monkeypatch,
+):
+    # Reproduces a real, confirmed GitHub API quirk: /releases isn't
+    # reliably newest-first right after a publish -- the actual newest
+    # release (beta.10 here) can sit several entries deep.
+    monkeypatch.setattr(
+        update_checker.requests,
+        "get",
+        lambda url, timeout: _FakeResponse(
+            json_data=[
+                {"tag_name": "v0.3.0-beta.9", "html_url": "https://example.com/beta.9"},
+                {"tag_name": "v0.3.0-beta.8", "html_url": "https://example.com/beta.8"},
+                {"tag_name": "v0.3.0-beta.7", "html_url": "https://example.com/beta.7"},
+                {"tag_name": "v0.3.0-beta.10", "html_url": "https://example.com/beta.10"},
+            ]
+        ),
+    )
+
+    release = update_checker.get_latest_release(include_prerelease=True)
+
+    assert release.version == "0.3.0-beta.10"
+    assert release.html_url == "https://example.com/beta.10"
+
+
 def test_get_latest_release_include_prerelease_returns_none_when_list_is_empty(monkeypatch):
     monkeypatch.setattr(
         update_checker.requests, "get", lambda url, timeout: _FakeResponse(json_data=[])

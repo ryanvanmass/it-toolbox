@@ -20,7 +20,8 @@ _LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 # /releases/latest (above) only ever returns the newest *non*-prerelease,
 # non-draft release -- this is the plain list endpoint instead, which
 # does include pre-releases (unauthenticated requests never see drafts
-# regardless, so no filtering needed there), sorted newest-created-first.
+# regardless, so no filtering needed there). NOT reliably newest-first --
+# see _newest_release's own comment for why that can't be assumed here.
 _RELEASES_LIST_URL = f"https://api.github.com/repos/{REPO}/releases"
 _REQUEST_TIMEOUT = 10
 _DOWNLOAD_TIMEOUT_SEC = 60
@@ -47,6 +48,32 @@ def get_installed_version() -> str:
     return metadata.version(PACKAGE_NAME)
 
 
+def _newest_release(releases: list[dict]) -> dict:
+    """Picks by actual version comparison, not list position.
+
+    Confirmed on a real repo, not theoretical: right after publishing
+    v0.3.0-beta.10, /releases still listed it 4th -- behind beta.9,
+    beta.8, and beta.7 -- despite beta.10 having the highest release id
+    *and* the latest created_at/published_at of everything in the list.
+    GitHub's listing here just isn't reliably newest-first immediately
+    after a publish (some indexing lag, apparently), so trusting
+    releases[0] can silently offer a stale "latest" release for a while.
+    Comparing versions directly sidesteps needing that ordering to be
+    right at all. Tags that don't parse as a version are skipped rather
+    than crashing the comparison; if none parse, falls back to the first
+    entry rather than returning nothing for what's still a real list.
+    """
+    versioned = []
+    for release in releases:
+        try:
+            versioned.append((Version(release["tag_name"].removeprefix("v")), release))
+        except InvalidVersion:
+            continue
+    if not versioned:
+        return releases[0]
+    return max(versioned, key=lambda pair: pair[0])[1]
+
+
 def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
     """None means no release has been published yet (a real, expected
     state right now — see docs/releasing.md), not an error.
@@ -54,8 +81,8 @@ def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
     include_prerelease=True is Settings > App Updates' opt-in beta-testing
     toggle (settings.load_include_prerelease_updates()) -- it switches
     from GitHub's /releases/latest (which never returns a pre-release) to
-    the plain releases list and takes its first, newest entry instead,
-    pre-release or not.
+    the plain releases list, picking the highest-versioned entry there
+    (see _newest_release) rather than assuming it's the first one.
     """
     if include_prerelease:
         response = requests.get(_RELEASES_LIST_URL, timeout=_REQUEST_TIMEOUT)
@@ -63,7 +90,7 @@ def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
         releases = response.json()
         if not releases:
             return None
-        data = releases[0]
+        data = _newest_release(releases)
     else:
         response = requests.get(_LATEST_RELEASE_URL, timeout=_REQUEST_TIMEOUT)
         if response.status_code == 404:
