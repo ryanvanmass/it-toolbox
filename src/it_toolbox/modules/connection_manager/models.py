@@ -58,6 +58,44 @@ class QemuVm:
 
 
 @dataclass(frozen=True)
+class StoragePool:
+    name: str
+    state: str  # e.g. "active", "inactive"
+
+
+@dataclass(frozen=True)
+class StorageVolume:
+    name: str
+    path: str
+
+
+@dataclass(frozen=True)
+class VirtualNetwork:
+    name: str
+    state: str  # e.g. "active", "inactive"
+
+
+@dataclass(frozen=True)
+class VmCreateSpec:
+    """Everything needed to define+start a new VM via virt-install --
+    see qemu_provisioning.create_vm. iso_path=None means "boot the
+    fresh, empty disk directly" (virt-install --import) rather than
+    "install from media" (--cdrom) -- confirmed live that virt-install
+    refuses to create a domain at all without one or the other
+    ("An install method must be specified").
+    """
+
+    name: str
+    memory_mib: int
+    vcpus: int
+    disk_gib: int
+    pool: str
+    network: str
+    os_variant: str
+    iso_path: str | None = None
+
+
+@dataclass(frozen=True)
 class ManualConnection:
     """A directly user-entered RDP or SSH endpoint — no account, project,
     or host discovery involved, unlike the GCP/QEMU families. Connects
