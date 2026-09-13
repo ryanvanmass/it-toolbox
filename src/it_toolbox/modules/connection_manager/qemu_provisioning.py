@@ -77,6 +77,17 @@ def _run_virt_install(*args: str) -> str:
     return result.stdout
 
 
+def list_os_variants() -> list[str]:
+    """Every --os-variant/--osinfo short ID virt-install actually
+    accepts (confirmed live: ~940 entries, "generic" included). This is
+    a purely local osinfo-db lookup -- unlike everything else in this
+    module, it takes no QemuHost/--connect at all, since it doesn't
+    vary per libvirt host.
+    """
+    output = _run_virt_install("--osinfo", "list")
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
 def list_storage_pools(host: QemuHost) -> list[StoragePool]:
     output = run_virsh(host, "pool-list", "--all")
     pools: list[StoragePool] = []

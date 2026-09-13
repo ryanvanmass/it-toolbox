@@ -57,6 +57,17 @@ def _completed(stdout="", stderr="", returncode=0):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+def test_list_os_variants_parses_real_output(monkeypatch):
+    real_output = "almalinux10\nalmalinux9\ngeneric\nwin11\n"
+    calls = []
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda cmd, capture_output, text, timeout: calls.append(cmd) or _completed(stdout=real_output),
+    )
+    assert qemu_provisioning.list_os_variants() == ["almalinux10", "almalinux9", "generic", "win11"]
+    assert calls == [["virt-install", "--osinfo", "list"]]
+
+
 def test_list_storage_pools_parses_real_output(monkeypatch):
     monkeypatch.setattr(
         qemu_provisioning.subprocess, "run", lambda *a, **k: _completed(stdout=_REAL_POOL_LIST)

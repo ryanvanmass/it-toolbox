@@ -8,8 +8,10 @@ docs/qemu-vm-provisioning-status.md for the full design/verification
 history.
 """
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -25,6 +27,7 @@ from it_toolbox.modules.connection_manager import qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost, StorageVolume, VmCreateSpec
 
 _NONE_ISO_LABEL = "(None — boot the new disk directly)"
+_DEFAULT_OS_VARIANT = "generic"
 
 
 class CreateVmDialog(QDialog):
@@ -32,7 +35,7 @@ class CreateVmDialog(QDialog):
         super().__init__(parent)
         self._host = host
         self.setWindowTitle(f"Deploy VM on {host.name}")
-        self.resize(420, 360)
+        self.resize(420, 420)
 
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("my-new-vm")
@@ -51,9 +54,17 @@ class CreateVmDialog(QDialog):
         self._disk_spin.setSuffix(" GiB")
         self._disk_spin.setValue(20)
 
-        self._pool_combo = QComboBox()
-        self._pool_combo.setEnabled(False)
-        self._pool_combo.currentIndexChanged.connect(self._on_pool_changed)
+        # Separate pool pickers -- the VM's own new disk and its ISO
+        # install media (if any) can live on different storage backends
+        # (e.g. a fast local pool for the disk, a shared/NFS pool of
+        # ISOs everyone deploys from). Each loads independently; the ISO
+        # pool's selection drives which volumes _iso_combo offers.
+        self._disk_pool_combo = QComboBox()
+        self._disk_pool_combo.setEnabled(False)
+
+        self._iso_pool_combo = QComboBox()
+        self._iso_pool_combo.setEnabled(False)
+        self._iso_pool_combo.currentIndexChanged.connect(self._on_iso_pool_changed)
 
         self._network_combo = QComboBox()
         self._network_combo.setEnabled(False)
@@ -61,7 +72,22 @@ class CreateVmDialog(QDialog):
         self._iso_combo = QComboBox()
         self._iso_combo.setEnabled(False)
 
-        self._os_variant_edit = QLineEdit("generic")
+        # Searchable (type-to-filter) list of every real --os-variant
+        # virt-install accepts -- confirmed live there are ~940 of
+        # these, loaded async the same way pools/networks are; "generic"
+        # (itself a real, valid entry) is the default before that load
+        # finishes and remains selectable/typeable throughout via the
+        # editable combo + completer.
+        self._os_variant_combo = QComboBox()
+        self._os_variant_combo.setEditable(True)
+        self._os_variant_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._os_variant_combo.addItem(_DEFAULT_OS_VARIANT)
+        self._os_variant_combo.setCurrentText(_DEFAULT_OS_VARIANT)
+        self._os_variant_completer = QCompleter([_DEFAULT_OS_VARIANT], self)
+        self._os_variant_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._os_variant_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._os_variant_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._os_variant_combo.setCompleter(self._os_variant_completer)
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
@@ -73,10 +99,11 @@ class CreateVmDialog(QDialog):
         form.addRow("Memory:", self._memory_spin)
         form.addRow("vCPUs:", self._vcpus_spin)
         form.addRow("Disk size:", self._disk_spin)
-        form.addRow("Storage pool:", self._pool_combo)
+        form.addRow("Disk storage pool:", self._disk_pool_combo)
         form.addRow("Network:", self._network_combo)
+        form.addRow("ISO storage pool:", self._iso_pool_combo)
         form.addRow("Install media (ISO):", self._iso_combo)
-        form.addRow("OS variant:", self._os_variant_edit)
+        form.addRow("OS variant:", self._os_variant_combo)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -92,6 +119,7 @@ class CreateVmDialog(QDialog):
         layout.addWidget(self._buttons)
 
         self._load_pools_and_networks()
+        self._load_os_variants()
 
     def _load_pools_and_networks(self) -> None:
         async_utils.run_in_background(
@@ -106,7 +134,8 @@ class CreateVmDialog(QDialog):
     def _on_pools_and_networks_loaded(self, result: tuple[list, list]) -> None:
         pools, networks = result
         for pool in pools:
-            self._pool_combo.addItem(pool.name, pool.name)
+            self._disk_pool_combo.addItem(pool.name, pool.name)
+            self._iso_pool_combo.addItem(pool.name, pool.name)
         for network in networks:
             self._network_combo.addItem(network.name, network.name)
 
@@ -117,17 +146,18 @@ class CreateVmDialog(QDialog):
             self._show_error(f"No virtual networks found on {self._host.name} — create one first.")
             return
 
-        self._pool_combo.setEnabled(True)
+        self._disk_pool_combo.setEnabled(True)
+        self._iso_pool_combo.setEnabled(True)
         self._network_combo.setEnabled(True)
         self._iso_combo.setEnabled(True)
         self._ok_button.setEnabled(True)
         self._load_isos_for_current_pool()
 
-    def _on_pool_changed(self, _index: int) -> None:
+    def _on_iso_pool_changed(self, _index: int) -> None:
         self._load_isos_for_current_pool()
 
     def _load_isos_for_current_pool(self) -> None:
-        pool_name = self._pool_combo.currentData()
+        pool_name = self._iso_pool_combo.currentData()
         if pool_name is None:
             return
         async_utils.run_in_background(
@@ -142,6 +172,20 @@ class CreateVmDialog(QDialog):
         for volume in volumes:
             if volume.name.lower().endswith(".iso"):
                 self._iso_combo.addItem(volume.name, volume.path)
+
+    def _load_os_variants(self) -> None:
+        async_utils.run_in_background(
+            qemu_provisioning.list_os_variants,
+            on_result=self._on_os_variants_loaded,
+            on_error=self._on_load_error,
+        )
+
+    def _on_os_variants_loaded(self, variants: list[str]) -> None:
+        current = self._os_variant_combo.currentText()
+        self._os_variant_combo.clear()
+        self._os_variant_combo.addItems(variants)
+        self._os_variant_combo.setCurrentText(current)
+        self._os_variant_completer.setModel(self._os_variant_combo.model())
 
     def _on_load_error(self, error: Exception) -> None:
         self._show_error(str(error))
@@ -161,9 +205,9 @@ class CreateVmDialog(QDialog):
             memory_mib=self._memory_spin.value(),
             vcpus=self._vcpus_spin.value(),
             disk_gib=self._disk_spin.value(),
-            pool=self._pool_combo.currentData(),
+            pool=self._disk_pool_combo.currentData(),
             network=self._network_combo.currentData(),
-            os_variant=self._os_variant_edit.text().strip() or "generic",
+            os_variant=self._os_variant_combo.currentText().strip() or _DEFAULT_OS_VARIANT,
             iso_path=self._iso_combo.currentData(),
         )
 

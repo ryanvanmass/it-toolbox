@@ -2,10 +2,15 @@ from it_toolbox.modules.connection_manager.models import QemuHost, StoragePool, 
 from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
 
 HOST = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+_DEFAULT_POOLS = (StoragePool(name="default", state="active"),)
+_DEFAULT_NETWORKS = (VirtualNetwork(name="default", state="active"),)
+_DEFAULT_OS_VARIANTS = ("generic", "almalinux10", "almalinux9", "win11", "ubuntu22.04")
 
 
-def _make_dialog(qtbot, monkeypatch, pools=(StoragePool(name="default", state="active"),),
-                  networks=(VirtualNetwork(name="default", state="active"),), volumes=()):
+def _make_dialog(
+    qtbot, monkeypatch, pools=_DEFAULT_POOLS, networks=_DEFAULT_NETWORKS, volumes=(),
+    os_variants=_DEFAULT_OS_VARIANTS, volumes_by_pool=None,
+):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.create_vm_dialog.qemu_provisioning.list_storage_pools",
         lambda host: list(pools),
@@ -16,21 +21,58 @@ def _make_dialog(qtbot, monkeypatch, pools=(StoragePool(name="default", state="a
     )
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.create_vm_dialog.qemu_provisioning.list_volumes",
-        lambda host, pool_name: list(volumes),
+        lambda host, pool_name: list((volumes_by_pool or {}).get(pool_name, volumes)),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.create_vm_dialog.qemu_provisioning.list_os_variants",
+        lambda: list(os_variants),
     )
     dialog = CreateVmDialog(HOST)
     qtbot.addWidget(dialog)
     dialog.show()  # isVisible() is otherwise always False for an unshown top-level widget
-    qtbot.waitUntil(lambda: dialog._pool_combo.count() == len(pools), timeout=1000)
+    qtbot.waitUntil(lambda: dialog._disk_pool_combo.count() == len(pools), timeout=1000)
+    qtbot.waitUntil(lambda: dialog._os_variant_combo.count() == len(os_variants), timeout=1000)
     return dialog
 
 
 def test_pools_and_networks_populate_and_enable_ok(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch)
 
-    assert dialog._pool_combo.currentData() == "default"
+    assert dialog._disk_pool_combo.currentData() == "default"
+    assert dialog._iso_pool_combo.currentData() == "default"
     assert dialog._network_combo.currentData() == "default"
     assert dialog._ok_button.isEnabled() is True
+
+
+def test_disk_and_iso_pool_are_independent_combos(qtbot, monkeypatch):
+    pools = (StoragePool(name="fast-local", state="active"), StoragePool(name="iso-share", state="active"))
+    dialog = _make_dialog(qtbot, monkeypatch, pools=pools)
+
+    dialog._disk_pool_combo.setCurrentIndex(0)
+    dialog._iso_pool_combo.setCurrentIndex(1)
+
+    assert dialog._disk_pool_combo.currentData() == "fast-local"
+    assert dialog._iso_pool_combo.currentData() == "iso-share"
+
+
+def test_changing_iso_pool_reloads_iso_combo_from_that_pool_only(qtbot, monkeypatch):
+    pools = (StoragePool(name="pool-a", state="active"), StoragePool(name="pool-b", state="active"))
+    volumes_by_pool = {
+        "pool-a": [StorageVolume(name="a.iso", path="/pool-a/a.iso")],
+        "pool-b": [StorageVolume(name="b.iso", path="/pool-b/b.iso")],
+    }
+    dialog = _make_dialog(qtbot, monkeypatch, pools=pools, volumes_by_pool=volumes_by_pool)
+    qtbot.waitUntil(lambda: dialog._iso_combo.count() == 2, timeout=1000)
+    assert dialog._iso_combo.itemText(1) == "a.iso"
+
+    dialog._iso_pool_combo.setCurrentIndex(1)
+    qtbot.waitUntil(lambda: dialog._iso_combo.itemText(1) == "b.iso" if dialog._iso_combo.count() > 1 else False, timeout=1000)
+
+    assert [dialog._iso_combo.itemText(i) for i in range(dialog._iso_combo.count())] == [
+        "(None — boot the new disk directly)", "b.iso",
+    ]
+    # Changing the ISO pool must not affect where the VM's own disk goes.
+    assert dialog._disk_pool_combo.currentData() == "pool-a"
 
 
 def test_ok_disabled_and_error_shown_when_no_pools(qtbot, monkeypatch):
@@ -54,6 +96,22 @@ def test_iso_combo_only_lists_iso_suffixed_volumes(qtbot, monkeypatch):
     assert dialog._iso_combo.itemData(1) == "/var/lib/libvirt/images/ubuntu.iso"
 
 
+def test_os_variant_defaults_to_generic_and_is_searchable(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch)
+
+    assert dialog._os_variant_combo.currentText() == "generic"
+    all_items = [dialog._os_variant_combo.itemText(i) for i in range(dialog._os_variant_combo.count())]
+    assert all_items == list(_DEFAULT_OS_VARIANTS)
+
+    # The completer searches (matches substrings anywhere, not just a
+    # prefix) over the same real, loaded list -- confirms it's wired to
+    # the live model, not a stale/empty one from before the async load.
+    completer = dialog._os_variant_completer
+    completer.setCompletionPrefix("alma")
+    matches = {completer.completionModel().index(i, 0).data() for i in range(completer.completionCount())}
+    assert matches == {"almalinux10", "almalinux9"}
+
+
 def test_accept_requires_a_name(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch)
 
@@ -69,6 +127,7 @@ def test_accept_calls_create_vm_with_expected_spec_and_closes_on_success(qtbot, 
     dialog._memory_spin.setValue(4096)
     dialog._vcpus_spin.setValue(4)
     dialog._disk_spin.setValue(40)
+    dialog._os_variant_combo.setCurrentText("win11")
 
     specs = []
     monkeypatch.setattr(
@@ -91,6 +150,7 @@ def test_accept_calls_create_vm_with_expected_spec_and_closes_on_success(qtbot, 
     assert spec.disk_gib == 40
     assert spec.pool == "default"
     assert spec.network == "default"
+    assert spec.os_variant == "win11"
     assert spec.iso_path is None
 
 
