@@ -87,7 +87,7 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 [Run]
 ; Deliberately no skipifsilent: the in-app updater (see
 ; core/update_checker.py's download_and_install_windows_update) relies on
-; this to relaunch the app after a /VERYSILENT install, since the process
+; this to relaunch the app after a /SILENT install, since the process
 ; that ran the update can't safely do it itself anymore -- see that
 ; function's docstring for why. A plain interactive install still shows
 ; this as the usual "Launch IT Toolbox" finish-page checkbox.
