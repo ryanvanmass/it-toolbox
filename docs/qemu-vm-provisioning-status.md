@@ -263,27 +263,55 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    full Qt repaint downstream -- confirmed by reading `get_frame()`'s
    implementation directly, not assumed from a symptom report alone.
 
-   Fixed with a trailing-edge throttle in `SpiceSessionWorker._on_frame`:
-   capped to a target 30fps (`_TARGET_FRAME_INTERVAL_SEC`) -- an
-   invalidate within the current interval just schedules one
-   `GLib.timeout_add` for whenever the interval actually elapses
-   (further invalidates before it fires are free, guarded by
-   `_frame_timeout_pending`) rather than capturing again immediately.
-   Because everything runs on the same GLib loop thread there's no
-   locking needed, and because the eventual capture always reads the
-   *live* framebuffer (not a queued snapshot), the guest's actual latest
-   state is never lost -- only the redundant intermediate captures are
-   skipped. `_emit_frame` also now tolerates `SpiceError` from
-   `get_frame()` (the primary surface can be torn down between the
-   invalidate that scheduled a timeout and the timeout actually firing,
-   e.g. a guest resolution change or disconnect mid-burst) rather than
-   letting an unhandled exception reach the GLib loop.
+   **First pass — a capture-rate throttle.** Added a trailing-edge
+   throttle in `SpiceSessionWorker._on_frame`, capped to a target
+   framerate (`_TARGET_FRAME_INTERVAL_SEC`) -- an invalidate within the
+   current interval just schedules one `GLib.timeout_add` for whenever
+   the interval actually elapses (further invalidates before it fires
+   are free, guarded by `_frame_timeout_pending`) rather than capturing
+   again immediately. Because everything runs on the same GLib loop
+   thread there's no locking needed. `_emit_frame` also tolerates
+   `SpiceError` from the capture call (the primary surface can be torn
+   down between the invalidate that scheduled a timeout and the timeout
+   actually firing, e.g. a guest resolution change or disconnect
+   mid-burst) rather than letting an unhandled exception reach the GLib
+   loop.
+
+   **This wasn't enough** -- reported still choppy specifically when
+   dragging a window, which pointed at the other half of the same root
+   cause the throttle didn't touch: every *accepted* capture was still
+   re-copying and re-painting the **entire** display, even though a
+   window drag only ever changes a limited band of the screen. Fixed
+   properly with dirty-row tracking: `SpiceSession` now accumulates the
+   union of every `display-invalidate`'s row range (not the full
+   x/y/width/height rect -- the framebuffer is row-major/stride-
+   contiguous, so clipping columns too would need per-row slicing for a
+   much smaller extra win than clipping rows already gives) via a new
+   `get_dirty_band()`, returning only the rows that actually changed
+   since the last call instead of `get_frame()`'s always-everything copy.
+   `SpiceSessionWorker` calls this instead, and `frame_ready` now
+   carries `(pixels, band_top, band_height, canvas_width, canvas_height,
+   stride)` rather than a full frame every time. `SpiceWidget` was
+   restructured around this: instead of wrapping each incoming frame's
+   bytes directly as a fresh `QImage` (only possible when every delivery
+   was the whole picture), it now keeps a persistent `_canvas` `QImage`
+   and composites each incoming band onto it at the right y-offset via
+   `QPainter.drawImage(0, band_top, band_image)`, then calls
+   `self.update(rect)` with only the corresponding (scaled)
+   widget-space rect -- and `paintEvent` now respects `event.rect()`
+   instead of unconditionally blitting the whole widget, so Qt's own
+   compositor does proportionally less work the smaller the change was.
+   With this in place, a higher target framerate became affordable too
+   (bumped `_TARGET_FRAME_INTERVAL_SEC` from 30fps to 60fps) since each
+   individual frame is now cheap when only a small area changed, instead
+   of the throttle being load-bearing on its own to keep the full-frame
+   cost down.
 
    **Verification** (this module has never had, and still doesn't have,
    automated pytest coverage -- see `qemu-spice-status.md`'s own
    "no automated test can cover the SPICE protocol/rendering pieces"
-   note, still true here): verified live on the dev VM in two ways.
-   First, a standalone script drove the exact throttle logic against the
+   note, still true here): verified live on the dev VM in three ways.
+   First, a standalone script drove the throttle logic against the
    *real* `gi.repository.GLib.MainLoop`/`GLib.timeout_add` (the actual
    dependency this code relies on, not a mock) with a simulated ~450/sec
    invalidate burst — collapsed to 17 real captures over the burst
@@ -291,18 +319,27 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    one generated (proving the trailing invalidate is never dropped), and
    a second scenario confirmed a torn-down primary surface during a
    pending timeout raises no exception. Second, an actual end-to-end run
-   against a real running VM's real SPICE server, using the project's
-   own unmodified `SpiceSession` wrapped in the same throttle: connected,
-   received correctly-sized real frames, and passed through a real
-   low-frequency invalidate stream (a boot-screen blink, ~9 invalidates
-   over several seconds) 1:1 with zero throttling effect and zero added
-   latency -- confirming the fix is a no-op for normal/idle usage and
-   only actually engages once invalidates arrive faster than 30/sec.
-   (A true high-frequency real-guest stress test — actual video/desktop
-   animation — wasn't set up given the effort that would take vs. the
-   throttle logic already being proven correct against its real
-   dependency; the mechanism doesn't care what generates the invalidates,
-   only their rate.)
+   against a real running VM's real SPICE server (before the dirty-row
+   work) confirmed the throttle alone is a no-op under normal/idle
+   usage — a real low-frequency invalidate stream (a boot-screen blink)
+   passed through 1:1 with zero added latency. Third, after the
+   dirty-row rework: connected to a real VM early during its UEFI boot
+   (`--boot uefi`, the `edk2`/`UefiShell.iso` already on the host) to
+   catch its genuinely scrolling boot text -- captured 69 real bands
+   over 4 seconds, 68 of them partial-height (ranging from a
+   full-frame's 800 rows down to bands as small as 11-15 rows), then
+   composited them exactly the way `SpiceWidget` now does and compared
+   the result **pixel-for-pixel against `virsh screenshot`'s
+   independent capture** once the display settled -- 0 mismatches
+   across a full sampled sweep, confirming the row-range copy/offset/
+   stride math (and the widget's compositing) is correct, not just
+   crash-free. (Getting a genuinely busy real *desktop* -- actual
+   window-drag/video content, not boot text -- to stress-test against
+   directly wasn't set up, given the effort a full guest OS install
+   would take vs. the mechanism already being proven correct against
+   real partial-row invalidates of varying, genuinely small sizes; the
+   compositing code has no notion of "a window" vs. "boot text", only
+   rows.)
 
 ## Deferred (explicitly out of scope for this branch)
 

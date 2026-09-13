@@ -32,23 +32,24 @@ from PySide6.QtCore import QObject, Signal
 
 from it_toolbox.core.spice.spice_session import SpiceError, SpiceSession
 
-# Caps how often a display-invalidate burst (video, scrolling, animation --
-# anything that redraws faster than a human needs to see it) actually
-# triggers a real frame capture. Confirmed live this was the direct cause
-# of choppy playback under a busy guest desktop: SpiceSession.get_frame()
-# does a full ctypes.string_at() copy of the *entire* framebuffer on every
-# single invalidate signal regardless of how small the changed region was
-# (display-invalidate's own x/y/width/height args are otherwise unused),
-# and a busy guest can fire that signal far faster than 30/sec -- each one
-# also forcing a full Qt repaint downstream. 30fps is plenty for a remote
-# admin console (not a game) and cuts that copy+repaint rate dramatically
-# during bursts while never actually dropping the *latest* frame -- see
-# _on_frame's docstring for how the trailing-edge timeout guarantees that.
-_TARGET_FRAME_INTERVAL_SEC = 1 / 30
+# Caps how often a display-invalidate burst (video, scrolling, animation,
+# dragging a window -- anything that redraws faster than a human needs to
+# see it) actually triggers a real frame capture, on top of get_dirty_band()
+# already limiting each capture to just the rows that changed (see that
+# method's docstring) -- a busy guest can still fire display-invalidate far
+# faster than any display needs, each one otherwise forcing a Qt repaint
+# downstream. 60fps (matching a typical display's own refresh rate) is
+# affordable now that both the copy and the repaint below are scoped to the
+# dirty band rather than the whole surface -- see _on_frame's docstring for
+# how the trailing-edge timeout guarantees the *latest* frame is never
+# dropped, only redundant intermediate captures are skipped.
+_TARGET_FRAME_INTERVAL_SEC = 1 / 60
 
 
 class SpiceSessionSignals(QObject):
-    frame_ready = Signal(bytes, int, int, int)  # pixels (BGRX), width, height, stride
+    # pixels (BGRX) for rows [band_top, band_top + band_height) of the full
+    # canvas_width x canvas_height surface -- see SpiceSession.get_dirty_band()
+    frame_ready = Signal(bytes, int, int, int, int, int)  # pixels, band_top, band_height, canvas_width, canvas_height, stride
     connected = Signal()
     error = Signal(str)
     disconnected = Signal()
@@ -133,10 +134,14 @@ class SpiceSessionWorker:
         # Everything here runs on this same GLib loop thread, so there's no
         # race between "pending" being set and the timeout callback running.
         # The timeout always captures whatever the *live* framebuffer looks
-        # like at that moment (get_frame() has no notion of a queued/stale
-        # frame), so the guest's actual latest state is never lost or
-        # delayed by more than one interval -- only the redundant
-        # intermediate captures are skipped.
+        # like at that moment (get_dirty_band() has no notion of a queued/
+        # stale frame -- it reads straight from the current surface), so
+        # the guest's actual latest state is never lost or delayed by more
+        # than one interval -- only the redundant intermediate captures are
+        # skipped. Every raw invalidate in between still contributes its
+        # row range to SpiceSession's own accumulated dirty-row tracking
+        # (see get_dirty_band()'s docstring), so no *area* is lost either --
+        # only the redundant number of captures is reduced.
         now = time.monotonic()
         remaining = _TARGET_FRAME_INTERVAL_SEC - (now - self._last_emit_at)
         if remaining <= 0:
@@ -153,10 +158,12 @@ class SpiceSessionWorker:
     def _emit_frame(self) -> None:
         self._last_emit_at = time.monotonic()
         try:
-            pixels, width, height, stride = self._session.get_frame()
+            pixels, band_top, band_height, canvas_width, canvas_height, stride = self._session.get_dirty_band()
         except SpiceError:
             # The primary surface can be torn down (e.g. a guest resolution
             # change, or disconnect) between the invalidate that scheduled
             # this and the timeout actually firing -- nothing to paint.
             return
-        self.signals.frame_ready.emit(pixels, width, height, stride)
+        if band_height <= 0:
+            return
+        self.signals.frame_ready.emit(pixels, band_top, band_height, canvas_width, canvas_height, stride)

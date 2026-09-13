@@ -116,6 +116,19 @@ class SpiceSession:
         self._stride: int = 0
         self._imgdata: int | None = None
 
+        # Union of every display-invalidate row range seen since the last
+        # get_dirty_band() call, as (top, bottom_exclusive) -- e.g. dragging
+        # a window only ever touches a limited vertical band of the full
+        # display, not the whole thing, so tracking rows (not just "some
+        # invalidate happened, somewhere") is what lets a caller copy and
+        # repaint only what actually changed. Row range only, not a full
+        # x/y/width/height rectangle -- the framebuffer is row-major/
+        # stride-contiguous, so clipping columns too would need per-row
+        # slicing for a much smaller extra win than clipping rows already
+        # gives on the common case (something moved/scrolled vertically
+        # within a bounded band).
+        self._dirty_rows: tuple[int, int] | None = None
+
         # Called (from the GLib main loop thread) whenever a new frame is
         # available to read via get_frame() — on the initial full-frame
         # primary-create, and on every subsequent display-invalidate.
@@ -170,12 +183,48 @@ class SpiceSession:
         """The current primary display surface as (pixels, width, height,
         stride), pixels in BGRX32 byte order (see module docstring).
         Raises SpiceError if no primary surface has been created yet.
+
+        Always copies the *entire* surface -- fine for a one-shot read
+        (the CLI smoke tests below), but see get_dirty_band() for the
+        streaming case (SpiceSessionWorker), where re-copying the whole
+        thing on every single display-invalidate turned out to be a real,
+        measured cause of choppy playback under a busy guest desktop.
         """
         if self._imgdata is None:
             raise SpiceError("no primary display surface yet")
         size = self._stride * self._height
         pixels = ctypes.string_at(self._imgdata, size)
         return pixels, self._width, self._height, self._stride
+
+    def get_dirty_band(self) -> tuple[bytes, int, int, int, int, int]:
+        """Like get_frame(), but copies only the row range covering every
+        display-invalidate seen since the last call (the full frame, the
+        first time this is called after a new primary surface) --
+        (pixels, band_top, band_height, canvas_width, canvas_height,
+        stride). `pixels` is exactly `stride * band_height` bytes, the
+        rows `[band_top, band_top + band_height)` of the full canvas.
+
+        This is what actually makes a partial update (dragging a window,
+        scrolling a terminal, ...) cheap: `get_frame()` would re-copy and
+        the caller would then have to re-composite the *entire* display
+        for even a one-pixel change; this copies (and lets the caller
+        repaint) only the rows that could plausibly have changed. Raises
+        SpiceError if no primary surface has been created yet.
+        """
+        if self._imgdata is None:
+            raise SpiceError("no primary display surface yet")
+        top, bottom = self._pop_dirty_rows()
+        top = max(0, min(top, self._height))
+        bottom = max(top, min(bottom, self._height))
+        band_height = bottom - top
+        offset = self._imgdata + top * self._stride
+        pixels = ctypes.string_at(offset, self._stride * band_height)
+        return pixels, top, band_height, self._width, self._height, self._stride
+
+    def _pop_dirty_rows(self) -> tuple[int, int]:
+        rows = self._dirty_rows if self._dirty_rows is not None else (0, self._height)
+        self._dirty_rows = None
+        return rows
 
     # --- input: absolute position + scancode-based keyboard -------------
     #
@@ -274,6 +323,11 @@ class SpiceSession:
         self._height = height
         self._stride = stride
         self._imgdata = imgdata
+        # The whole new surface counts as "dirty" -- there's nothing to
+        # diff against yet, and a resolution change means whatever was in
+        # get_dirty_band()'s bookkeeping before this referred to a canvas
+        # size that no longer exists.
+        self._dirty_rows = (0, height)
         if self.on_frame is not None:
             self.on_frame()
 
@@ -283,10 +337,13 @@ class SpiceSession:
         # the same stale-pointer hazard class as freerdp_client.py's
         # disconnect()/DisplayChannel issue.
         self._imgdata = None
+        self._dirty_rows = None
 
     def _on_invalidate(
         self, channel: SpiceClientGLib.DisplayChannel, x: int, y: int, width: int, height: int
     ) -> None:
+        top, bottom = self._dirty_rows if self._dirty_rows is not None else (y, y + height)
+        self._dirty_rows = (min(top, y), max(bottom, y + height))
         if self.on_frame is not None:
             self.on_frame()
 
