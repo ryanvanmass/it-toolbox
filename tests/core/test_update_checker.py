@@ -185,7 +185,7 @@ def test_download_and_install_windows_update_launches_the_silent_installer_detac
     # why this process can't safely stick around to do it).
     assert len(_FakePopen.calls) == 1
     installer_call = _FakePopen.calls[0]
-    assert installer_call[1:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+    assert installer_call[1:] == ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
     assert installer_call[0].endswith(".exe")
 
 

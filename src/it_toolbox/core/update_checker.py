@@ -157,8 +157,19 @@ def download_and_install_windows_update(
     # learn when the installer is done with it, and Windows won't allow
     # deleting a file a running process still has open anyway. Left for
     # Windows' own temp-directory cleanup.
+    #
+    # /SILENT, not /VERYSILENT: both skip the wizard and require no
+    # interaction (/SUPPRESSMSGBOXES still suppresses any error message
+    # boxes), but /SILENT still shows Inno's own small installation
+    # progress window. Without it there was a stretch with literally no
+    # IT Toolbox window at all -- this one already quit, the new one
+    # hasn't launched yet -- where a real hang was indistinguishable from
+    # normal progress. /SILENT's progress window closes that gap for
+    # free, without this process needing to stick around to show
+    # anything itself (which is exactly what it can't safely do -- see
+    # this function's own docstring for why).
     try:
-        subprocess.Popen([str(installer_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        subprocess.Popen([str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
     except OSError as e:
         raise UpdateInstallError(f"Failed to launch installer at {installer_path}: {e}") from e
 
