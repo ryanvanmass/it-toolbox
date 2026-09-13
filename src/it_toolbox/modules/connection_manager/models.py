@@ -11,6 +11,19 @@ class GcpProject:
 
 
 @dataclass(frozen=True)
+class GcpIamBinding:
+    """One (member, role) pair for a project — a getIamPolicy response's
+    bindings are grouped by role with a list of members; this is already
+    flattened to one row per member, since "who has this role" (not "this
+    role has these members") is what identity management needs to show.
+    """
+
+    project_id: str
+    role: str
+    member: str  # e.g. "user:alice@example.com", "serviceAccount:...", "group:...", "domain:..."
+
+
+@dataclass(frozen=True)
 class Instance:
     name: str
     zone: str  # short zone name, e.g. "us-central1-a"

@@ -14,7 +14,13 @@ from urllib.parse import quote
 import requests
 from google.oauth2.credentials import Credentials
 
-from it_toolbox.modules.connection_manager.models import GcpProject, GcsBucket, GcsEntry, Instance
+from it_toolbox.modules.connection_manager.models import (
+    GcpIamBinding,
+    GcpProject,
+    GcsBucket,
+    GcsEntry,
+    Instance,
+)
 
 # (connect timeout, read timeout) — a real, hard requests-enforced deadline.
 REQUEST_TIMEOUT_SEC = (10, 30)
@@ -78,6 +84,25 @@ def list_projects(credentials: Credentials) -> list[GcpProject]:
             break
 
     return sorted(projects, key=lambda p: p.display_name.lower())
+
+
+def get_iam_policy(credentials: Credentials, project_id: str) -> list[GcpIamBinding]:
+    """Who has access to a project and with which role(s) — Cloud Resource
+    Manager's getIamPolicy is a POST (unlike every other read here) and
+    returns bindings grouped by role, each with a list of members; flattened
+    to one GcpIamBinding per member. No pagination on this endpoint.
+    """
+    data = _post(
+        f"{RESOURCE_MANAGER_BASE}/projects/{project_id}:getIamPolicy",
+        credentials.token,
+        extra_headers={"X-Goog-User-Project": project_id},
+    )
+    bindings = [
+        GcpIamBinding(project_id=project_id, role=binding["role"], member=member)
+        for binding in data.get("bindings", [])
+        for member in binding.get("members", [])
+    ]
+    return sorted(bindings, key=lambda b: (b.role.lower(), b.member.lower()))
 
 
 def _os_hint_from_disks(disks: list[dict]) -> str | None:
