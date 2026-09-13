@@ -86,7 +86,18 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    `ui/main_view.py`). `CreateVmDialog` async-loads pools/networks/
    ISO-suffixed volumes the same way the tree's own lazy VM loading
    already does, disabling its OK button until the pool/network lists
-   land; `ConfigureVmDialog` pre-fills vCPU/memory from a fresh
+   land. The VM's own disk and its ISO install media each get their
+   *own* storage-pool combo (added per feedback after the first cut) --
+   changing the ISO pool only reloads the ISO volume list, it has no
+   effect on where the disk itself is created. OS variant is a real,
+   searchable combo (`QComboBox` + `QCompleter`, `MatchContains` so
+   typing matches anywhere in the string) backed by a new
+   `qemu_provisioning.list_os_variants()` -- confirmed live this is a
+   purely local `virt-install --osinfo list` lookup (~940 entries,
+   `"generic"` included), not something that varies per libvirt host,
+   so it takes no `QemuHost`/`--connect` and loads once regardless of
+   which host is being deployed to. `ConfigureVmDialog` pre-fills
+   vCPU/memory from a fresh
    `get_vm_resources` call and only calls `resize_vm`/`add_disk` for
    whichever fields actually changed. Found and fixed a real, pre-
    existing gap in `main_view.py` while wiring this in: right-clicking
@@ -130,10 +141,12 @@ it-toolbox machine to the libvirt host (media has to already be on the
 host, discovered via `list_volumes`), editing a *running* VM's
 resources (live hotplug — `resize_vm` is `--config`-only, by design),
 network interface add/remove, disk detach/removal, boot-order changes,
-snapshot support, and OS-variant auto-detection (`osinfo-query` — the
-dialog just has a free-text field defaulting to `generic`, which
-`virt-install` always accepts). All real, natural follow-ups once this
-core deploy/configure path has been used for a while — not silently
+snapshot support, and *automatic* OS-variant detection from the chosen
+ISO/image (the OS variant combo is a full, real, searchable list of
+every valid value — added after the first cut, see above — but nothing
+inspects the attached media to guess which one applies; the admin still
+picks it, defaulting to `generic`). All real, natural follow-ups once
+this core deploy/configure path has been used for a while — not silently
 half-built here.
 
 ## Environment note
