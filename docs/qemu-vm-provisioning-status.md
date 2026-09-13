@@ -508,6 +508,43 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    but the very last link (does a real vdagent actually act on it) is
    not.
 
+8. **Fixed: couldn't connect to a QEMU host running on the same machine
+   as it-toolbox** -- a real bug report, not a follow-on enhancement.
+   `_connect_qemu` unconditionally built a `QemuTunnel`, and
+   `QemuTunnel`/`_parse_ssh_target` unconditionally require a
+   `qemu+ssh://` URI, raising `"not an SSH-transport libvirt URI"` for
+   anything else -- including a perfectly valid local libvirt connection
+   (`qemu:///system`), which every single test/verification in this
+   branch so far had sidestepped by always using a *remote* dev VM
+   reached over `qemu+ssh://`. A `QemuHost` pointed at the same machine
+   running it-toolbox -- a completely normal, real setup, just never
+   exercised -- could never connect via SPICE at all.
+
+   Fixed with a new `qemu_tunnel.is_local_uri(uri)` (true for a bare
+   `qemu:///system`/`qemu:///session`, no host component at all) and a
+   restructured `_prepare_qemu_spice_connection(host, vm)` (renamed from
+   `_start_qemu_tunnel`) that returns `(tunnel, port)` -- `tunnel` is
+   `None` for a local URI, since libvirt already runs on this same
+   machine and its SPICE port (bound to `127.0.0.1` same as ever) is
+   therefore already directly reachable with no SSH forwarding needed at
+   all. `_on_qemu_spice_connection_ready` (renamed from
+   `_on_qemu_tunnel_ready`) only registers an `_active_sessions` entry
+   when there actually is a tunnel to stop later -- a local session's
+   disconnect has nothing to tear down beyond the `SpiceWidget` itself,
+   and the existing disconnect/stop-all paths already tolerate a missing
+   entry, so no other change was needed there.
+
+   **Verified live**, reproducing the exact reported scenario: rather
+   than treating the dev VM as a remote host again, this time its *own*
+   local libvirt was the target -- `qemu:///system` from a script running
+   *on* that machine, exactly mirroring "libvirt and it-toolbox on the
+   same box". Confirmed `is_local_uri("qemu:///system")` is `True`,
+   confirmed the real (unmodified) `get_vm_spice_port()` still resolves a
+   real VM's port fine over a local URI, and confirmed a real
+   `SpiceSession` connects successfully straight to `127.0.0.1:<port>`
+   with zero tunnel involved -- exactly the code path
+   `_prepare_qemu_spice_connection`'s `(None, port)` result leads to.
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the

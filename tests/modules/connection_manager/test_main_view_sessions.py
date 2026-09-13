@@ -1447,7 +1447,7 @@ def test_qemu_connect_embeds_widget_and_registers_session(qtbot, monkeypatch):
     tunnel = _FakeTunnel(port=5901)
     vm = QemuVm(id="1", name="myvm", state="running")
 
-    view._on_qemu_tunnel_ready(tunnel, vm)
+    view._on_qemu_spice_connection_ready((tunnel, tunnel.port), vm)
 
     assert view._tabs.count() == 1
     assert view._tabs.tabText(0) == "myvm"
@@ -1465,7 +1465,7 @@ def test_spice_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch)
     tunnel = _FakeTunnel(port=5901)
     vm = QemuVm(id="1", name="myvm", state="running")
 
-    view._on_qemu_tunnel_ready(tunnel, vm)
+    view._on_qemu_spice_connection_ready((tunnel, tunnel.port), vm)
     widget = view._tabs.widget(0)
     widget.finished.emit()
 
@@ -1474,7 +1474,28 @@ def test_spice_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch)
     qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
 
 
-def test_start_qemu_tunnel_raises_when_no_spice_port(qtbot, monkeypatch):
+def test_qemu_connect_with_local_uri_skips_tunnel_and_registers_no_session_entry(qtbot, monkeypatch):
+    # Regression test: a QemuHost pointed at the *same* machine running
+    # it-toolbox (a bare "qemu:///system" URI, no ssh transport at all)
+    # previously always failed to connect -- _start_qemu_tunnel
+    # unconditionally tried to build an SSH tunnel for every QEMU host,
+    # regardless of whether the URI actually needed one.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.SpiceWidget", _FakeSpiceWidget
+    )
+    view = _make_view(qtbot, monkeypatch)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_spice_connection_ready((None, 5901), vm)
+
+    assert view._tabs.count() == 1
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port) == ("127.0.0.1", 5901)
+    # No tunnel -- nothing registered to stop on disconnect.
+    assert view._active_sessions == {}
+
+
+def test_prepare_qemu_spice_connection_raises_when_no_spice_port(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
     monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: None)
@@ -1482,7 +1503,37 @@ def test_start_qemu_tunnel_raises_when_no_spice_port(qtbot, monkeypatch):
     vm = QemuVm(id="1", name="myvm", state="shut off")
 
     with pytest.raises(main_view_module.QemuApiError, match="no SPICE port"):
-        ConnectionManagerView._start_qemu_tunnel(host, vm)
+        ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
+
+
+def test_prepare_qemu_spice_connection_skips_tunnel_for_local_uri(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: 5901)
+    host = QemuHost(name="local", uri="qemu:///system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    tunnel, port = ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
+
+    assert tunnel is None
+    assert port == 5901
+
+
+def test_prepare_qemu_spice_connection_starts_tunnel_for_ssh_uri(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: 5901)
+    fake_tunnel = _FakeTunnel(port=6001)
+    monkeypatch.setattr(
+        main_view_module, "QemuTunnel", lambda uri, port: fake_tunnel
+    )
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    tunnel, port = ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
+
+    assert tunnel is fake_tunnel
+    assert port == 6001
 
 
 def test_connect_qemu_warns_instead_of_crashing_when_spice_unavailable(qtbot, monkeypatch):

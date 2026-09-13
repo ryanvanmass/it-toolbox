@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
-from it_toolbox.core.qemu_tunnel import QemuTunnel
+from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
 from it_toolbox.core.tunnel_session import BackgroundTunnel
 from it_toolbox.modules.connection_manager import gcp_client, qemu_client, qemu_provisioning
 from it_toolbox.modules.connection_manager.models import (
@@ -1274,7 +1274,7 @@ class ConnectionManagerView(QWidget):
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
-    # -- Connect: QEMU/libvirt, tunnel over SSH, embed SPICE ------------------
+    # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------
 
     def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
         if SpiceWidget is None:
@@ -1286,28 +1286,41 @@ class ConnectionManagerView(QWidget):
             )
             return
         async_utils.run_in_background(
-            lambda: self._start_qemu_tunnel(host, vm),
-            on_result=lambda tunnel: self._on_qemu_tunnel_ready(tunnel, vm),
+            lambda: self._prepare_qemu_spice_connection(host, vm),
+            on_result=lambda result: self._on_qemu_spice_connection_ready(result, vm),
             on_error=self._on_session_error,
         )
 
     @staticmethod
-    def _start_qemu_tunnel(host: QemuHost, vm: QemuVm) -> QemuTunnel:
+    def _prepare_qemu_spice_connection(host: QemuHost, vm: QemuVm) -> tuple[QemuTunnel | None, int]:
+        """(tunnel, port-to-connect-to-on-127.0.0.1) -- tunnel is None for a
+        local libvirt host (see qemu_tunnel.is_local_uri()'s docstring for
+        why that case needs no tunnel at all: its SPICE port is already
+        directly reachable on this same machine)."""
         spice_port = qemu_client.get_vm_spice_port(host, vm.name)
         if spice_port is None:
             raise QemuApiError(f"{vm.name} has no SPICE port available — is it running?")
+        if is_local_uri(host.uri):
+            return None, spice_port
         tunnel = QemuTunnel(host.uri, spice_port)
         tunnel.start()
-        return tunnel
+        return tunnel, tunnel.port
 
-    def _on_qemu_tunnel_ready(self, tunnel: QemuTunnel, vm: QemuVm) -> None:
+    def _on_qemu_spice_connection_ready(
+        self, result: tuple[QemuTunnel | None, int], vm: QemuVm
+    ) -> None:
+        tunnel, port = result
         session_id = self._next_session_id
         self._next_session_id += 1
-        self._active_sessions[session_id] = ("spice", tunnel)
+        # No entry at all for the no-tunnel (local) case -- nothing to stop
+        # on disconnect, and _on_disconnect_requested/_stop_all_sessions
+        # already tolerate a session_id with no _active_sessions entry.
+        if tunnel is not None:
+            self._active_sessions[session_id] = ("spice", tunnel)
 
-        self._embed_spice(session_id, vm.name, tunnel.port)
+        self._embed_spice(session_id, vm.name, port)
 
-        label = f"{vm.name} (SPICE) — 127.0.0.1:{tunnel.port}"
+        label = f"{vm.name} (SPICE) — 127.0.0.1:{port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
     def _embed_spice(self, session_id: int, display_name: str, port: int) -> None:
