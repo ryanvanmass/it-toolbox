@@ -47,22 +47,44 @@ pre-release never gets offered to users through the in-app updater. The
 version string itself would also tolerate) is required so that
 substring check in `release.yml` stays reliable.
 
-## After merging a PR
+## Before merging a PR
 
-Standing practice now, not just for packaging-specific changes: after
-merging a PR into `main`, cut the next pre-release beta
-(`scripts/release.sh X.Y.Z-beta.N+1`, then push `main` and the tag) and
-confirm the resulting build — and, for anything Windows/Linux-packaging-
-or launch-relevant, an actual install — before moving on. In one
-session this caught two real, previously invisible bugs that `pytest`
-alone had no way to catch, because neither is exercised by the test
-suite, only by an actual build-and-install: a wheel-filename mismatch
-that broke every pre-release build, and a Windows installer that
-produced a completely unlaunchable app (every Windows release shipped
-before that fix was affected). Use judgment for changes with no
+Standing practice now, not just for packaging-specific changes: cut the
+next pre-release beta *from the PR's own branch*, before merging it into
+`main` — `scripts/release.sh` doesn't care what branch it's run from,
+and `release.yml` triggers on the tag regardless of which branch the
+tagged commit lives on, so this needs no special setup:
+
+```
+git checkout <pr-branch>
+scripts/release.sh X.Y.Z-beta.N+1
+git push origin <pr-branch>
+git push origin vX.Y.Z-beta.N+1
+```
+
+Confirm the resulting build — and, for anything Windows/Linux-packaging-
+or launch-relevant, an actual install — *before* merging the PR. Only
+merge once that's confirmed working.
+
+This used to happen the other way around (cut the beta right after
+merging), which meant a change could sit in `main` broken until someone
+got around to installing it — that's exactly what happened with the
+Windows in-app updater silently failing to relaunch: it merged, then the
+next beta's real-install test caught it, requiring a second PR and a
+second beta cycle to actually fix. Testing on the PR branch first means
+`main` never carries a version that hasn't already been confirmed to
+work — if the beta fails, fix it and cut another beta from the same
+branch; `main` stays clean either way.
+
+In one session this caught two real, previously invisible bugs that
+`pytest` alone had no way to catch, because neither is exercised by the
+test suite, only by an actual build-and-install: a wheel-filename
+mismatch that broke every pre-release build, and a Windows installer
+that produced a completely unlaunchable app (every Windows release
+shipped before that fix was affected). Use judgment for changes with no
 possible packaging/runtime-launch impact (e.g. a docs-only PR) — the
 point is catching what tests structurally can't, not cutting a beta on
-reflex for every single merge.
+reflex for every single PR.
 
 ## Windows packages
 

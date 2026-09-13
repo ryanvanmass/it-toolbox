@@ -203,10 +203,10 @@ gh run list --branch <branch-name> --limit 1
 Download the resulting `windows-installer` artifact from that run to
 test a fix before it ever touches a real beta tag. See
 `docs/releasing.md` for the full release/pre-release process, including
-the "cut a beta after every merge" habit this project's settled into —
-neither of the two most serious bugs above (the launcher, and the
-stale-version issue) were catchable by the test suite; both only ever
-surfaced from an actual install.
+the "cut and test a beta from the PR's own branch before merging" habit
+this project's settled into — neither of the two most serious bugs above
+(the launcher, and the stale-version issue) were catchable by the test
+suite; both only ever surfaced from an actual install.
 
 ## Known-fixed issues (continued)
 
