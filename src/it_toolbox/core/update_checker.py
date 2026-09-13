@@ -20,7 +20,8 @@ _LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 # /releases/latest (above) only ever returns the newest *non*-prerelease,
 # non-draft release -- this is the plain list endpoint instead, which
 # does include pre-releases (unauthenticated requests never see drafts
-# regardless, so no filtering needed there), sorted newest-created-first.
+# regardless, so no filtering needed there). NOT reliably newest-first --
+# see _newest_release's own comment for why that can't be assumed here.
 _RELEASES_LIST_URL = f"https://api.github.com/repos/{REPO}/releases"
 _REQUEST_TIMEOUT = 10
 _DOWNLOAD_TIMEOUT_SEC = 60
@@ -30,10 +31,6 @@ _DOWNLOAD_TIMEOUT_SEC = 60
 # cross-thread progress signal thousands of times a second for no
 # perceptible benefit to a status bar.
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024
-# Generous but bounded -- a silent Inno Setup install of this app's size
-# should take seconds, not minutes; this just guards against a hung
-# installer process rather than expecting to be hit in practice.
-_INSTALL_TIMEOUT_SEC = 300
 
 
 @dataclass(frozen=True)
@@ -51,6 +48,32 @@ def get_installed_version() -> str:
     return metadata.version(PACKAGE_NAME)
 
 
+def _newest_release(releases: list[dict]) -> dict:
+    """Picks by actual version comparison, not list position.
+
+    Confirmed on a real repo, not theoretical: right after publishing
+    v0.3.0-beta.10, /releases still listed it 4th -- behind beta.9,
+    beta.8, and beta.7 -- despite beta.10 having the highest release id
+    *and* the latest created_at/published_at of everything in the list.
+    GitHub's listing here just isn't reliably newest-first immediately
+    after a publish (some indexing lag, apparently), so trusting
+    releases[0] can silently offer a stale "latest" release for a while.
+    Comparing versions directly sidesteps needing that ordering to be
+    right at all. Tags that don't parse as a version are skipped rather
+    than crashing the comparison; if none parse, falls back to the first
+    entry rather than returning nothing for what's still a real list.
+    """
+    versioned = []
+    for release in releases:
+        try:
+            versioned.append((Version(release["tag_name"].removeprefix("v")), release))
+        except InvalidVersion:
+            continue
+    if not versioned:
+        return releases[0]
+    return max(versioned, key=lambda pair: pair[0])[1]
+
+
 def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
     """None means no release has been published yet (a real, expected
     state right now — see docs/releasing.md), not an error.
@@ -58,8 +81,8 @@ def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
     include_prerelease=True is Settings > App Updates' opt-in beta-testing
     toggle (settings.load_include_prerelease_updates()) -- it switches
     from GitHub's /releases/latest (which never returns a pre-release) to
-    the plain releases list and takes its first, newest entry instead,
-    pre-release or not.
+    the plain releases list, picking the highest-versioned entry there
+    (see _newest_release) rather than assuming it's the first one.
     """
     if include_prerelease:
         response = requests.get(_RELEASES_LIST_URL, timeout=_REQUEST_TIMEOUT)
@@ -67,7 +90,7 @@ def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
         releases = response.json()
         if not releases:
             return None
-        data = releases[0]
+        data = _newest_release(releases)
     else:
         response = requests.get(_LATEST_RELEASE_URL, timeout=_REQUEST_TIMEOUT)
         if response.status_code == 404:
@@ -95,18 +118,39 @@ def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
 def download_and_install_windows_update(
     installer_url: str, on_progress: Callable[[int, int], None] | None = None
 ) -> None:
-    """Downloads the Windows installer and runs it silently in place,
-    then relaunches the app -- Windows-only (the caller is expected to
-    only reach this from a platform-gated UI action, same convention as
-    settings/ui/main_view.py's FreeRDP-fetch button).
+    """Downloads the Windows installer and launches it silently,
+    detached from this process -- Windows-only (the caller is expected
+    to only reach this from a platform-gated UI action, same convention
+    as settings/ui/main_view.py's FreeRDP-fetch button).
 
-    Inno Setup's default PrivilegesRequired=admin (see
-    packaging/windows/it-toolbox.iss) bakes a requireAdministrator
-    manifest into the installer -- Windows honors that for *any*
-    process-creation call, so plain subprocess.Popen below still shows
-    the same UAC consent prompt the user would get double-clicking the
-    installer by hand. Nothing extra (ShellExecute/"runas") is needed to
-    trigger it.
+    Deliberately does NOT wait for the installer to finish, and does NOT
+    relaunch the app itself -- an earlier version did both from this
+    same process, but that process's own pythonw.exe/python312.dll are
+    files inside {app} that the installer is about to delete and
+    replace. Inno Setup's default CloseApplications=yes uses Windows
+    Restart Manager to silently kill (no prompt, since this is a silent
+    install) any process holding a handle into that directory before it
+    touches files -- which is exactly this process, mid-wait(). Confirmed
+    on a real install, not theoretical: the waiting process was killed
+    before the installer ever reached its own [InstallDelete] step, so
+    it never returned to relaunch anything, and no error surfaced
+    anywhere because the process that would've reported it was gone.
+
+    So instead: launch the installer and immediately get out of its way
+    -- the caller is still expected to quit this process right after
+    this returns, same as before, just sooner (before waiting on
+    anything, not after). Freeing this process's own file handles before
+    Inno ever reaches [InstallDelete] avoids the conflict entirely.
+    packaging/windows/it-toolbox.iss's [Run] postinstall entry
+    (deliberately without skipifsilent) launches the new version once
+    Inno's done, since this process won't be around to do it.
+
+    Inno Setup's default PrivilegesRequired=admin (see that same .iss
+    file) bakes a requireAdministrator manifest into the installer --
+    Windows honors that for *any* process-creation call, so plain
+    subprocess.Popen below still shows the same UAC consent prompt the
+    user would get double-clicking the installer by hand. Nothing extra
+    (ShellExecute/"runas") is needed to trigger it.
 
     on_progress, if given, is called periodically during the download
     with (bytes_downloaded, total_bytes) -- total_bytes is 0 if the
@@ -116,10 +160,10 @@ def download_and_install_windows_update(
     there -- the caller is expected to pass a Qt Signal's .emit (safe
     cross-thread by Qt's own design), not touch any widget directly.
 
-    Raises UpdateInstallError on download failure, a non-zero installer
-    exit code, or a timeout waiting for it. On success, the new version
-    has already been launched as a separate process before this returns
-    -- the caller is expected to quit this process right after.
+    Raises UpdateInstallError on download failure, or if the installer
+    process itself fails to even start. Does NOT raise for anything that
+    happens during or after the actual install -- this process is gone
+    long before that, by design.
     """
     with requests.get(installer_url, timeout=_DOWNLOAD_TIMEOUT_SEC, stream=True) as response:
         response.raise_for_status()
@@ -136,42 +180,25 @@ def download_and_install_windows_update(
                 if on_progress is not None:
                     on_progress(downloaded, total)
 
-    proc = subprocess.Popen(
-        [str(installer_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
-    )
+    # Not cleaned up afterward -- this process doesn't wait around to
+    # learn when the installer is done with it, and Windows won't allow
+    # deleting a file a running process still has open anyway. Left for
+    # Windows' own temp-directory cleanup.
+    #
+    # /SILENT, not /VERYSILENT: both skip the wizard and require no
+    # interaction (/SUPPRESSMSGBOXES still suppresses any error message
+    # boxes), but /SILENT still shows Inno's own small installation
+    # progress window. Without it there was a stretch with literally no
+    # IT Toolbox window at all -- this one already quit, the new one
+    # hasn't launched yet -- where a real hang was indistinguishable from
+    # normal progress. /SILENT's progress window closes that gap for
+    # free, without this process needing to stick around to show
+    # anything itself (which is exactly what it can't safely do -- see
+    # this function's own docstring for why).
     try:
-        returncode = proc.wait(timeout=_INSTALL_TIMEOUT_SEC)
-    except subprocess.TimeoutExpired as e:
-        # Deliberately not cleaning up installer_path here -- the process
-        # may still be running and holding the file open, and Windows
-        # (unlike POSIX) refuses to delete a file a running process still
-        # has open. Attempting it would raise a PermissionError that
-        # masks this more useful TimeoutExpired-derived error.
-        raise UpdateInstallError(
-            f"Installer at {installer_path} did not finish within {_INSTALL_TIMEOUT_SEC}s"
-        ) from e
-
-    # proc.wait() returned (didn't raise) -- the installer process has
-    # actually exited by this point, so the file is no longer in use.
-    installer_path.unlink(missing_ok=True)
-
-    if returncode != 0:
-        raise UpdateInstallError(f"Installer exited with code {returncode}")
-
-    # Fixed by packaging/windows/it-toolbox.iss's DefaultDirName -- not a
-    # frozen build with a discoverable sys.frozen/sys.executable path to
-    # introspect (see that file's own comment), so this known-fixed
-    # location is looked up the same way settings/ui/main_view.py's
-    # FreeRDP-fetch code looks up LOCALAPPDATA, rather than guessed at.
-    # Deliberately pythonw.exe -m it_toolbox, not the
-    # {app}\Scripts\it-toolbox.exe launcher pip generates at build time --
-    # that launcher hardcodes the *absolute* interpreter path from build
-    # time (pip/distlib script stubs aren't relocatable), which breaks the
-    # instant this tree is copied anywhere else, same failure
-    # packaging/windows/it-toolbox.iss's own [Icons]/[Run] entries hit and
-    # now avoid the same way.
-    app_exe = Path(os.environ["ProgramFiles"]) / "IT Toolbox" / "pythonw.exe"
-    subprocess.Popen([str(app_exe), "-m", "it_toolbox"])
+        subprocess.Popen([str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+    except OSError as e:
+        raise UpdateInstallError(f"Failed to launch installer at {installer_path}: {e}") from e
 
 
 def is_update_available(installed_version: str, latest_version: str) -> bool:

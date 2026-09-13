@@ -85,4 +85,10 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\pythonw.exe"; Parameters: "-m it_
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\pythonw.exe"; Parameters: "-m it_toolbox"; Description: "Launch IT Toolbox"; Flags: nowait postinstall skipifsilent
+; Deliberately no skipifsilent: the in-app updater (see
+; core/update_checker.py's download_and_install_windows_update) relies on
+; this to relaunch the app after a /SILENT install, since the process
+; that ran the update can't safely do it itself anymore -- see that
+; function's docstring for why. A plain interactive install still shows
+; this as the usual "Launch IT Toolbox" finish-page checkbox.
+Filename: "{app}\pythonw.exe"; Parameters: "-m it_toolbox"; Description: "Launch IT Toolbox"; Flags: nowait postinstall
