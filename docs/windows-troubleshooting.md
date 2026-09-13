@@ -27,14 +27,11 @@ bundles everything fixed so far. Checklist:
    - Click "Download && Install" — confirm the dialog, watch the new
      progress bar move, expect a UAC prompt when the silent install
      actually kicks off, then the app should close and reopen on its own.
-   - **This is the scenario nobody's confirmed works yet**: the currently
-     *running* `pythonw.exe` is inside the exact directory
-     (`{app}` = `C:\Program Files\IT Toolbox`) that gets wiped and
-     recreated as part of the fix in
-     [Stale version after an update](#stale-version-after-an-update). If
-     this hangs, fails partway, or the relaunch doesn't happen, that's
-     the thing to report back with full details (see
-     [Capturing debug logs](#capturing-debug-logs)).
+   - This used to silently fail every time (confirmed on a real machine,
+     not theoretical) — see
+     [Update never relaunches after installing](#update-never-relaunches-after-installing)
+     for what was actually happening and the fix, now in `main`.
+     Re-confirm this works end to end on the next beta.
 
 ## Known-fixed issues (for reference if you see them again)
 
@@ -74,12 +71,6 @@ filesandordirs; Name: "{app}"` wipes the whole install directory before
 present. Matches `packaging/linux/build.sh`'s own `sudo rm -rf
 "$PREFIX"` before every rebuild.
 
-**Not yet independently confirmed**: whether this wipe-and-recreate
-works cleanly when it's the *running* app's own update triggering it
-(see the checklist above). Inno Setup is built to support replacing a
-running app's files via delete-sharing, so it should be fine — but
-nobody's watched it happen on a real machine yet.
-
 **How to check for yourself** if version confusion shows up again:
 
 ```powershell
@@ -89,6 +80,42 @@ Get-ChildItem -Recurse -Filter "it_toolbox-*.dist-info" "C:\Program Files\IT Too
 # What importlib.metadata actually resolves to:
 & "C:\Program Files\IT Toolbox\python.exe" -c "from importlib import metadata; print(metadata.version('it-toolbox'))"
 ```
+
+### Update never relaunches after installing
+
+**Symptom**: click "Download && Install" in Settings > App Updates,
+the progress bar finishes, UAC prompt appears and gets accepted, the
+app window closes — then nothing. No new window ever opens, no error
+message anywhere, and `C:\Program Files\IT Toolbox` still contains the
+*old* version (confirmed via the dist-info check above — timestamps on
+`Lib`/`Scripts` matched the original install, untouched by the update
+attempt).
+
+**Cause**: `download_and_install_windows_update()` used to spawn the
+installer and `proc.wait()` on it from inside the very process being
+replaced — the running `pythonw.exe`/`python312.dll` are files inside
+`{app}`. Inno Setup 6's default `CloseApplications=yes` uses Windows
+Restart Manager to silently find and kill (no prompt — this is a silent
+install) any process holding a handle into files it's about to touch,
+*before* it does anything else. That killed the very process that was
+`wait()`-ing on it, so the relaunch code after that call never ran —
+and no error surfaced anywhere, because the process that would have
+reported it was already dead. This was the exact risk flagged as
+"nobody's confirmed this works" in earlier revisions of this doc; it
+does not.
+
+**Fix** (in `main`, next beta after beta.7): the old process no longer
+waits for the installer or relaunches the app itself. It launches the
+installer detached and quits immediately — freeing its own file handles
+*before* Inno ever reaches `[InstallDelete]`, so there's nothing left
+for Restart Manager to kill. `packaging/windows/it-toolbox.iss`'s
+`[Run]` entry (`skipifsilent` removed) now does the relaunch instead,
+since Inno itself is still running after the old app is gone. Trade-off:
+the app can no longer show an inline "install failed" message for a
+failure that happens after it quits — the "you can still install it
+manually via View Release" fallback text is the safety net for that
+now. **Not yet re-confirmed on a real machine** — that's the next thing
+to check when testing the next beta after beta.7.
 
 ### Missing/generic window icon
 
@@ -163,6 +190,22 @@ the "cut a beta after every merge" habit this project's settled into —
 neither of the two most serious bugs above (the launcher, and the
 stale-version issue) were catchable by the test suite; both only ever
 surfaced from an actual install.
+
+## Follow-up work
+
+- **No feedback between the app closing and the new one opening.** The
+  download has a real progress bar
+  (`_update_download_progress_bar` in `modules/settings/ui/main_view.py`),
+  but the moment the installer is launched, the app quits immediately
+  (see [Update never relaunches after installing](#update-never-relaunches-after-installing)
+  for why it has to) — so there's a window with no IT Toolbox UI at all
+  while Inno Setup does the actual file replacement and then launches
+  the new version. Should be quick in practice, but there's currently no
+  way to tell "still installing" apart from "something went wrong" during
+  that gap, since this process is intentionally gone by then and can't
+  show anything. A lightweight standalone status window (or relying on
+  the installer's own UI, if `/VERYSILENT` were relaxed) would close that
+  gap, at the cost of the fully-silent install experience.
 
 ## Where things live, for reference
 

@@ -1,6 +1,3 @@
-import subprocess
-from pathlib import Path
-
 import pytest
 
 from it_toolbox.core import update_checker
@@ -154,31 +151,22 @@ class _FakeDownloadResponse:
 
 
 class _FakePopen:
-    """Records every subprocess.Popen(...) call this test made, and lets
-    the test script what proc.wait() should do for each one in order."""
+    """Records every subprocess.Popen(...) call this test made."""
 
     calls: list[list[str]] = []
-    wait_results: list[object] = []  # int returncode, or an Exception instance to raise
 
     def __init__(self, args, **kwargs):
         _FakePopen.calls.append(args)
-
-    def wait(self, timeout=None):
-        result = _FakePopen.wait_results.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
 
 
 @pytest.fixture(autouse=True)
 def _reset_fake_popen():
     _FakePopen.calls = []
-    _FakePopen.wait_results = []
     yield
 
 
-def test_download_and_install_windows_update_launches_the_silent_installer_then_relaunches(
-    monkeypatch, tmp_path
+def test_download_and_install_windows_update_launches_the_silent_installer_detached(
+    monkeypatch,
 ):
     monkeypatch.setattr(
         update_checker.requests,
@@ -188,19 +176,20 @@ def test_download_and_install_windows_update_launches_the_silent_installer_then_
         ),
     )
     monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
-    monkeypatch.setenv("ProgramFiles", str(tmp_path))
-    _FakePopen.wait_results = [0]
 
     update_checker.download_and_install_windows_update("https://example.com/setup.exe")
 
-    assert len(_FakePopen.calls) == 2
-    installer_call, relaunch_call = _FakePopen.calls
+    # Launched and left to run on its own -- this process doesn't wait
+    # for it, and doesn't relaunch the app itself either (Inno Setup's
+    # own postinstall [Run] entry does that now; see the docstring for
+    # why this process can't safely stick around to do it).
+    assert len(_FakePopen.calls) == 1
+    installer_call = _FakePopen.calls[0]
     assert installer_call[1:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
     assert installer_call[0].endswith(".exe")
-    assert relaunch_call == [str(tmp_path / "IT Toolbox" / "pythonw.exe"), "-m", "it_toolbox"]
 
 
-def test_download_and_install_windows_update_reports_progress(monkeypatch, tmp_path):
+def test_download_and_install_windows_update_reports_progress(monkeypatch):
     content = b"x" * 30  # 3 chunks at chunk_size=10, to exercise multiple progress calls
     monkeypatch.setattr(update_checker, "_DOWNLOAD_CHUNK_SIZE", 10)
     monkeypatch.setattr(
@@ -211,8 +200,6 @@ def test_download_and_install_windows_update_reports_progress(monkeypatch, tmp_p
         ),
     )
     monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
-    monkeypatch.setenv("ProgramFiles", str(tmp_path))
-    _FakePopen.wait_results = [0]
     progress_calls = []
 
     update_checker.download_and_install_windows_update(
@@ -223,7 +210,7 @@ def test_download_and_install_windows_update_reports_progress(monkeypatch, tmp_p
 
 
 def test_download_and_install_windows_update_progress_total_is_zero_without_content_length(
-    monkeypatch, tmp_path
+    monkeypatch,
 ):
     monkeypatch.setattr(
         update_checker.requests,
@@ -231,8 +218,6 @@ def test_download_and_install_windows_update_progress_total_is_zero_without_cont
         lambda url, timeout, stream=True: _FakeDownloadResponse(),  # no content_length
     )
     monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
-    monkeypatch.setenv("ProgramFiles", str(tmp_path))
-    _FakePopen.wait_results = [0]
     progress_calls = []
 
     update_checker.download_and_install_windows_update(
@@ -243,7 +228,7 @@ def test_download_and_install_windows_update_progress_total_is_zero_without_cont
     assert all(total == 0 for _downloaded, total in progress_calls)
 
 
-def test_download_and_install_windows_update_raises_on_nonzero_exit(monkeypatch, tmp_path):
+def test_download_and_install_windows_update_raises_if_installer_fails_to_start(monkeypatch):
     monkeypatch.setattr(
         update_checker.requests,
         "get",
@@ -251,40 +236,14 @@ def test_download_and_install_windows_update_raises_on_nonzero_exit(monkeypatch,
             content_length=len(b"fake-installer-bytes")
         ),
     )
-    monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
-    monkeypatch.setenv("ProgramFiles", str(tmp_path))
-    _FakePopen.wait_results = [1]
 
-    with pytest.raises(update_checker.UpdateInstallError, match="exited with code 1"):
+    def _raise(args, **kwargs):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(update_checker.subprocess, "Popen", _raise)
+
+    with pytest.raises(update_checker.UpdateInstallError, match="Failed to launch installer"):
         update_checker.download_and_install_windows_update("https://example.com/setup.exe")
-
-    # No relaunch attempted after a failed install.
-    assert len(_FakePopen.calls) == 1
-
-
-def test_download_and_install_windows_update_raises_on_timeout(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        update_checker.requests,
-        "get",
-        lambda url, timeout, stream=True: _FakeDownloadResponse(
-            content_length=len(b"fake-installer-bytes")
-        ),
-    )
-    monkeypatch.setattr(update_checker.subprocess, "Popen", _FakePopen)
-    monkeypatch.setenv("ProgramFiles", str(tmp_path))
-    _FakePopen.wait_results = [subprocess.TimeoutExpired(cmd="setup.exe", timeout=300)]
-
-    try:
-        with pytest.raises(update_checker.UpdateInstallError, match="did not finish"):
-            update_checker.download_and_install_windows_update("https://example.com/setup.exe")
-    finally:
-        # Production code deliberately leaves this file in place on a
-        # real timeout (see its own comment) since the process might
-        # still hold it open -- our fake process never actually runs, so
-        # nothing stops the test itself from cleaning it up.
-        Path(_FakePopen.calls[0][0]).unlink(missing_ok=True)
-
-    assert len(_FakePopen.calls) == 1
 
 
 def test_get_installed_version_reads_real_package_metadata():
