@@ -89,9 +89,15 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    land. The VM's own disk and its ISO install media each get their
    *own* storage-pool combo (added per feedback after the first cut) --
    changing the ISO pool only reloads the ISO volume list, it has no
-   effect on where the disk itself is created. OS variant is a real,
-   searchable combo (`QComboBox` + `QCompleter`, `MatchContains` so
-   typing matches anywhere in the string) backed by a new
+   effect on where the disk itself is created. Both the ISO and OS
+   variant combos are searchable (`QComboBox` + `QCompleter`,
+   `MatchContains` so typing matches anywhere in the string, not just a
+   prefix -- factored into one shared `_make_searchable` helper) with a
+   widened popup and a full-path tooltip per ISO entry, since a real
+   ISO library turned out to make a plain non-searchable dropdown
+   genuinely unusable (found from an actual screenshot of a real,
+   populated library -- truncated, un-searchable names in a long list
+   with many similar entries). OS variant is backed by a new
    `qemu_provisioning.list_os_variants()` -- confirmed live this is a
    purely local `virt-install --osinfo list` lookup (~940 entries,
    `"generic"` included), not something that varies per libvirt host,

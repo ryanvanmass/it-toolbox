@@ -1,3 +1,5 @@
+from PySide6.QtCore import Qt
+
 from it_toolbox.modules.connection_manager.models import QemuHost, StoragePool, StorageVolume, VirtualNetwork
 from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
 
@@ -94,6 +96,47 @@ def test_iso_combo_only_lists_iso_suffixed_volumes(qtbot, monkeypatch):
     labels = [dialog._iso_combo.itemText(i) for i in range(dialog._iso_combo.count())]
     assert labels == ["(None — boot the new disk directly)", "ubuntu.iso"]
     assert dialog._iso_combo.itemData(1) == "/var/lib/libvirt/images/ubuntu.iso"
+
+
+def test_iso_combo_is_searchable_over_a_large_library(qtbot, monkeypatch):
+    volumes = tuple(
+        StorageVolume(name=f"kubernetes-node-{i}.iso", path=f"/isos/kubernetes-node-{i}.iso")
+        for i in range(20)
+    ) + (
+        StorageVolume(name="debian-12.iso", path="/isos/debian-12.iso"),
+        StorageVolume(name="fedora-40.iso", path="/isos/fedora-40.iso"),
+    )
+    dialog = _make_dialog(qtbot, monkeypatch, volumes=volumes)
+    qtbot.waitUntil(lambda: dialog._iso_combo.count() == len(volumes) + 1, timeout=1000)
+
+    completer = dialog._iso_completer
+    completer.setCompletionPrefix("debian")
+    matches = {completer.completionModel().index(i, 0).data() for i in range(completer.completionCount())}
+    assert matches == {"debian-12.iso"}
+
+    # MatchContains, not just a prefix match -- a real library's names
+    # commonly need matching a substring in the middle (e.g. a shared
+    # "node" component across many otherwise-differently-named ISOs).
+    completer.setCompletionPrefix("node-7")
+    matches = {completer.completionModel().index(i, 0).data() for i in range(completer.completionCount())}
+    assert matches == {"kubernetes-node-7.iso"}
+
+
+def test_iso_combo_items_carry_full_path_as_tooltip(qtbot, monkeypatch):
+    volumes = (StorageVolume(name="a-very-long-real-world-iso-filename-2026.iso", path="/isos/a-very-long-real-world-iso-filename-2026.iso"),)
+    dialog = _make_dialog(qtbot, monkeypatch, volumes=volumes)
+    qtbot.waitUntil(lambda: dialog._iso_combo.count() == 2, timeout=1000)
+
+    assert dialog._iso_combo.itemData(1, Qt.ItemDataRole.ToolTipRole) == "/isos/a-very-long-real-world-iso-filename-2026.iso"
+
+
+def test_iso_combo_defaults_to_none_after_reload(qtbot, monkeypatch):
+    volumes = (StorageVolume(name="ubuntu.iso", path="/isos/ubuntu.iso"),)
+    dialog = _make_dialog(qtbot, monkeypatch, volumes=volumes)
+    qtbot.waitUntil(lambda: dialog._iso_combo.count() == 2, timeout=1000)
+
+    assert dialog._iso_combo.currentData() is None
+    assert dialog._iso_combo.currentText() == "(None — boot the new disk directly)"
 
 
 def test_os_variant_defaults_to_generic_and_is_searchable(qtbot, monkeypatch):

@@ -28,6 +28,35 @@ from it_toolbox.modules.connection_manager.models import QemuHost, StorageVolume
 
 _NONE_ISO_LABEL = "(None — boot the new disk directly)"
 _DEFAULT_OS_VARIANT = "generic"
+# Real ISO filenames (and, to a lesser extent, --osinfo short IDs) easily
+# outrun the combo box's own on-screen width -- widening the *popup*
+# specifically (Qt doesn't clip a QComboBox's dropdown to its own field
+# width) is what actually makes a large library legible, without forcing
+# the whole compact form layout wider just to fit one field's content.
+_SEARCHABLE_POPUP_MIN_WIDTH = 420
+
+
+def _make_searchable(combo: QComboBox, parent: QWidget) -> QCompleter:
+    """Wires a QComboBox up for type-to-filter search over a large list
+    (real cases: ~940 --osinfo short IDs, or a large ISO library where
+    many entries share a long common prefix/suffix) -- editable so
+    typing works at all, NoInsert so a search that doesn't exactly match
+    anything can't silently create a bogus new entry, MatchContains
+    (not the default MatchStartsWith) since a real library's names
+    often need matching a substring in the middle, not just a prefix.
+    The completer is bound to the combo's own model, which QComboBox
+    mutates in place on clear()/addItem() rather than replacing --
+    filtering results automatically stay current as items load in.
+    """
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    combo.view().setMinimumWidth(_SEARCHABLE_POPUP_MIN_WIDTH)
+    completer = QCompleter(combo.model(), parent)
+    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchFlag.MatchContains)
+    completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+    combo.setCompleter(completer)
+    return completer
 
 
 class CreateVmDialog(QDialog):
@@ -35,7 +64,7 @@ class CreateVmDialog(QDialog):
         super().__init__(parent)
         self._host = host
         self.setWindowTitle(f"Deploy VM on {host.name}")
-        self.resize(420, 420)
+        self.resize(460, 420)
 
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("my-new-vm")
@@ -69,25 +98,27 @@ class CreateVmDialog(QDialog):
         self._network_combo = QComboBox()
         self._network_combo.setEnabled(False)
 
+        # Searchable (type-to-filter) -- a real ISO library can easily
+        # have dozens of similarly-prefixed entries ("kubernetes-*.iso"
+        # etc.), where a plain non-searchable dropdown is genuinely
+        # unusable to scroll through. Repopulated per ISO-pool change
+        # (see _on_volumes_loaded); the completer stays wired to the
+        # same combo model throughout, so it reflects whatever's
+        # currently loaded without needing to be rebuilt each time.
         self._iso_combo = QComboBox()
         self._iso_combo.setEnabled(False)
+        self._iso_combo.addItem(_NONE_ISO_LABEL, None)
+        self._iso_combo.setCurrentText(_NONE_ISO_LABEL)
+        self._iso_completer = _make_searchable(self._iso_combo, self)
 
-        # Searchable (type-to-filter) list of every real --os-variant
-        # virt-install accepts -- confirmed live there are ~940 of
-        # these, loaded async the same way pools/networks are; "generic"
-        # (itself a real, valid entry) is the default before that load
-        # finishes and remains selectable/typeable throughout via the
-        # editable combo + completer.
+        # Searchable list of every real --os-variant virt-install
+        # accepts -- confirmed live there are ~940 of these, loaded
+        # async the same way pools/networks are; "generic" (itself a
+        # real, valid entry) is the default before that load finishes.
         self._os_variant_combo = QComboBox()
-        self._os_variant_combo.setEditable(True)
-        self._os_variant_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._os_variant_combo.addItem(_DEFAULT_OS_VARIANT)
         self._os_variant_combo.setCurrentText(_DEFAULT_OS_VARIANT)
-        self._os_variant_completer = QCompleter([_DEFAULT_OS_VARIANT], self)
-        self._os_variant_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._os_variant_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self._os_variant_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self._os_variant_combo.setCompleter(self._os_variant_completer)
+        self._os_variant_completer = _make_searchable(self._os_variant_combo, self)
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
@@ -171,7 +202,14 @@ class CreateVmDialog(QDialog):
         self._iso_combo.addItem(_NONE_ISO_LABEL, None)
         for volume in volumes:
             if volume.name.lower().endswith(".iso"):
+                index = self._iso_combo.count()
                 self._iso_combo.addItem(volume.name, volume.path)
+                # The combo box's own field still truncates a long real
+                # filename at rest -- a tooltip is the cheap way to
+                # recover the full name without widening the whole
+                # form's layout just for this one field.
+                self._iso_combo.setItemData(index, volume.path, Qt.ItemDataRole.ToolTipRole)
+        self._iso_combo.setCurrentIndex(0)
 
     def _load_os_variants(self) -> None:
         async_utils.run_in_background(
@@ -185,7 +223,6 @@ class CreateVmDialog(QDialog):
         self._os_variant_combo.clear()
         self._os_variant_combo.addItems(variants)
         self._os_variant_combo.setCurrentText(current)
-        self._os_variant_completer.setModel(self._os_variant_combo.model())
 
     def _on_load_error(self, error: Exception) -> None:
         self._show_error(str(error))
