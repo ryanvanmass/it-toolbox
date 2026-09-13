@@ -366,6 +366,71 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    else real) through both a full-frame and a small partial-band update
    under offscreen Qt (`QT_QPA_PLATFORM=offscreen`) with no crash.
 
+   **The choppiness itself turned out to have nothing to do with any of
+   the above.** After the crash fix, reported still choppy specifically
+   while dragging a window. Diagnostic back-and-forth ruled out several
+   plausible causes one at a time, each backed by a real check rather
+   than assumption: CPU usage on both the it-toolbox process and
+   qemu-kvm stayed flat during a drag (rules out a compute-bound cost on
+   either side); the cursor itself stayed smooth while only the display
+   *content* stuttered (rules out a general input/tunnel-latency
+   problem, since the cursor needs no network round trip); and,
+   decisively, `virt-viewer` against the exact same VM over the exact
+   same network path was reported "crystal clear" and smooth, which
+   rules out the SSH tunnel/network being bandwidth- or latency-bound
+   (a real client on the identical path wouldn't be unaffected by that).
+   That last fact also ruled out a client-side compression/color-depth
+   tweak that was investigated and measured (0% bandwidth difference
+   for a `color-depth=16` hint on real captured traffic -- see git
+   history for that dead end) and a speculative mouse-move-forwarding
+   GIL-contention fix (also shipped as a real, low-risk improvement,
+   but never confirmed to be the actual cause).
+
+   The real cause, once "crystal clear in virt-viewer" was reported: a
+   report that the SPICE view looked visibly *blurry* on completely
+   static content pointed away from a timing/performance bug entirely
+   and toward a rendering-quality one. `SpiceWidget`'s `paintEvent`
+   stretched `self._canvas` to fill `self.rect()` outright -- and
+   `main_view.py` embeds this widget straight into a `QTabWidget`, which
+   stretches it to whatever size the tab area happens to be, unrelated
+   to the guest's actual resolution/aspect ratio (confirmed: the tab
+   size and the VM's resolution were confirmed mismatched). Stretching a
+   mismatched-aspect-ratio image outright distorts it, and `drawImage()`
+   defaults to nearest-neighbor scaling, which looks blocky/aliased for
+   any non-exact-pixel-match scale. `virt-viewer` doesn't hit either
+   problem because it sizes its own window to the guest instead of the
+   reverse. **`RdpWidget` had already solved this exact problem** (see
+   its own `paintEvent`/`_scaled_image_rect`/`_remote_pos`, predating
+   this branch) -- ported the identical pattern to `SpiceWidget`:
+   `_scaled_canvas_rect()` computes the largest centered rect that fits
+   the canvas at its native aspect ratio (letterboxed with black bars
+   rather than stretched), `paintEvent` fills the letterbox bars and
+   only enables `QPainter.RenderHint.SmoothPixmapTransform` when actually
+   scaling (skipped for an exact 1:1 draw, matching `RdpWidget`'s own
+   "only worth the cost when actually scaling" reasoning), and
+   `_remote_pos` maps and clamps pointer coordinates through the same
+   letterboxed rect so a click in the bars doesn't map to a
+   nonsensical remote position. `_dirty_widget_rect` was updated the
+   same way so partial-band updates still map to the correct letterboxed
+   sub-rect. Verified offscreen: full-frame and partial-band paints both
+   still succeed with no crash, the letterboxed rect's aspect ratio
+   matches the canvas's to within rounding, and pointer mapping at the
+   widget center and at a letterboxed corner both land in-bounds and in
+   the expected place.
+
+   This is worth flagging explicitly for whoever picks this up next:
+   several real, verified, low-risk improvements shipped in this round
+   (the capture throttle, the dirty-row/partial-repaint rework, the
+   mouse-move coalescing) and none of them were the actual fix for what
+   was reported -- the actual fix was a rendering-quality bug, not a
+   performance one, and it only became findable once "blurry, not just
+   slow" was reported and "crystal clear in virt-viewer" ruled out the
+   network/tunnel entirely. The earlier throttle/dirty-row work isn't
+   wasted (it's still a real fix for the real inefficiency it targeted,
+   e.g. a genuinely busy guest desktop would still benefit), but it
+   evidently wasn't what was making this specific VM's session feel
+   choppy.
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the

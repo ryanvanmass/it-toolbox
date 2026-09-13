@@ -9,6 +9,19 @@ RdpWidget's paintEvent/mouse*Event/key*Event/frame_ready/finished/
 close_session shape. Resize support isn't implemented yet — see
 docs/qemu-spice-status.md's milestone list.
 
+The displayed image is scaled to fit the widget *without* distorting its
+aspect ratio (see paintEvent/_scaled_canvas_rect) -- letterboxed with
+bars rather than stretched, exactly mirroring RdpWidget's own reasoning:
+an embedding QTabWidget stretches this widget to whatever size the tab
+area happens to be, unrelated to the guest's actual resolution, and a
+naive stretch-to-fill visibly distorts (and, without smooth scaling,
+degrades the legibility of) the picture -- confirmed live against a
+report that a native SPICE client (virt-viewer, which sizes its own
+window to the guest instead of the reverse) looked "crystal clear" on
+the exact same VM where this widget didn't. Pointer coordinates are
+rescaled (and clamped, for clicks landing in the letterbox bars) from
+widget-space to the guest's native resolution before being sent.
+
 Unlike RDP, SPICE's InputsChannel has no unicode-text fast path — every
 key goes through core/rdp/scancodes.SCANCODES (reused as-is; same PC/AT
 Set 1 table), and a character with no entry there (e.g. non-US-layout
@@ -18,7 +31,7 @@ SpiceSession's input methods for the underlying reasoning.
 
 import math
 
-from PySide6.QtCore import QEvent, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -100,19 +113,41 @@ class SpiceWidget(QWidget):
             painter.end()
         self.update(self._dirty_widget_rect(band_top, band_height))
 
+    def _scaled_canvas_rect(self) -> QRect:
+        """The largest rect, centered in the widget, that fits self._canvas
+        at its native aspect ratio -- mirrors RdpWidget._scaled_image_rect()
+        exactly, and for the same reason: an embedding QTabWidget stretches
+        this widget to fill whatever arbitrary size the tab area happens to
+        be, with no relation to the guest's actual resolution/aspect ratio
+        (confirmed live: reported "crystal clear" in virt-viewer, which
+        sizes its own window to the guest instead, but visibly degraded
+        here). Stretching the image to cover a mismatched-aspect-ratio rect
+        distorts it outright; letterboxing with bars instead keeps it
+        undistorted at whatever size it does render.
+        """
+        if self._canvas is None:
+            return self.rect()
+        scaled = self._canvas.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        return QRect(QPoint(x, y), scaled)
+
     def _dirty_widget_rect(self, band_top: int, band_height: int) -> QRect:
         """Maps a dirty row range in the canvas's own pixel space to the
-        (possibly scaled, since this widget doesn't force itself to the
-        canvas's exact size) widget-space rect that needs repainting --
-        passed to update() so Qt only re-composites that area instead of
-        the whole widget on every partial update (e.g. dragging a window
-        only changes a limited band of the screen, not all of it)."""
-        if self._canvas is None or self._canvas.height() == 0 or self.height() == 0:
+        (possibly scaled and letterboxed) widget-space rect that needs
+        repainting -- passed to update() so Qt only re-composites that
+        area instead of the whole widget on every partial update (e.g.
+        dragging a window only changes a limited band of the screen, not
+        all of it)."""
+        if self._canvas is None or self._canvas.height() == 0:
             return self.rect()
-        scale_y = self.height() / self._canvas.height()
-        top = math.floor(band_top * scale_y)
-        bottom = math.ceil((band_top + band_height) * scale_y)
-        return QRect(0, top, self.width(), bottom - top)
+        target = self._scaled_canvas_rect()
+        if target.height() == 0:
+            return self.rect()
+        scale_y = target.height() / self._canvas.height()
+        top = target.y() + math.floor(band_top * scale_y)
+        bottom = target.y() + math.ceil((band_top + band_height) * scale_y)
+        return QRect(target.x(), top, target.width(), bottom - top)
 
     def _emit_finished_once(self) -> None:
         if not self._closing and not self._finished_emitted:
@@ -134,28 +169,45 @@ class SpiceWidget(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override signature
         if self._canvas is None or self.width() == 0 or self.height() == 0:
             return
+        target = self._scaled_canvas_rect()
         # Only re-composite the region Qt actually asked for (event.rect())
-        # -- update() above requests just the dirty band's widget-space
-        # rect, so a partial update (dragging a window, scrolling, ...)
-        # only ever costs a blit proportional to what changed, not the
-        # whole display, however large.
-        dest = event.rect()
-        scale_x = self._canvas.width() / self.width()
-        scale_y = self._canvas.height() / self.height()
-        # Both rects must be the *same* concrete type (QRectF here, not a
-        # QRect target mixed with a QRectF source) -- confirmed the hard
-        # way: PySide6's drawImage(rect, image, rect) overload resolution
-        # rejects a mixed QRect/QRectF pair with a ValueError even though
-        # each individually is a documented-acceptable type for that slot,
-        # and the resulting exception (if not for the try/finally below)
-        # left this QPainter active on the widget's backing store, which
-        # segfaulted the whole process once Qt tried to end the paint
-        # cycle itself.
-        dest_f = QRectF(dest)
-        src = QRectF(dest.x() * scale_x, dest.y() * scale_y, dest.width() * scale_x, dest.height() * scale_y)
+        # intersected with the actual image area -- update() above requests
+        # just the dirty band's widget-space rect, so a partial update
+        # (dragging a window, scrolling, ...) only ever costs a blit
+        # proportional to what changed, not the whole display, however
+        # large. Clip to `target` since event.rect() can include letterbox
+        # bars, which have nothing to draw from the image.
+        dest = event.rect().intersected(target)
         painter = QPainter(self)
         try:
-            painter.drawImage(dest_f, self._canvas, src)
+            if target != self.rect():
+                painter.fillRect(self.rect(), Qt.GlobalColor.black)
+            if dest.isEmpty():
+                return
+            scale_x = self._canvas.width() / target.width()
+            scale_y = self._canvas.height() / target.height()
+            src = QRectF(
+                (dest.x() - target.x()) * scale_x,
+                (dest.y() - target.y()) * scale_y,
+                dest.width() * scale_x,
+                dest.height() * scale_y,
+            )
+            if target.size() != self._canvas.size():
+                # drawImage() defaults to nearest-neighbor scaling, which
+                # looks blocky/aliased for anything but an exact pixel
+                # match -- matches RdpWidget.paintEvent's own reasoning
+                # exactly, only worth the cost when actually scaling.
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            # Both rects must be the *same* concrete type (QRectF here, not
+            # a QRect target mixed with a QRectF source) -- confirmed the
+            # hard way: PySide6's drawImage(rect, image, rect) overload
+            # resolution rejects a mixed QRect/QRectF pair with a
+            # ValueError even though each individually is a documented-
+            # acceptable type for that slot, and the resulting exception
+            # (if not for this try/finally) left this QPainter active on
+            # the widget's backing store, which segfaulted the whole
+            # process once Qt tried to end the paint cycle itself.
+            painter.drawImage(QRectF(dest), self._canvas, src)
         finally:
             painter.end()
 
@@ -175,9 +227,19 @@ class SpiceWidget(QWidget):
     def _remote_pos(self, widget_pos) -> tuple[int, int]:
         if self._canvas is None or self.width() == 0 or self.height() == 0:
             return int(widget_pos.x()), int(widget_pos.y())
-        scale_x = self._canvas.width() / self.width()
-        scale_y = self._canvas.height() / self.height()
-        return int(widget_pos.x() * scale_x), int(widget_pos.y() * scale_y)
+        target = self._scaled_canvas_rect()
+        if target.width() == 0 or target.height() == 0:
+            return 0, 0
+        scale_x = self._canvas.width() / target.width()
+        scale_y = self._canvas.height() / target.height()
+        x = (widget_pos.x() - target.x()) * scale_x
+        y = (widget_pos.y() - target.y()) * scale_y
+        # Clicks landing in the letterbox bars clamp to the nearest edge
+        # of the image rather than mapping to a negative/out-of-range
+        # remote coordinate -- matches RdpWidget._remote_pos() exactly.
+        x = max(0, min(x, self._canvas.width() - 1))
+        y = max(0, min(y, self._canvas.height() - 1))
+        return int(x), int(y)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         x, y = self._remote_pos(event.position())
