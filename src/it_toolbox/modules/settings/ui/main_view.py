@@ -295,14 +295,17 @@ class SettingsView(QWidget):
             self._update_status_label.setText(f"Downloading update… ({downloaded_mb:.1f} MB)")
 
     def _on_update_installed(self, _result: None) -> None:
-        # The new version was already launched as a separate process by
-        # download_and_install_windows_update -- this process's only job
-        # left is to get out of the way of the installer having just
-        # replaced its own files. Split into its own method (rather than
-        # calling QApplication.instance().quit() directly here) so tests
-        # can monkeypatch this one instance's behavior instead of the
-        # real, test-session-wide QApplication singleton that pytest-qt's
-        # own internals also depend on.
+        # The installer is now running detached, about to replace this
+        # very process's own files -- this process's only job left is to
+        # quit immediately and get out of its way (see
+        # download_and_install_windows_update's docstring for why it no
+        # longer waits around to relaunch the app itself; Inno Setup's
+        # own postinstall [Run] entry does that instead once it's done).
+        # Split into its own method (rather than calling
+        # QApplication.instance().quit() directly here) so tests can
+        # monkeypatch this one instance's behavior instead of the real,
+        # test-session-wide QApplication singleton that pytest-qt's own
+        # internals also depend on.
         self._quit_application()
 
     def _quit_application(self) -> None:
