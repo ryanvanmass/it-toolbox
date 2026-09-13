@@ -97,10 +97,18 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    ISO library turned out to make a plain non-searchable dropdown
    genuinely unusable (found from an actual screenshot of a real,
    populated library -- truncated, un-searchable names in a long list
-   with many similar entries). OS variant is backed by a new
-   `qemu_provisioning.list_os_variants()` -- confirmed live this is a
-   purely local `virt-install --osinfo list` lookup (~940 entries,
-   `"generic"` included), not something that varies per libvirt host,
+   with many similar entries). Both fields also start genuinely blank
+   (placeholder text only, no item pre-selected) rather than defaulting
+   to a specific entry -- confirmed live that an editable combo with no
+   exact-matching text reports `currentIndex() == -1` and
+   `currentData() == None`, which already means exactly the right thing
+   for both fields (an empty OS variant falls back to `"generic"` at
+   submit time; an empty ISO choice already means "no media"), so this
+   needed no extra state to track, just not pre-selecting anything.
+   OS variant is backed by a new `qemu_provisioning.list_os_variants()`
+   -- confirmed live this is a purely local `virt-install --osinfo
+   list` lookup (~940 entries, `"generic"` included), not something
+   that varies per libvirt host,
    so it takes no `QemuHost`/`--connect` and loads once regardless of
    which host is being deployed to. `ConfigureVmDialog` pre-fills
    vCPU/memory from a fresh

@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt
 
 from it_toolbox.modules.connection_manager.models import QemuHost, StoragePool, StorageVolume, VirtualNetwork
-from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
+from it_toolbox.modules.connection_manager.ui.create_vm_dialog import _NONE_ISO_LABEL, CreateVmDialog
 
 HOST = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
 _DEFAULT_POOLS = (StoragePool(name="default", state="active"),)
@@ -130,19 +130,44 @@ def test_iso_combo_items_carry_full_path_as_tooltip(qtbot, monkeypatch):
     assert dialog._iso_combo.itemData(1, Qt.ItemDataRole.ToolTipRole) == "/isos/a-very-long-real-world-iso-filename-2026.iso"
 
 
-def test_iso_combo_defaults_to_none_after_reload(qtbot, monkeypatch):
+def test_iso_combo_starts_blank_with_placeholder_and_means_no_media(qtbot, monkeypatch):
     volumes = (StorageVolume(name="ubuntu.iso", path="/isos/ubuntu.iso"),)
     dialog = _make_dialog(qtbot, monkeypatch, volumes=volumes)
     qtbot.waitUntil(lambda: dialog._iso_combo.count() == 2, timeout=1000)
 
+    # Blank field, not a pre-selected "None" entry -- typing should
+    # start from an empty box, and blank already means "no media" at
+    # submit time (currentData() is None with nothing selected).
+    assert dialog._iso_combo.currentText() == ""
     assert dialog._iso_combo.currentData() is None
-    assert dialog._iso_combo.currentText() == "(None — boot the new disk directly)"
+    assert dialog._iso_combo.lineEdit().placeholderText() != ""
+    # The explicit "(None...)" entry is still there for discoverability
+    # when the dropdown is opened without typing anything.
+    assert _NONE_ISO_LABEL in [dialog._iso_combo.itemText(i) for i in range(dialog._iso_combo.count())]
 
 
-def test_os_variant_defaults_to_generic_and_is_searchable(qtbot, monkeypatch):
+def test_iso_combo_stays_blank_across_a_pool_reload(qtbot, monkeypatch):
+    pools = (StoragePool(name="pool-a", state="active"), StoragePool(name="pool-b", state="active"))
+    volumes_by_pool = {
+        "pool-a": [StorageVolume(name="a.iso", path="/pool-a/a.iso")],
+        "pool-b": [StorageVolume(name="b.iso", path="/pool-b/b.iso")],
+    }
+    dialog = _make_dialog(qtbot, monkeypatch, pools=pools, volumes_by_pool=volumes_by_pool)
+    qtbot.waitUntil(lambda: dialog._iso_combo.count() == 2, timeout=1000)
+    assert dialog._iso_combo.currentText() == ""
+
+    dialog._iso_pool_combo.setCurrentIndex(1)
+    qtbot.waitUntil(lambda: dialog._iso_combo.itemText(1) == "b.iso" if dialog._iso_combo.count() > 1 else False, timeout=1000)
+
+    assert dialog._iso_combo.currentText() == ""
+    assert dialog._iso_combo.currentData() is None
+
+
+def test_os_variant_starts_blank_with_generic_as_a_real_searchable_entry(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch)
 
-    assert dialog._os_variant_combo.currentText() == "generic"
+    assert dialog._os_variant_combo.currentText() == ""
+    assert dialog._os_variant_combo.lineEdit().placeholderText() != ""
     all_items = [dialog._os_variant_combo.itemText(i) for i in range(dialog._os_variant_combo.count())]
     assert all_items == list(_DEFAULT_OS_VARIANTS)
 

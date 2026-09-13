@@ -36,7 +36,7 @@ _DEFAULT_OS_VARIANT = "generic"
 _SEARCHABLE_POPUP_MIN_WIDTH = 420
 
 
-def _make_searchable(combo: QComboBox, parent: QWidget) -> QCompleter:
+def _make_searchable(combo: QComboBox, parent: QWidget, placeholder: str) -> QCompleter:
     """Wires a QComboBox up for type-to-filter search over a large list
     (real cases: ~940 --osinfo short IDs, or a large ISO library where
     many entries share a long common prefix/suffix) -- editable so
@@ -47,9 +47,19 @@ def _make_searchable(combo: QComboBox, parent: QWidget) -> QCompleter:
     The completer is bound to the combo's own model, which QComboBox
     mutates in place on clear()/addItem() rather than replacing --
     filtering results automatically stay current as items load in.
+
+    Starts genuinely blank (placeholder text only, no item pre-selected)
+    rather than defaulting to a specific entry -- confirmed live that an
+    editable combo with no exact-matching text reports currentIndex()
+    == -1 and currentData() == None, which is exactly "nothing chosen"
+    for both fields this is used on (an empty OS variant falls back to
+    "generic" at submit time; an empty ISO choice already means "no
+    media"), so leaving it blank needs no special-casing beyond that.
     """
     combo.setEditable(True)
     combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    combo.setCurrentIndex(-1)
+    combo.lineEdit().setPlaceholderText(placeholder)
     combo.view().setMinimumWidth(_SEARCHABLE_POPUP_MIN_WIDTH)
     completer = QCompleter(combo.model(), parent)
     completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -105,20 +115,23 @@ class CreateVmDialog(QDialog):
         # (see _on_volumes_loaded); the completer stays wired to the
         # same combo model throughout, so it reflects whatever's
         # currently loaded without needing to be rebuilt each time.
+        # Starts blank (placeholder text only) rather than pre-selecting
+        # "no media" -- typing immediately filters from an empty field,
+        # and blank still means "no media" at submit time either way.
         self._iso_combo = QComboBox()
         self._iso_combo.setEnabled(False)
         self._iso_combo.addItem(_NONE_ISO_LABEL, None)
-        self._iso_combo.setCurrentText(_NONE_ISO_LABEL)
-        self._iso_completer = _make_searchable(self._iso_combo, self)
+        self._iso_completer = _make_searchable(self._iso_combo, self, "Type to search, or leave blank for none")
 
         # Searchable list of every real --os-variant virt-install
         # accepts -- confirmed live there are ~940 of these, loaded
-        # async the same way pools/networks are; "generic" (itself a
-        # real, valid entry) is the default before that load finishes.
+        # async the same way pools/networks are. Also starts blank
+        # (placeholder text names the default); an empty field falls
+        # back to "generic" at submit time (see _on_accept), so leaving
+        # it blank and typing "generic" are equivalent outcomes.
         self._os_variant_combo = QComboBox()
         self._os_variant_combo.addItem(_DEFAULT_OS_VARIANT)
-        self._os_variant_combo.setCurrentText(_DEFAULT_OS_VARIANT)
-        self._os_variant_completer = _make_searchable(self._os_variant_combo, self)
+        self._os_variant_completer = _make_searchable(self._os_variant_combo, self, "generic (default) — type to search")
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
@@ -198,6 +211,10 @@ class CreateVmDialog(QDialog):
         )
 
     def _on_volumes_loaded(self, volumes: list[StorageVolume]) -> None:
+        # Preserves whatever the admin already typed (e.g. mid-search
+        # when the ISO pool gets changed) across the reload -- clear()
+        # would otherwise silently wipe in-progress input.
+        typed = self._iso_combo.currentText()
         self._iso_combo.clear()
         self._iso_combo.addItem(_NONE_ISO_LABEL, None)
         for volume in volumes:
@@ -209,7 +226,7 @@ class CreateVmDialog(QDialog):
                 # recover the full name without widening the whole
                 # form's layout just for this one field.
                 self._iso_combo.setItemData(index, volume.path, Qt.ItemDataRole.ToolTipRole)
-        self._iso_combo.setCurrentIndex(0)
+        self._iso_combo.setCurrentText(typed)
 
     def _load_os_variants(self) -> None:
         async_utils.run_in_background(
