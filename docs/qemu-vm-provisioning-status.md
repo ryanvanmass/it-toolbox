@@ -341,6 +341,31 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    compositing code has no notion of "a window" vs. "boot text", only
    rows.)
 
+   **A real crash found only by actually connecting** (this sandbox has
+   no libvirt/spice-glib, so the dirty-band work above was verified
+   without ever going through `SpiceWidget`'s own real Qt paint cycle --
+   this is exactly the gap that let it through): `paintEvent`'s
+   `painter.drawImage(dest, self._canvas, src)` passed a `QRect` target
+   (`event.rect()`) alongside a `QRectF` source -- PySide6's overload
+   resolution rejects that *mixed* pairing with a `ValueError` even
+   though `QRectF | QRect` is individually a documented-acceptable type
+   for each parameter on its own. Because nothing then called
+   `painter.end()` on the widget's own `QPainter` (the exception skipped
+   right past it), Qt's backing store was left with an active painter,
+   and the whole process **segfaulted** the moment Qt tried to end the
+   paint cycle itself -- not just a caught exception, a hard crash.
+   Fixed by promoting `dest` to `QRectF` before the call (matching
+   source and target types) and wrapping both this and the equivalent
+   `_on_frame_ready` compositing call in `try/finally: painter.end()`,
+   so a future mistake here fails as a normal Python exception instead
+   of taking the whole app down. Verified two ways since this sandbox
+   still can't run a real SPICE session: reproduced the *exact* original
+   `ValueError` (byte-for-byte identical message) in a standalone
+   `QPainter`/`QImage` script, confirmed the fix resolves it, then drove
+   the real `SpiceWidget._on_frame_ready` (worker mocked out, everything
+   else real) through both a full-frame and a small partial-band update
+   under offscreen Qt (`QT_QPA_PLATFORM=offscreen`) with no crash.
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the

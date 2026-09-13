@@ -87,8 +87,17 @@ class SpiceWidget(QWidget):
             self._canvas = QImage(canvas_width, canvas_height, QImage.Format.Format_RGB32)
         band_image = QImage(pixels, canvas_width, band_height, stride, QImage.Format.Format_RGB32)
         painter = QPainter(self._canvas)
-        painter.drawImage(0, band_top, band_image)
-        painter.end()
+        try:
+            painter.drawImage(0, band_top, band_image)
+        finally:
+            # Must run even if drawImage() raises -- an active QPainter
+            # left on a paint device when its Python object is destroyed
+            # doesn't reliably auto-end() itself here (confirmed the hard
+            # way: a raised exception in the *other* drawImage() call
+            # below, in paintEvent, left its QPainter active and crashed
+            # the whole process with a segfault once Qt's own backing
+            # store tried to end the paint cycle).
+            painter.end()
         self.update(self._dirty_widget_rect(band_top, band_height))
 
     def _dirty_widget_rect(self, band_top: int, band_height: int) -> QRect:
@@ -133,9 +142,22 @@ class SpiceWidget(QWidget):
         dest = event.rect()
         scale_x = self._canvas.width() / self.width()
         scale_y = self._canvas.height() / self.height()
+        # Both rects must be the *same* concrete type (QRectF here, not a
+        # QRect target mixed with a QRectF source) -- confirmed the hard
+        # way: PySide6's drawImage(rect, image, rect) overload resolution
+        # rejects a mixed QRect/QRectF pair with a ValueError even though
+        # each individually is a documented-acceptable type for that slot,
+        # and the resulting exception (if not for the try/finally below)
+        # left this QPainter active on the widget's backing store, which
+        # segfaulted the whole process once Qt tried to end the paint
+        # cycle itself.
+        dest_f = QRectF(dest)
         src = QRectF(dest.x() * scale_x, dest.y() * scale_y, dest.width() * scale_x, dest.height() * scale_y)
         painter = QPainter(self)
-        painter.drawImage(dest, self._canvas, src)
+        try:
+            painter.drawImage(dest_f, self._canvas, src)
+        finally:
+            painter.end()
 
     def sizeHint(self):
         if self._canvas is not None:
