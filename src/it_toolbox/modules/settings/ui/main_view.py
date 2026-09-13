@@ -1,5 +1,10 @@
-"""App-wide Settings page — a single scrollable page, not tab/session-based
-like the other modules, so it never touches the shared session-tab pane.
+"""App-wide Settings page — categorized (not tab/session-based like the
+other modules, so it never touches the shared session-tab pane). A
+left-hand category list + right-hand per-category scrollable page mirrors
+app.py's own module-list/QStackedWidget navigation, rather than one long
+flat scroll through all eleven sections at once -- the same pattern
+already established for the app's top-level navigation, reused here one
+level down instead of inventing a second way to browse a list of things.
 """
 
 import os
@@ -17,10 +22,13 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -118,28 +126,74 @@ class SettingsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
+        # Each _build_x_section() below is unchanged from before this
+        # reorganization -- still a self-contained QGroupBox wiring its own
+        # widgets/signals onto self._foo attributes, same as ever. All that
+        # changed is *where* they land: grouped onto one of four category
+        # pages instead of a single eleven-section scroll. Grouping (not
+        # the individual sections' own content) was the actual usability
+        # problem -- rclone/gcloud/JumpCloud/GCP SSH key/QEMU are all "is
+        # this external tool set up", RDP/FreeRDP are all "how embedded RDP
+        # behaves", etc., but nothing distinguished them from each other or
+        # from a one-off like "Double-Click Action" in the old flat list.
+        categories: list[tuple[str, list[QGroupBox]]] = [
+            ("General", [self._build_updates_section(), self._build_double_click_action_section()]),
+            (
+                "Integrations",
+                [
+                    self._build_rclone_section(),
+                    self._build_gcloud_section(),
+                    self._build_gcp_ssh_key_section(),
+                    self._build_jumpcloud_section(),
+                    self._build_qemu_section(),
+                ],
+            ),
+            (
+                "Remote Desktop",
+                [
+                    self._build_rdp_display_section(),
+                    self._build_rdp_keyboard_layout_section(),
+                    self._build_freerdp_section(),
+                ],
+            ),
+            ("Terminal", [self._build_terminal_font_size_section()]),
+        ]
+
+        self._category_list = QListWidget()
+        self._category_stack = QStackedWidget()
+        for name, sections in categories:
+            self._category_list.addItem(name)
+            self._category_stack.addWidget(self._build_category_page(sections))
+
+        self._category_list.currentRowChanged.connect(self._category_stack.setCurrentIndex)
+        self._category_list.setCurrentRow(0)
+
+        splitter = QSplitter()
+        splitter.addWidget(self._category_list)
+        splitter.addWidget(self._category_stack)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([160, 640])
+
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(splitter)
+
+    @staticmethod
+    def _build_category_page(sections: list[QGroupBox]) -> QScrollArea:
+        """One category's own scrollable page -- each category can still
+        grow long (Integrations already has five sections) without
+        affecting any other category's height or requiring the whole page
+        to scroll past unrelated sections to reach it."""
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        for section in sections:
+            content_layout.addWidget(section)
+        content_layout.addStretch(1)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        outer_layout.addWidget(scroll_area)
-
-        content = QWidget()
-        self._content_layout = QVBoxLayout(content)
-        self._content_layout.addWidget(self._build_updates_section())
-        self._content_layout.addWidget(self._build_rclone_section())
-        self._content_layout.addWidget(self._build_gcloud_section())
-        self._content_layout.addWidget(self._build_gcp_ssh_key_section())
-        self._content_layout.addWidget(self._build_jumpcloud_section())
-        self._content_layout.addWidget(self._build_qemu_section())
-        self._content_layout.addWidget(self._build_rdp_display_section())
-        self._content_layout.addWidget(self._build_rdp_keyboard_layout_section())
-        self._content_layout.addWidget(self._build_terminal_font_size_section())
-        self._content_layout.addWidget(self._build_double_click_action_section())
-        self._content_layout.addWidget(self._build_freerdp_section())
-        self._content_layout.addStretch(1)
         scroll_area.setWidget(content)
+        return scroll_area
 
     def _build_updates_section(self) -> QGroupBox:
         box = QGroupBox("App Updates")
