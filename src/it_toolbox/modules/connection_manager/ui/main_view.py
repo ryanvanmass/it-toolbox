@@ -494,11 +494,39 @@ class ConnectionManagerView(QWidget):
 
     @staticmethod
     def _load_qemu_hosts() -> list[QemuHost]:
-        return [QemuHost(name=h["name"], uri=h["uri"]) for h in settings.load_qemu_hosts()]
+        return [
+            QemuHost(
+                name=h["name"],
+                uri=h["uri"],
+                default_memory_mib=h.get("default_memory_mib"),
+                default_vcpus=h.get("default_vcpus"),
+                default_disk_gib=h.get("default_disk_gib"),
+                default_disk_pool=h.get("default_disk_pool"),
+                default_network=h.get("default_network"),
+                default_iso_pool=h.get("default_iso_pool"),
+                default_os_variant=h.get("default_os_variant"),
+            )
+            for h in settings.load_qemu_hosts()
+        ]
 
     @staticmethod
     def _save_qemu_hosts(hosts: list[QemuHost]) -> None:
-        settings.save_qemu_hosts([{"name": h.name, "uri": h.uri} for h in hosts])
+        settings.save_qemu_hosts(
+            [
+                {
+                    "name": h.name,
+                    "uri": h.uri,
+                    "default_memory_mib": h.default_memory_mib,
+                    "default_vcpus": h.default_vcpus,
+                    "default_disk_gib": h.default_disk_gib,
+                    "default_disk_pool": h.default_disk_pool,
+                    "default_network": h.default_network,
+                    "default_iso_pool": h.default_iso_pool,
+                    "default_os_variant": h.default_os_variant,
+                }
+                for h in hosts
+            ]
+        )
 
     def _populate_qemu_hosts(self) -> None:
         # virsh isn't installed -- Settings' "QEMU / libvirt" section

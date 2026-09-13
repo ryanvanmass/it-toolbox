@@ -79,19 +79,24 @@ class CreateVmDialog(QDialog):
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("my-new-vm")
 
+        # Seeded from this host's own configured defaults ("Manage
+        # Hosts…" > Edit Host) when set, falling back to these plain
+        # hardcoded values otherwise -- same fallback principle as
+        # every other per-host default here (a host with nothing
+        # configured behaves exactly like before this feature existed).
         self._memory_spin = QSpinBox()
         self._memory_spin.setRange(128, 1_048_576)
         self._memory_spin.setSuffix(" MiB")
-        self._memory_spin.setValue(2048)
+        self._memory_spin.setValue(host.default_memory_mib or 2048)
 
         self._vcpus_spin = QSpinBox()
         self._vcpus_spin.setRange(1, 64)
-        self._vcpus_spin.setValue(2)
+        self._vcpus_spin.setValue(host.default_vcpus or 2)
 
         self._disk_spin = QSpinBox()
         self._disk_spin.setRange(1, 16_384)
         self._disk_spin.setSuffix(" GiB")
-        self._disk_spin.setValue(20)
+        self._disk_spin.setValue(host.default_disk_gib or 20)
 
         # Separate pool pickers -- the VM's own new disk and its ISO
         # install media (if any) can live on different storage backends
@@ -125,13 +130,15 @@ class CreateVmDialog(QDialog):
 
         # Searchable list of every real --os-variant virt-install
         # accepts -- confirmed live there are ~940 of these, loaded
-        # async the same way pools/networks are. Also starts blank
-        # (placeholder text names the default); an empty field falls
-        # back to "generic" at submit time (see _on_accept), so leaving
-        # it blank and typing "generic" are equivalent outcomes.
+        # async the same way pools/networks are. Starts blank (falls
+        # back to "generic" at submit time -- see _on_accept) unless
+        # this host has its own configured default, in which case that
+        # default is pre-filled (still editable/searchable, not locked).
         self._os_variant_combo = QComboBox()
         self._os_variant_combo.addItem(_DEFAULT_OS_VARIANT)
         self._os_variant_completer = _make_searchable(self._os_variant_combo, self, "generic (default) — type to search")
+        if host.default_os_variant:
+            self._os_variant_combo.setCurrentText(host.default_os_variant)
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
@@ -183,6 +190,15 @@ class CreateVmDialog(QDialog):
         for network in networks:
             self._network_combo.addItem(network.name, network.name)
 
+        # Apply this host's configured defaults, matched by name against
+        # what's actually here -- a stale/typo'd default (the pool got
+        # renamed/removed since it was configured) just silently leaves
+        # the combo on its normal first-item default instead of erroring,
+        # findData() returning -1 either way.
+        self._select_by_data(self._disk_pool_combo, self._host.default_disk_pool)
+        self._select_by_data(self._iso_pool_combo, self._host.default_iso_pool)
+        self._select_by_data(self._network_combo, self._host.default_network)
+
         if not pools:
             self._show_error(f"No storage pools found on {self._host.name} — create one first.")
             return
@@ -196,6 +212,14 @@ class CreateVmDialog(QDialog):
         self._iso_combo.setEnabled(True)
         self._ok_button.setEnabled(True)
         self._load_isos_for_current_pool()
+
+    @staticmethod
+    def _select_by_data(combo: QComboBox, value: str | None) -> None:
+        if value is None:
+            return
+        index = combo.findData(value)
+        if index != -1:
+            combo.setCurrentIndex(index)
 
     def _on_iso_pool_changed(self, _index: int) -> None:
         self._load_isos_for_current_pool()

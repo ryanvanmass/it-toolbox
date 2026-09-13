@@ -48,6 +48,20 @@ class GcsEntry:
 class QemuHost:
     name: str
     uri: str  # libvirt connection URI, e.g. "qemu+ssh://user@host/system"
+    # Per-host defaults for CreateVmDialog -- all optional (None = no
+    # override, fall back to the dialog's own hardcoded default). Pool/
+    # network/os-variant are matched by name against whatever's actually
+    # discovered live on that host at deploy time; a stale/typo'd name
+    # that no longer matches anything just silently falls back to the
+    # dialog's normal default rather than erroring -- same "safe,
+    # non-destructive fallback" principle as the rest of this feature.
+    default_memory_mib: int | None = None
+    default_vcpus: int | None = None
+    default_disk_gib: int | None = None
+    default_disk_pool: str | None = None
+    default_network: str | None = None
+    default_iso_pool: str | None = None
+    default_os_variant: str | None = None
 
 
 @dataclass(frozen=True)

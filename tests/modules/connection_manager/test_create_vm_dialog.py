@@ -11,7 +11,7 @@ _DEFAULT_OS_VARIANTS = ("generic", "almalinux10", "almalinux9", "win11", "ubuntu
 
 def _make_dialog(
     qtbot, monkeypatch, pools=_DEFAULT_POOLS, networks=_DEFAULT_NETWORKS, volumes=(),
-    os_variants=_DEFAULT_OS_VARIANTS, volumes_by_pool=None,
+    os_variants=_DEFAULT_OS_VARIANTS, volumes_by_pool=None, host=HOST,
 ):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.create_vm_dialog.qemu_provisioning.list_storage_pools",
@@ -29,7 +29,7 @@ def _make_dialog(
         "it_toolbox.modules.connection_manager.ui.create_vm_dialog.qemu_provisioning.list_os_variants",
         lambda: list(os_variants),
     )
-    dialog = CreateVmDialog(HOST)
+    dialog = CreateVmDialog(host)
     qtbot.addWidget(dialog)
     dialog.show()  # isVisible() is otherwise always False for an unshown top-level widget
     qtbot.waitUntil(lambda: dialog._disk_pool_combo.count() == len(pools), timeout=1000)
@@ -44,6 +44,56 @@ def test_pools_and_networks_populate_and_enable_ok(qtbot, monkeypatch):
     assert dialog._iso_pool_combo.currentData() == "default"
     assert dialog._network_combo.currentData() == "default"
     assert dialog._ok_button.isEnabled() is True
+
+
+def test_host_defaults_seed_memory_vcpus_disk_and_os_variant(qtbot, monkeypatch):
+    host_with_defaults = QemuHost(
+        name="lab", uri="qemu+ssh://user@lab-host/system",
+        default_memory_mib=8192, default_vcpus=8, default_disk_gib=100,
+        default_os_variant="fedora40",
+    )
+    dialog = _make_dialog(qtbot, monkeypatch, host=host_with_defaults)
+
+    assert dialog._memory_spin.value() == 8192
+    assert dialog._vcpus_spin.value() == 8
+    assert dialog._disk_spin.value() == 100
+    # Pre-filled, but still editable/searchable -- not the "start blank"
+    # placeholder state, since this host has its own real default.
+    assert dialog._os_variant_combo.currentText() == "fedora40"
+
+
+def test_host_without_defaults_keeps_the_plain_hardcoded_ones(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, host=HOST)
+
+    assert dialog._memory_spin.value() == 2048
+    assert dialog._vcpus_spin.value() == 2
+    assert dialog._disk_spin.value() == 20
+    assert dialog._os_variant_combo.currentText() == ""
+
+
+def test_host_defaults_select_matching_pools_and_network(qtbot, monkeypatch):
+    pools = (StoragePool(name="fast-local", state="active"), StoragePool(name="iso-share", state="active"))
+    networks = (VirtualNetwork(name="default", state="active"), VirtualNetwork(name="br0", state="active"))
+    host_with_defaults = QemuHost(
+        name="lab", uri="qemu+ssh://user@lab-host/system",
+        default_disk_pool="fast-local", default_iso_pool="iso-share", default_network="br0",
+    )
+    dialog = _make_dialog(qtbot, monkeypatch, pools=pools, networks=networks, host=host_with_defaults)
+
+    assert dialog._disk_pool_combo.currentData() == "fast-local"
+    assert dialog._iso_pool_combo.currentData() == "iso-share"
+    assert dialog._network_combo.currentData() == "br0"
+
+
+def test_stale_host_default_pool_falls_back_silently(qtbot, monkeypatch):
+    host_with_stale_default = QemuHost(
+        name="lab", uri="qemu+ssh://user@lab-host/system",
+        default_disk_pool="renamed-or-removed-pool",
+    )
+    # Should not raise, and should just fall back to the normal first-item default.
+    dialog = _make_dialog(qtbot, monkeypatch, host=host_with_stale_default)
+
+    assert dialog._disk_pool_combo.currentData() == "default"
 
 
 def test_disk_and_iso_pool_are_independent_combos(qtbot, monkeypatch):

@@ -123,28 +123,48 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    `--config`-only calls are the backend's defense in depth for that
    same rule, the menu gating is the first line of it.
 
+   **Per-host defaults** (added per feedback): `QemuHost` gained seven
+   new optional fields (memory/vCPUs/disk size/disk pool/network/ISO
+   pool/OS variant), all `None` by default -- editable from "Manage
+   Hosts…"'s existing edit dialog (plain number/text fields, matching
+   that dialog's own always-synchronous, no-live-discovery style rather
+   than adding an async pool/network fetch just to edit a host's saved
+   config) and persisted in the same `qemu_hosts.json` shape
+   `settings.load_qemu_hosts`/`save_qemu_hosts` already used.
+   `CreateVmDialog` seeds its spinboxes and OS-variant field directly
+   from whatever the host has configured (falling back to the original
+   plain hardcoded values -- 2048 MiB/2 vCPUs/20 GiB/blank -- for a host
+   with nothing set), and selects the matching disk/ISO-pool/network
+   combo entries by name once the real lists load. A stale or typo'd
+   default (the named pool got renamed or removed since it was
+   configured) is matched via `QComboBox.findData()`, which just
+   returns -1 and leaves the combo on its normal first-item default --
+   no error, no special-casing needed for that case.
+
 4. **Settings** (`modules/settings/ui/main_view.py`'s QEMU/libvirt
    section) now separately reports `virt-install`'s own availability,
    since a `virsh`-only install (just `libvirt-clients`, no
    `virtinst`/`virt-install`) leaves VM discovery/power control working
    fine while "Deploy VM…" still needs the separate package.
 
-5. **Tests**: `test_qemu_provisioning.py` (17 tests, real captured
+5. **Tests**: `test_qemu_provisioning.py` (18 tests, real captured
    output as fixtures — parsers, argv construction, the `--import`-
    vs-`--cdrom` branching, the real `"An install method must be
-   specified"` error text), `test_create_vm_dialog.py` (7),
-   `test_configure_vm_dialog.py` (7), plus context-menu-wiring tests in
-   `test_main_view_sessions.py` and two new Settings-section tests.
-   Dialogs are tested directly (constructed + `qtbot.addWidget` +
-   `.show()`, not `.exec()`'d modally) — the same pattern already
-   established by `test_add_remote_dialog.py`/`test_api_key_dialog.py`
-   for this project's other async-loading dialogs. One real bug caught
-   immediately by this: `QWidget.isVisible()` is always `False` for a
-   widget inside a `QDialog` that was never actually shown on screen,
-   regardless of what `setVisible()` was last called with — fixed by
-   calling `dialog.show()` in the test fixture, not by changing the
-   dialog code (the code was already correct; the *test* was checking
-   the wrong thing). Full suite: 530 passed, the same 8 pre-existing,
+   specified"` error text), `test_create_vm_dialog.py` (17, including
+   the per-host-defaults cases), `test_configure_vm_dialog.py` (7),
+   `test_manage_hosts_dialog.py` (3, the new defaults form), plus
+   context-menu-wiring tests in `test_main_view_sessions.py` and two
+   new Settings-section tests. Dialogs are tested directly (constructed
+   + `qtbot.addWidget` + `.show()`, not `.exec()`'d modally) — the same
+   pattern already established by `test_add_remote_dialog.py`/
+   `test_api_key_dialog.py` for this project's other async-loading
+   dialogs. One real bug caught immediately by this: `QWidget.isVisible()`
+   is always `False` for a widget inside a `QDialog` that was never
+   actually shown on screen, regardless of what `setVisible()` was last
+   called with — fixed by calling `dialog.show()` in the test fixture,
+   not by changing the dialog code (the code was already correct; the
+   *test* was checking the wrong thing). Full suite: 546 passed, the
+   same 8 pre-existing,
    unrelated (headless-environment focus/clipboard) failures already
    present on the base branch, confirmed by running them there too.
 

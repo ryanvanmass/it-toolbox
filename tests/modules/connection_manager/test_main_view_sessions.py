@@ -1584,7 +1584,40 @@ def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
     view._save_qemu_hosts([host])
 
-    assert saved["hosts"] == [{"name": "lab", "uri": "qemu+ssh://user@lab-host/system"}]
+    assert saved["hosts"] == [{
+        "name": "lab", "uri": "qemu+ssh://user@lab-host/system",
+        "default_memory_mib": None, "default_vcpus": None, "default_disk_gib": None,
+        "default_disk_pool": None, "default_network": None, "default_iso_pool": None,
+        "default_os_variant": None,
+    }]
+
+
+def test_manage_hosts_dialog_roundtrips_defaults_through_settings(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings, "save_qemu_hosts", lambda hosts: saved.setdefault("hosts", hosts)
+    )
+    host = QemuHost(
+        name="lab", uri="qemu+ssh://user@lab-host/system",
+        default_memory_mib=4096, default_vcpus=4, default_disk_gib=80,
+        default_disk_pool="fast-local", default_network="br0", default_iso_pool="iso-share",
+        default_os_variant="fedora40",
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_qemu_hosts([host])
+
+    assert saved["hosts"] == [{
+        "name": "lab", "uri": "qemu+ssh://user@lab-host/system",
+        "default_memory_mib": 4096, "default_vcpus": 4, "default_disk_gib": 80,
+        "default_disk_pool": "fast-local", "default_network": "br0", "default_iso_pool": "iso-share",
+        "default_os_variant": "fedora40",
+    }]
+
+    monkeypatch.setattr(main_view_module.settings, "load_qemu_hosts", lambda: saved["hosts"])
+    assert main_view_module.ConnectionManagerView._load_qemu_hosts() == [host]
 
 
 def test_deploy_vm_refreshes_host_vm_list_on_accept(qtbot, monkeypatch):
