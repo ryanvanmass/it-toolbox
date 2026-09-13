@@ -21,7 +21,7 @@ from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.qemu_tunnel import QemuTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
-from it_toolbox.modules.connection_manager import gcp_client, qemu_client
+from it_toolbox.modules.connection_manager import gcp_client, qemu_client, qemu_provisioning
 from it_toolbox.modules.connection_manager.models import (
     RDP_PORT,
     SSH_PORT,
@@ -34,6 +34,8 @@ from it_toolbox.modules.connection_manager.models import (
 )
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError
 from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
+from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import ConfigureVmDialog
+from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
 from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import ManageHostsDialog
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
@@ -638,6 +640,15 @@ class ConnectionManagerView(QWidget):
             self._show_qemu_vm_context_menu(pos, item, vm)
             return
 
+        # A bare QEMU host node -- not the "QEMU" root (that's
+        # IS_QEMU_ROOT_ROLE, above), not a VM leaf (that's VM_ROLE,
+        # just checked). Same HOST_ROLE-is-set/VM_ROLE-is-None check
+        # _load_qemu_vms's expand-on-click handler already uses.
+        host = item.data(0, HOST_ROLE)
+        if host is not None:
+            self._show_qemu_host_context_menu(pos, item, host)
+            return
+
         if item.data(0, IS_MANUAL_ROOT_ROLE):
             self._show_manual_root_context_menu(pos)
             return
@@ -702,6 +713,24 @@ class ConnectionManagerView(QWidget):
         menu.addAction("Manage Hosts…").triggered.connect(self._on_manage_hosts_clicked)
         menu.exec(self._tree.viewport().mapToGlobal(pos))
 
+    def _show_qemu_host_context_menu(self, pos, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        menu = QMenu(self)
+        # Only offered where virt-install itself is present -- resize/
+        # add-disk (on the VM context menu) only need virsh, already
+        # gated by qemu_client.is_available() disabling the whole QEMU
+        # tree, but creation has its own, separate dependency.
+        deploy_action = menu.addAction("Deploy VM…") if qemu_provisioning.is_available() else None
+        if deploy_action is None:
+            menu.addAction("Deploy VM… (requires virt-install)").setEnabled(False)
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if deploy_action is not None and chosen is deploy_action:
+            self._on_deploy_vm_clicked(host_item, host)
+
+    def _on_deploy_vm_clicked(self, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        dialog = CreateVmDialog(host, parent=self)
+        if dialog.exec() == CreateVmDialog.DialogCode.Accepted:
+            self._load_qemu_vms(host_item, host)
+
     def _show_qemu_vm_context_menu(self, pos, item: QTreeWidgetItem, vm: QemuVm) -> None:
         host = item.data(0, HOST_ROLE)
         menu = QMenu(self)
@@ -716,6 +745,14 @@ class ConnectionManagerView(QWidget):
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
+        # Resize/add-disk only ever applies to a stopped VM -- resize_vm
+        # itself is --config-only as a second line of defense, but a
+        # running VM shouldn't even be offered the option in the first
+        # place, to avoid implying it'll take effect immediately.
+        configure_action = None
+        if vm.state != "running":
+            menu.addSeparator()
+            configure_action = menu.addAction("Configure…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if connect_action is not None and chosen is connect_action:
             self._connect_qemu(host, vm)
@@ -727,6 +764,25 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
+        elif configure_action is not None and chosen is configure_action:
+            self._on_configure_vm_clicked(item, host, vm)
+
+    def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:
+        async_utils.run_in_background(
+            lambda: qemu_provisioning.get_vm_resources(host, vm.name),
+            on_result=lambda resources: self._open_configure_vm_dialog(item, host, vm, resources),
+            on_error=lambda error: QMessageBox.warning(self, "Failed to read VM resources", str(error)),
+        )
+
+    def _open_configure_vm_dialog(
+        self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm, resources: tuple[int, int]
+    ) -> None:
+        vcpus, memory_mib = resources
+        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, parent=self)
+        if dialog.exec() == ConfigureVmDialog.DialogCode.Accepted:
+            host_item = item.parent()
+            if host_item is not None:
+                self._load_qemu_vms(host_item, host)
 
     def _show_manual_root_context_menu(self, pos) -> None:
         menu = QMenu(self)

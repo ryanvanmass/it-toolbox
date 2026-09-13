@@ -1587,6 +1587,102 @@ def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
     assert saved["hosts"] == [{"name": "lab", "uri": "qemu+ssh://user@lab-host/system"}]
 
 
+def test_deploy_vm_refreshes_host_vm_list_on_accept(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
+
+    captured = {}
+
+    class _FakeCreateVmDialog:
+        DialogCode = CreateVmDialog.DialogCode
+
+        def __init__(self, host, parent=None):
+            captured["host"] = host
+
+        def exec(self):
+            return self.DialogCode.Accepted
+
+    monkeypatch.setattr(main_view_module, "CreateVmDialog", _FakeCreateVmDialog)
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+
+    view._on_deploy_vm_clicked(host_item, host)
+
+    assert captured["host"] == host
+    qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
+    assert host_item.child(0).text(0) == "(no VMs)"
+
+
+def test_deploy_vm_does_not_refresh_when_dialog_cancelled(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
+
+    class _FakeCreateVmDialog:
+        DialogCode = CreateVmDialog.DialogCode
+
+        def __init__(self, host, parent=None):
+            pass
+
+        def exec(self):
+            return self.DialogCode.Rejected
+
+    list_vms_calls = []
+    monkeypatch.setattr(main_view_module, "CreateVmDialog", _FakeCreateVmDialog)
+    monkeypatch.setattr(
+        main_view_module.qemu_client, "list_vms", lambda host: list_vms_calls.append(host) or []
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+
+    view._on_deploy_vm_clicked(host_item, host)
+
+    assert list_vms_calls == []
+
+
+def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import ConfigureVmDialog
+
+    captured = {}
+
+    class _FakeConfigureVmDialog:
+        DialogCode = ConfigureVmDialog.DialogCode
+
+        def __init__(self, host, vm, vcpus, memory_mib, parent=None):
+            captured["args"] = (host, vm, vcpus, memory_mib)
+
+        def exec(self):
+            return self.DialogCode.Accepted
+
+    monkeypatch.setattr(main_view_module, "ConfigureVmDialog", _FakeConfigureVmDialog)
+    monkeypatch.setattr(main_view_module.qemu_provisioning, "get_vm_resources", lambda host, name: (4, 8192))
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+    vm = QemuVm(id="-", name="myvm", state="shut off")
+    vm_item = QTreeWidgetItem([vm.name])
+    vm_item.setData(0, main_view_module.HOST_ROLE, host)
+    vm_item.setData(0, main_view_module.VM_ROLE, vm)
+    host_item.addChild(vm_item)
+
+    view._on_configure_vm_clicked(vm_item, host, vm)
+
+    qtbot.waitUntil(lambda: "args" in captured, timeout=2000)
+    assert captured["args"] == (host, vm, 4, 8192)
+    qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
+    assert host_item.child(0).text(0) == "(no VMs)"
+
+
 # -- Manually-configured RDP/SSH connections --------------------------------
 
 

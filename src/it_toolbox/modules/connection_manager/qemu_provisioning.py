@@ -33,6 +33,7 @@ worth knowing before touching this file:
 import re
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 
 from it_toolbox.modules.connection_manager.models import QemuHost, StoragePool, StorageVolume, VirtualNetwork, VmCreateSpec
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError, run_virsh
@@ -168,6 +169,23 @@ def _next_disk_target(host: QemuHost, vm_name: str) -> str:
     if letter == "z":
         raise QemuApiError(f"{vm_name} already has the maximum number of single-letter disk targets.")
     return f"{prefix}{chr(ord(letter) + 1)}"
+
+
+def get_vm_resources(host: QemuHost, vm_name: str) -> tuple[int, int]:
+    """Current (vcpus, memory_mib) read from the VM's persistent
+    definition (dumpxml) -- matches what resize_vm's --config-only
+    changes actually affect, so ConfigureVmDialog can pre-fill its
+    fields with the values a save will actually be relative to.
+    Confirmed live: libvirt's dumpxml always normalizes <currentMemory>
+    to KiB regardless of what unit a VM was originally defined with.
+    """
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
+    vcpu_el = root.find("vcpu")
+    memory_el = root.find("currentMemory")
+    vcpus = int(vcpu_el.text) if vcpu_el is not None and vcpu_el.text else 1
+    memory_kib = int(memory_el.text) if memory_el is not None and memory_el.text else 0
+    return vcpus, memory_kib // 1024
 
 
 def resize_vm(host: QemuHost, vm_name: str, *, vcpus: int | None = None, memory_mib: int | None = None) -> None:

@@ -38,6 +38,12 @@ _REAL_VOL_LIST_AFTER_ADD_DISK = (
     "----------------------------------------------------------\n"
     " myvm-disk-2.qcow2   /var/lib/libvirt/images/myvm-disk-2.qcow2\n"
 )
+_REAL_DUMPXML_RESOURCES = """<domain type='kvm'>
+  <name>testvm1</name>
+  <memory unit='KiB'>1048576</memory>
+  <currentMemory unit='KiB'>1048576</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+</domain>"""
 # The exact error virt-install gives for a disk-only spec with no boot
 # source -- confirmed live this is a real, hard requirement, not
 # something specific to this project's own argv construction.
@@ -157,6 +163,13 @@ def test_create_vm_raises_on_timeout(monkeypatch):
     )
     with pytest.raises(qemu_provisioning.QemuApiError, match="timed out"):
         qemu_provisioning.create_vm(HOST, spec)
+
+
+def test_get_vm_resources_parses_real_dumpxml(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run", lambda *a, **k: _completed(stdout=_REAL_DUMPXML_RESOURCES)
+    )
+    assert qemu_provisioning.get_vm_resources(HOST, "testvm1") == (2, 1024)
 
 
 def test_resize_vm_sets_both_vcpu_calls(monkeypatch):
