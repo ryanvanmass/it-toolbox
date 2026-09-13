@@ -6,8 +6,7 @@ embedded-RDP branch already ruled out doing for a similar reason).
 
 Milestones 5-6 scope: rendering and mouse/keyboard input, mirroring
 RdpWidget's paintEvent/mouse*Event/key*Event/frame_ready/finished/
-close_session shape. Resize support isn't implemented yet — see
-docs/qemu-spice-status.md's milestone list.
+close_session shape.
 
 The displayed image is scaled to fit the widget *without* distorting its
 aspect ratio (see paintEvent/_scaled_canvas_rect) -- letterboxed with
@@ -22,6 +21,14 @@ the exact same VM where this widget didn't. Pointer coordinates are
 rescaled (and clamped, for clicks landing in the letterbox bars) from
 widget-space to the guest's native resolution before being sent.
 
+Also asks the guest's own spice-vdagent (if present, see resizeEvent/
+SpiceSession.request_resize) to resize its display to match the widget
+whenever a resize settles -- the same mechanism virt-viewer uses to
+avoid scaling entirely when possible. A guest with no vdagent (or one
+without monitor-config support) just keeps working exactly as before,
+via the letterboxing/scaling above -- this is a pure enhancement, never
+a requirement.
+
 Unlike RDP, SPICE's InputsChannel has no unicode-text fast path — every
 key goes through core/rdp/scancodes.SCANCODES (reused as-is; same PC/AT
 Set 1 table), and a character with no entry there (e.g. non-US-layout
@@ -31,7 +38,7 @@ SpiceSession's input methods for the underlying reasoning.
 
 import math
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -43,6 +50,11 @@ _BUTTON_NAMES = {
     Qt.MouseButton.RightButton: "right",
     Qt.MouseButton.MiddleButton: "middle",
 }
+
+# How long a resize must go quiet before actually asking the guest to
+# follow -- avoids flooding the agent with a resize request on every
+# single pixel of a live window/tab resize drag.
+_RESIZE_DEBOUNCE_MS = 500
 
 
 class SpiceWidget(QWidget):
@@ -72,6 +84,10 @@ class SpiceWidget(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
+        self._resize_debounce_timer = QTimer(self)
+        self._resize_debounce_timer.setSingleShot(True)
+        self._resize_debounce_timer.timeout.connect(self._on_resize_settled)
+
         self._status_label = QLabel("Connecting…")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout = QVBoxLayout(self)
@@ -87,6 +103,14 @@ class SpiceWidget(QWidget):
 
     def _on_connected(self) -> None:
         self._status_label.hide()
+        # This widget is typically constructed *before* being added to its
+        # tab (see main_view.py's _embed_spice), so it may still be sitting
+        # at whatever default size a brand-new unparented QWidget has when
+        # this fires -- restarting the same debounce (rather than resizing
+        # immediately with a possibly-stale size) means whichever settles
+        # last, the widget's real tab layout or this connection completing,
+        # is what actually gets requested once both are ready.
+        self._resize_debounce_timer.start(_RESIZE_DEBOUNCE_MS)
 
     def _on_frame_ready(
         self, pixels: bytes, band_top: int, band_height: int, canvas_width: int, canvas_height: int, stride: int
@@ -215,6 +239,17 @@ class SpiceWidget(QWidget):
         if self._canvas is not None:
             return self._canvas.size()
         return super().sizeHint()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        super().resizeEvent(event)
+        # Debounced -- a live window/tab resize drag fires this repeatedly;
+        # only ask the guest to follow once the size has actually settled,
+        # not on every intermediate pixel.
+        self._resize_debounce_timer.start(_RESIZE_DEBOUNCE_MS)
+
+    def _on_resize_settled(self) -> None:
+        if self.width() > 0 and self.height() > 0:
+            self._worker.send_resize(self.width(), self.height())
 
     def close_session(self) -> None:
         """Matches the close_session() convention main_view uses to tear

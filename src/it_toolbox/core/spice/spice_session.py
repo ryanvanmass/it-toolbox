@@ -72,6 +72,15 @@ _MOUSE_BUTTON_MASK = {"left": 1 << 0, "middle": 1 << 1, "right": 1 << 2}
 _WHEEL_UP_BUTTON = 4
 _WHEEL_DOWN_BUTTON = 5
 
+# spice-vdagent capability bit for "the guest can be asked to resize its
+# display" -- verified against the real installed spice-protocol package's
+# spice/vd_agent.h on the dev VM (`enum { VD_AGENT_CAP_MOUSE_STATE = 0,
+# VD_AGENT_CAP_MONITORS_CONFIG, ... }`), not recalled from memory alone.
+# Not exposed as a GObject-Introspection enum (it's a plain C #define-style
+# enum spice-glib's typelib doesn't reflect), so this is the raw bit
+# position, passed straight to MainChannel.agent_test_capability().
+_VD_AGENT_CAP_MONITORS_CONFIG = 1
+
 _ERROR_EVENTS = {
     SpiceClientGLib.ChannelEvent.ERROR_CONNECT,
     SpiceClientGLib.ChannelEvent.ERROR_TLS,
@@ -272,6 +281,26 @@ class SpiceSession:
             self._inputs_channel.key_press(scancode)
         else:
             self._inputs_channel.key_release(scancode)
+
+    def request_resize(self, width: int, height: int) -> None:
+        """Asks the guest's spice-vdagent (if one is present and it
+        advertises monitor-config support) to resize its display to
+        width x height -- the same mechanism a native SPICE client (e.g.
+        virt-viewer) uses to avoid ever needing to scale the picture at
+        all: the guest renders at exactly the requested size instead of
+        the client shrinking/enlarging whatever the guest happens to be
+        using. Silently does nothing if there's no agent yet or it
+        doesn't support this (most guests without spice-vdagent
+        installed) -- the caller keeps working exactly as it does today
+        either way, just still scaling/letterboxing since the guest's
+        own resolution never changes in that case.
+        """
+        if self._main_channel is None:
+            return
+        if not self._main_channel.agent_test_capability(_VD_AGENT_CAP_MONITORS_CONFIG):
+            return
+        self._main_channel.update_display(0, 0, 0, width, height, True)
+        self._main_channel.send_monitor_config()
 
     def _on_channel_new(
         self, session: SpiceClientGLib.Session, channel: SpiceClientGLib.Channel

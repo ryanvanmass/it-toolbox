@@ -136,6 +136,12 @@ class SpiceSessionWorker:
     def send_key_scancode(self, code: int, extended: bool, down: bool) -> None:
         GLib.idle_add(self._session.send_key_scancode, code, extended, down)
 
+    def send_resize(self, width: int, height: int) -> None:
+        """Not coalesced like send_mouse_move -- SpiceWidget already
+        debounces this itself (only calling it once a resize has
+        settled), so calls here are already infrequent."""
+        GLib.idle_add(self._session.request_resize, width, height)
+
     def _run(self) -> None:
         self._loop = GLib.MainLoop()
         self._session.on_frame = self._on_frame

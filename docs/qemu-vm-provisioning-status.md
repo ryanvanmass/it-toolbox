@@ -456,6 +456,58 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    limitation, not an open bug. The diagnostic HUD was removed once this
    was confirmed.
 
+7. **Guest auto-resize via spice-vdagent** (a real enhancement, not a
+   fix for anything broken -- suggested once the downscaling tradeoff
+   above was understood): `SpiceWidget` now asks the guest to resize its
+   own display to match the widget whenever a resize settles, the same
+   mechanism `virt-viewer` itself uses to avoid needing to scale at all.
+   New `SpiceSession.request_resize(width, height)` calls
+   `MainChannel.update_display(0, 0, 0, width, height, True)` then
+   `MainChannel.send_monitor_config()` -- but only after
+   `MainChannel.agent_test_capability(_VD_AGENT_CAP_MONITORS_CONFIG)`
+   confirms the connected agent actually supports it, silently doing
+   nothing otherwise (most guests without `spice-vdagent` installed) --
+   this is purely additive, the letterbox/scale path above keeps working
+   unchanged for any guest that doesn't support resize.
+   `_VD_AGENT_CAP_MONITORS_CONFIG = 1` is the raw bit position from
+   spice-protocol's `spice/vd_agent.h` `enum { VD_AGENT_CAP_MOUSE_STATE =
+   0, VD_AGENT_CAP_MONITORS_CONFIG, ... }` -- confirmed against the real
+   installed header (`dnf install spice-protocol` on the dev VM), not
+   recalled from memory, since spice-glib's own GObject-Introspection
+   typelib doesn't expose these as a proper enum (they're plain C
+   constants, not GEnum values). `SpiceWidget.resizeEvent` debounces
+   (500ms of quiet before actually calling `send_resize`) so a live
+   window/tab resize drag doesn't flood the agent with a request per
+   pixel; `_on_connected` also (re)starts the same debounce, since this
+   widget is constructed *before* being added to its tab (see
+   `main_view._embed_spice`) and so may still be sitting at a default,
+   not-yet-real size whenever the connection itself happens to complete
+   -- whichever settles last (the tab layout or the connection) is what
+   actually gets requested.
+
+   **Verification**: the exact real spice-glib method signatures
+   (`update_display` takes 6 args beyond `self` -- id, x, y, width,
+   height, update; `send_monitor_config` takes none;
+   `agent_test_capability` takes one, the capability bit) were confirmed
+   by deliberately calling each with zero arguments against the real
+   typelib and reading the resulting `TypeError`'s reported argument
+   count -- the same technique that found the `QPainter.drawImage`
+   overload bug earlier in this branch, applied here to avoid guessing
+   at a C API's Python argument order from memory. The debounce/
+   coalescing logic was verified via an offscreen-Qt test: three rapid
+   resizes collapsed into exactly one `send_resize` call, using the
+   *final* settled size, not an intermediate one. `request_resize()`
+   was also run against a real connection to a real (agent-less) VM to
+   confirm the `agent_test_capability` call itself doesn't raise and
+   correctly no-ops rather than crashing. **Not verified**: whether a
+   real guest with `spice-vdagent` actually installed resizes in
+   response to this -- that needs a full graphical OS install (not the
+   bare `--import`/UEFI-shell throwaway VMs used elsewhere in this
+   branch), which wasn't done given the size of that lift relative to
+   this feature; the API surface and argument correctness are confirmed,
+   but the very last link (does a real vdagent actually act on it) is
+   not.
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the
