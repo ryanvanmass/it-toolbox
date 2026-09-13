@@ -431,6 +431,31 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    evidently wasn't what was making this specific VM's session feel
    choppy.
 
+   **Closed out**: after the letterbox fix, a follow-up report of "still
+   a little off" (both blurry text and visible distortion) needed real
+   numbers rather than another guess, since aspect-ratio-preserving
+   letterboxing should make geometric distortion mathematically
+   impossible. Added a temporary on-screen diagnostic HUD (widget size,
+   canvas size, computed letterbox target, `devicePixelRatio`) rather
+   than asking for an external measurement tool, got back real numbers
+   (`widget=1564x930 canvas=1920x1080 target=1564x879 @ (0,25)
+   devicePixelRatio=1.00`), and checked them by hand: target aspect
+   ratio 1564/879 = 1.7793 vs. canvas's 1920/1080 = 1.7778, a ~0.08%
+   difference from integer rounding, and the letterbox y-offset
+   (930-879)//2 = 25 matches exactly -- confirming the scaling math has
+   no bug at all. The remaining softness is the unavoidable cost of
+   *downscaling* a 1920x1080 desktop into a smaller (1564x930) display
+   area (~0.81x) -- any interpolation method loses real pixel
+   information at that ratio; it's not something more code can fix.
+   `virt-viewer`'s crispness on the same VM comes specifically from not
+   doing this at all (it resizes its own window to the guest's actual
+   resolution instead of shrinking the guest into a fixed window). Given
+   the choice between lowering the VM's resolution, enlarging the
+   it-toolbox window, or accepting the current tradeoff, the answer was
+   to leave it as-is -- this is a real, understood, and accepted
+   limitation, not an open bug. The diagnostic HUD was removed once this
+   was confirmed.
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the
