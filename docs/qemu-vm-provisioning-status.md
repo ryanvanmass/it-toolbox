@@ -141,18 +141,98 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    returns -1 and leaves the combo on its normal first-item default --
    no error, no special-casing needed for that case.
 
+   **Editing an existing VM's config** (added per feedback --
+   `ConfigureVmDialog` now covers disks, CD-ROM media, and network, not
+   just vCPU/memory/add-disk): a Disks section lists every disk via the
+   new `list_disks` (`domblklist --details`, which is what actually
+   distinguishes a `disk` device from a `cdrom` one -- plain
+   `domblklist` doesn't have a type column at all) with a "Remove
+   Selected Disk" action (`QMessageBox.question` confirm, matching this
+   project's existing GCP power-action convention) that calls the new
+   `remove_disk` -- `detach-disk --config --persistent`, confirmed live
+   this only drops the disk from the VM's config and leaves the
+   underlying volume file alone (checked via `vol-list` before/after,
+   so the file isn't silently deleted). A CD-ROM section (shown only if
+   the VM actually has a cdrom device -- a VM created via the `--import`
+   path with no ISO at deploy time has none at all) lets the admin swap
+   or eject media via the new `change_cdrom_media`. A Network section
+   (shown only for a VM with exactly one interface -- multi-NIC VMs are
+   deferred, see below) lets the admin pick a different virtual network
+   via the new `change_network`, skipping the detach/reattach entirely
+   when the chosen network is unchanged from the VM's current one.
+   Every section is built as its own `QGroupBox`, shown/hidden wholesale
+   rather than just disabling fields, so an inapplicable section doesn't
+   clutter the dialog. Nothing is sent to the backend until "OK" --
+   vCPU/memory changes, disk removals, add-disk, media changes, and
+   network changes are all computed first and only executed inside one
+   background-thread closure on accept, the same "edit in memory, only
+   persist on close" shape `ManageHostsDialog` already uses.
+
+   Two more real findings from live testing, both load-bearing:
+   - **A VM's CD-ROM media can get auto-ejected as a side effect of the
+     VM being stopped/destroyed** (confirmed live, reproducible) --
+     `ConfigureVmDialog` always reads the VM's current CD-ROM state
+     fresh when it opens rather than assuming it matches whatever was
+     last set.
+   - **`change-media --insert` fails ("already has media") if the drive
+     already has something in it, and `--eject` fails ("doesn't have
+     media") if it's already empty** -- there's no single "just replace
+     it" command. `change_cdrom_media` always ejects first, tolerating
+     specifically the "doesn't have media" error as a no-op, then
+     inserts the new path only if one was requested:
+     ```python
+     def change_cdrom_media(host, vm_name, target, iso_path):
+         try:
+             run_virsh(host, "change-media", vm_name, target, "--eject", "--config")
+         except QemuApiError as e:
+             if "doesn't have media" not in str(e):
+                 raise
+         if iso_path is not None:
+             run_virsh(host, "change-media", vm_name, target, "--insert", iso_path, "--config")
+     ```
+
+   **A more significant bug, found by this dialog's own test suite, not
+   by inspection**: `QComboBox.currentData()` does *not* reflect an
+   exact typed match unless the item was actually chosen via the
+   completer's popup, or via an explicit `setCurrentIndex()` call.
+   Typing an exact, valid name by hand and just moving on (or, in a
+   test, calling `setCurrentText()`) leaves `currentIndex()`/
+   `currentData()` completely unchanged -- confirmed with a standalone
+   offscreen-Qt script, not just asserted from a failing test. This
+   silently treats a real user's typed choice as "nothing selected."
+   **It affected both dialogs that use a searchable combo for a
+   data-backed choice** -- `ConfigureVmDialog`'s new CD-ROM ISO field,
+   and `CreateVmDialog`'s existing ISO field (already shipped in this
+   same PR before this bug was found -- the OS-variant field is
+   unaffected, since it already uses `.currentText()` directly, valid
+   for any typed string). Fixed by extracting the searchable-combo
+   wiring out of `create_vm_dialog.py`'s old private `_make_searchable`
+   into a new shared module, `ui/searchable_combo.py`, adding
+   `resolve_data(combo)` there (`findText` + `itemData`, an exact-text
+   lookup rather than trusting `currentData()`), and switching both
+   dialogs' ISO fields to call it. Regression-tested directly in a new
+   `test_searchable_combo.py` (asserts `currentData()` really does stay
+   `None` after `setCurrentText()`, and that `resolve_data()` still
+   finds the right value) plus a new case in `test_create_vm_dialog.py`.
+
 4. **Settings** (`modules/settings/ui/main_view.py`'s QEMU/libvirt
    section) now separately reports `virt-install`'s own availability,
    since a `virsh`-only install (just `libvirt-clients`, no
    `virtinst`/`virt-install`) leaves VM discovery/power control working
    fine while "Deploy VM…" still needs the separate package.
 
-5. **Tests**: `test_qemu_provisioning.py` (18 tests, real captured
+5. **Tests**: `test_qemu_provisioning.py` (27 tests, real captured
    output as fixtures — parsers, argv construction, the `--import`-
    vs-`--cdrom` branching, the real `"An install method must be
-   specified"` error text), `test_create_vm_dialog.py` (17, including
-   the per-host-defaults cases), `test_configure_vm_dialog.py` (7),
-   `test_manage_hosts_dialog.py` (3, the new defaults form), plus
+   specified"` error text, and the `change_cdrom_media` eject-first/
+   tolerate-already-empty/reraise-unrelated-errors logic),
+   `test_create_vm_dialog.py` (including the per-host-defaults cases and
+   a `resolve_data` regression case), `test_configure_vm_dialog.py`
+   (rewritten for the disk/CD-ROM/network sections — visibility gating,
+   defaults, remove-disk confirm/decline, change-media insert/eject,
+   change-network actual-change-vs-no-op), `test_manage_hosts_dialog.py`
+   (3, the defaults form), `test_searchable_combo.py` (new — 4 tests,
+   including the `resolve_data`/`currentData()` regression case), plus
    context-menu-wiring tests in `test_main_view_sessions.py` and two
    new Settings-section tests. Dialogs are tested directly (constructed
    + `qtbot.addWidget` + `.show()`, not `.exec()`'d modally) — the same
@@ -163,7 +243,7 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    actually shown on screen, regardless of what `setVisible()` was last
    called with — fixed by calling `dialog.show()` in the test fixture,
    not by changing the dialog code (the code was already correct; the
-   *test* was checking the wrong thing). Full suite: 546 passed, the
+   *test* was checking the wrong thing). Full suite: 573 passed, the
    same 8 pre-existing,
    unrelated (headless-environment focus/clipboard) failures already
    present on the base branch, confirmed by running them there too.
@@ -174,14 +254,19 @@ Cloud-init/unattended install, uploading local media from the
 it-toolbox machine to the libvirt host (media has to already be on the
 host, discovered via `list_volumes`), editing a *running* VM's
 resources (live hotplug — `resize_vm` is `--config`-only, by design),
-network interface add/remove, disk detach/removal, boot-order changes,
-snapshot support, and *automatic* OS-variant detection from the chosen
-ISO/image (the OS variant combo is a full, real, searchable list of
-every valid value — added after the first cut, see above — but nothing
-inspects the attached media to guess which one applies; the admin still
-picks it, defaulting to `generic`). All real, natural follow-ups once
-this core deploy/configure path has been used for a while — not silently
-half-built here.
+multi-NIC network editing (`ConfigureVmDialog`'s Network section only
+shows for a VM with exactly one interface — adding/removing NICs, or
+picking which one to change on a multi-NIC VM, is deferred), boot-order
+changes, snapshot support, and *automatic* OS-variant detection from the
+chosen ISO/image (the OS variant combo is a full, real, searchable list
+of every valid value — added after the first cut, see above — but
+nothing inspects the attached media to guess which one applies; the
+admin still picks it, defaulting to `generic`). Disk removal, CD-ROM
+media management, and single-NIC network changes on an existing VM —
+originally deferred here — were added in a later round (see
+`ConfigureVmDialog` above). All of the above are real, natural
+follow-ups once this core deploy/configure path has been used for a
+while — not silently half-built here.
 
 ## Environment note
 

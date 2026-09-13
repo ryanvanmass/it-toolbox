@@ -11,7 +11,6 @@ history.
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
-    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -25,48 +24,10 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils
 from it_toolbox.modules.connection_manager import qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost, StorageVolume, VmCreateSpec
+from it_toolbox.modules.connection_manager.ui.searchable_combo import make_searchable, resolve_data
 
 _NONE_ISO_LABEL = "(None — boot the new disk directly)"
 _DEFAULT_OS_VARIANT = "generic"
-# Real ISO filenames (and, to a lesser extent, --osinfo short IDs) easily
-# outrun the combo box's own on-screen width -- widening the *popup*
-# specifically (Qt doesn't clip a QComboBox's dropdown to its own field
-# width) is what actually makes a large library legible, without forcing
-# the whole compact form layout wider just to fit one field's content.
-_SEARCHABLE_POPUP_MIN_WIDTH = 420
-
-
-def _make_searchable(combo: QComboBox, parent: QWidget, placeholder: str) -> QCompleter:
-    """Wires a QComboBox up for type-to-filter search over a large list
-    (real cases: ~940 --osinfo short IDs, or a large ISO library where
-    many entries share a long common prefix/suffix) -- editable so
-    typing works at all, NoInsert so a search that doesn't exactly match
-    anything can't silently create a bogus new entry, MatchContains
-    (not the default MatchStartsWith) since a real library's names
-    often need matching a substring in the middle, not just a prefix.
-    The completer is bound to the combo's own model, which QComboBox
-    mutates in place on clear()/addItem() rather than replacing --
-    filtering results automatically stay current as items load in.
-
-    Starts genuinely blank (placeholder text only, no item pre-selected)
-    rather than defaulting to a specific entry -- confirmed live that an
-    editable combo with no exact-matching text reports currentIndex()
-    == -1 and currentData() == None, which is exactly "nothing chosen"
-    for both fields this is used on (an empty OS variant falls back to
-    "generic" at submit time; an empty ISO choice already means "no
-    media"), so leaving it blank needs no special-casing beyond that.
-    """
-    combo.setEditable(True)
-    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-    combo.setCurrentIndex(-1)
-    combo.lineEdit().setPlaceholderText(placeholder)
-    combo.view().setMinimumWidth(_SEARCHABLE_POPUP_MIN_WIDTH)
-    completer = QCompleter(combo.model(), parent)
-    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-    completer.setFilterMode(Qt.MatchFlag.MatchContains)
-    completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-    combo.setCompleter(completer)
-    return completer
 
 
 class CreateVmDialog(QDialog):
@@ -126,7 +87,7 @@ class CreateVmDialog(QDialog):
         self._iso_combo = QComboBox()
         self._iso_combo.setEnabled(False)
         self._iso_combo.addItem(_NONE_ISO_LABEL, None)
-        self._iso_completer = _make_searchable(self._iso_combo, self, "Type to search, or leave blank for none")
+        self._iso_completer = make_searchable(self._iso_combo, self, "Type to search, or leave blank for none")
 
         # Searchable list of every real --os-variant virt-install
         # accepts -- confirmed live there are ~940 of these, loaded
@@ -136,7 +97,7 @@ class CreateVmDialog(QDialog):
         # default is pre-filled (still editable/searchable, not locked).
         self._os_variant_combo = QComboBox()
         self._os_variant_combo.addItem(_DEFAULT_OS_VARIANT)
-        self._os_variant_completer = _make_searchable(self._os_variant_combo, self, "generic (default) — type to search")
+        self._os_variant_completer = make_searchable(self._os_variant_combo, self, "generic (default) — type to search")
         if host.default_os_variant:
             self._os_variant_combo.setCurrentText(host.default_os_variant)
 
@@ -286,7 +247,11 @@ class CreateVmDialog(QDialog):
             pool=self._disk_pool_combo.currentData(),
             network=self._network_combo.currentData(),
             os_variant=self._os_variant_combo.currentText().strip() or _DEFAULT_OS_VARIANT,
-            iso_path=self._iso_combo.currentData(),
+            # resolve_data(), not currentData() directly -- see its own
+            # docstring: a real user who types an exact, valid ISO name
+            # by hand (rather than clicking the completer's own popup
+            # suggestion) needs their choice actually recognized.
+            iso_path=resolve_data(self._iso_combo),
         )
 
         self._error_label.setVisible(False)

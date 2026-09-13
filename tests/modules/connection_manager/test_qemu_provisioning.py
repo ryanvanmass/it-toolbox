@@ -266,3 +266,123 @@ def test_is_available_true_when_virt_install_on_path(monkeypatch):
 def test_is_available_false_when_virt_install_missing(monkeypatch):
     monkeypatch.setattr(qemu_provisioning.shutil, "which", lambda name: None)
     assert qemu_provisioning.is_available() is False
+
+
+# Real output captured live -- a VM deployed with an ISO attached (so it
+# has both a real disk and a cdrom device with a source), used for the
+# list_disks/network/change-media tests below.
+_REAL_BLK_DETAILS_WITH_CDROM = (
+    " Type   Device   Target   Source\n"
+    "------------------------------------------------------------------\n"
+    " file   disk     hda      /var/lib/libvirt/images/edittest.qcow2\n"
+    " file   cdrom    hdb      -\n"
+)
+_REAL_DOMIFLIST = (
+    " Interface   Type      Source    Model   MAC\n"
+    "------------------------------------------------------------\n"
+    " -           network   default   e1000   52:54:00:57:37:5c\n"
+)
+
+
+def test_list_disks_distinguishes_disk_from_cdrom(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda *a, **k: _completed(stdout=_REAL_BLK_DETAILS_WITH_CDROM),
+    )
+    disks = qemu_provisioning.list_disks(HOST, "edittest")
+    assert disks == [
+        qemu_provisioning.VmDisk(target="hda", device="disk", source="/var/lib/libvirt/images/edittest.qcow2"),
+        qemu_provisioning.VmDisk(target="hdb", device="cdrom", source=None),
+    ]
+
+
+def test_remove_disk_calls_detach_disk(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda cmd, capture_output, text, timeout: calls.append(cmd) or _completed(),
+    )
+    qemu_provisioning.remove_disk(HOST, "edittest", "hda")
+    assert calls == [["virsh", "-c", HOST.uri, "detach-disk", "edittest", "hda", "--config", "--persistent"]]
+
+
+def test_list_network_interfaces_parses_real_output(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run", lambda *a, **k: _completed(stdout=_REAL_DOMIFLIST)
+    )
+    interfaces = qemu_provisioning.list_network_interfaces(HOST, "edittest")
+    assert interfaces == [
+        qemu_provisioning.VmNetworkInterface(mac="52:54:00:57:37:5c", network="default", model="e1000"),
+    ]
+
+
+def test_change_network_detaches_then_attaches(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda cmd, capture_output, text, timeout: calls.append(cmd) or _completed(),
+    )
+    qemu_provisioning.change_network(HOST, "edittest", old_mac="52:54:00:57:37:5c", new_network="isolated")
+    assert calls == [
+        ["virsh", "-c", HOST.uri, "detach-interface", "edittest", "network", "--mac", "52:54:00:57:37:5c", "--config"],
+        ["virsh", "-c", HOST.uri, "attach-interface", "edittest", "network", "isolated", "--model", "virtio", "--config"],
+    ]
+
+
+def test_change_cdrom_media_insert_ejects_first_then_inserts(monkeypatch):
+    # Confirmed live: change-media --insert flatly refuses if the drive
+    # already has media -- a real swap always ejects first.
+    calls = []
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda cmd, capture_output, text, timeout: calls.append(cmd) or _completed(),
+    )
+    qemu_provisioning.change_cdrom_media(HOST, "edittest", "hdb", "/var/lib/libvirt/images/new.iso")
+    assert calls == [
+        ["virsh", "-c", HOST.uri, "change-media", "edittest", "hdb", "--eject", "--config"],
+        ["virsh", "-c", HOST.uri, "change-media", "edittest", "hdb", "--insert",
+         "/var/lib/libvirt/images/new.iso", "--config"],
+    ]
+
+
+def test_change_cdrom_media_insert_tolerates_drive_already_being_empty(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        if "--eject" in cmd:
+            return _completed(returncode=1, stderr="error: The disk device 'hdb' doesn't have media")
+        return _completed()
+
+    monkeypatch.setattr(qemu_provisioning.subprocess, "run", fake_run)
+    qemu_provisioning.change_cdrom_media(HOST, "edittest", "hdb", "/var/lib/libvirt/images/new.iso")
+
+    assert len(calls) == 2
+    assert "--insert" in calls[1]
+
+
+def test_change_cdrom_media_eject_only(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda cmd, capture_output, text, timeout: calls.append(cmd) or _completed(),
+    )
+    qemu_provisioning.change_cdrom_media(HOST, "edittest", "hdb", None)
+    assert calls == [["virsh", "-c", HOST.uri, "change-media", "edittest", "hdb", "--eject", "--config"]]
+
+
+def test_change_cdrom_media_eject_only_tolerates_already_empty(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda *a, **k: _completed(returncode=1, stderr="error: The disk device 'hdb' doesn't have media"),
+    )
+    qemu_provisioning.change_cdrom_media(HOST, "edittest", "hdb", None)  # should not raise
+
+
+def test_change_cdrom_media_reraises_unrelated_eject_errors(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda *a, **k: _completed(returncode=1, stderr="error: failed to connect to the hypervisor"),
+    )
+    with pytest.raises(qemu_provisioning.QemuApiError, match="failed to connect"):
+        qemu_provisioning.change_cdrom_media(HOST, "edittest", "hdb", None)

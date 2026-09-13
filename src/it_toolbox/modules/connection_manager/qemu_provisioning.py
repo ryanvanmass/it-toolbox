@@ -35,7 +35,15 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
-from it_toolbox.modules.connection_manager.models import QemuHost, StoragePool, StorageVolume, VirtualNetwork, VmCreateSpec
+from it_toolbox.modules.connection_manager.models import (
+    QemuHost,
+    StoragePool,
+    StorageVolume,
+    VirtualNetwork,
+    VmCreateSpec,
+    VmDisk,
+    VmNetworkInterface,
+)
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError, run_virsh
 
 VIRT_INSTALL_CMD = "virt-install"
@@ -49,6 +57,12 @@ _NET_LINE_RE = re.compile(r"^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$")
 # already uses for its own multi-word STATE field.
 _VOL_LINE_RE = re.compile(r"^\s*(\S+)\s+(.+?)\s*$")
 _BLK_LINE_RE = re.compile(r"^\s*(\S+)\s+(.+?)\s*$")
+# `domblklist --details` -- Type/Device/Target/Source, confirmed live;
+# Source is "-" for an empty cdrom slot, a real path otherwise (tolerant
+# of spaces in the path, same reasoning as _VOL_LINE_RE above).
+_BLK_DETAILS_LINE_RE = re.compile(r"^\s*(\S+)\s+(\S+)\s+(\S+)\s+(.+?)\s*$")
+# `domiflist` -- Interface/Type/Source/Model/MAC, all single tokens.
+_IFACE_LINE_RE = re.compile(r"^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$")
 
 
 def is_available() -> bool:
@@ -226,3 +240,79 @@ def add_disk(host: QemuHost, vm_name: str, *, pool: str, size_gib: int) -> None:
         raise QemuApiError(f"Created volume {volume_name!r} but couldn't find its path afterward.")
     target = _next_disk_target(host, vm_name)
     run_virsh(host, "attach-disk", vm_name, volume_path, target, "--config", "--persistent")
+
+
+def list_disks(host: QemuHost, vm_name: str) -> list[VmDisk]:
+    """Every block device (real disks *and* any cdrom slot) -- confirmed
+    live that `--details` is what actually distinguishes device kind
+    ("disk" vs "cdrom"), and that a VM created without an ISO chosen at
+    deploy time (create_vm's --import path) has no cdrom device at all,
+    while one created with an ISO does -- ConfigureVmDialog only offers
+    CD-ROM media management when a cdrom entry is actually present here.
+    """
+    output = run_virsh(host, "domblklist", vm_name, "--details")
+    disks: list[VmDisk] = []
+    for line in output.splitlines()[2:]:
+        if not line.strip():
+            continue
+        match = _BLK_DETAILS_LINE_RE.match(line)
+        if not match:
+            continue
+        _type, device, target, source = match.groups()
+        disks.append(VmDisk(target=target, device=device, source=None if source == "-" else source))
+    return disks
+
+
+def remove_disk(host: QemuHost, vm_name: str, target: str) -> None:
+    """Detaches the disk from the VM's config -- deliberately does NOT
+    delete the underlying volume file (confirmed live: `detach-disk`
+    alone leaves it completely untouched), the same "never destroy real
+    data as a side effect" principle as everywhere else in this module.
+    An admin who actually wants the file gone can do that separately
+    (outside this module, for now -- see docs/qemu-vm-provisioning-status.md's
+    Deferred section).
+    """
+    run_virsh(host, "detach-disk", vm_name, target, "--config", "--persistent")
+
+
+def list_network_interfaces(host: QemuHost, vm_name: str) -> list[VmNetworkInterface]:
+    output = run_virsh(host, "domiflist", vm_name)
+    interfaces: list[VmNetworkInterface] = []
+    for line in output.splitlines()[2:]:
+        if not line.strip():
+            continue
+        match = _IFACE_LINE_RE.match(line)
+        if not match:
+            continue
+        _interface, _type, source, model, mac = match.groups()
+        interfaces.append(VmNetworkInterface(mac=mac, network=source, model=model))
+    return interfaces
+
+
+def change_network(host: QemuHost, vm_name: str, *, old_mac: str, new_network: str) -> None:
+    """Confirmed live: there's no "just change the source" virsh call --
+    changing a NIC's network is detach-then-attach (a new MAC gets
+    assigned to the new interface; nothing preserves the old one).
+    """
+    run_virsh(host, "detach-interface", vm_name, "network", "--mac", old_mac, "--config")
+    run_virsh(host, "attach-interface", vm_name, "network", new_network, "--model", "virtio", "--config")
+
+
+def change_cdrom_media(host: QemuHost, vm_name: str, target: str, iso_path: str | None) -> None:
+    """iso_path=None leaves the drive ejected/empty; otherwise inserts
+    the given ISO, swapping out whatever (if anything) was already
+    there. Confirmed live: `change-media --insert` flatly refuses if
+    the drive already has media ("already has media"), and `--eject`
+    flatly refuses if it's already empty ("doesn't have media") -- so a
+    real swap always ejects first, tolerating that specific "already
+    empty" failure as a no-op (a drive with nothing in it is exactly
+    the state an eject is trying to reach anyway), then inserts only if
+    new media was actually requested.
+    """
+    try:
+        run_virsh(host, "change-media", vm_name, target, "--eject", "--config")
+    except QemuApiError as e:
+        if "doesn't have media" not in str(e):
+            raise
+    if iso_path is not None:
+        run_virsh(host, "change-media", vm_name, target, "--insert", iso_path, "--config")

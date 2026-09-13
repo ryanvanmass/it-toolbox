@@ -72,6 +72,20 @@ class QemuVm:
 
 
 @dataclass(frozen=True)
+class VmDisk:
+    target: str  # device name, e.g. "hda", "vdb" -- whatever the VM's own scheme already uses
+    device: str  # "disk" or "cdrom" -- confirmed live via `virsh domblklist --details`
+    source: str | None  # None for an empty cdrom slot ("-" in domblklist's own output)
+
+
+@dataclass(frozen=True)
+class VmNetworkInterface:
+    mac: str
+    network: str
+    model: str
+
+
+@dataclass(frozen=True)
 class StoragePool:
     name: str
     state: str  # e.g. "active", "inactive"

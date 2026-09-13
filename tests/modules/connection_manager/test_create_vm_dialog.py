@@ -272,6 +272,31 @@ def test_accept_calls_create_vm_with_expected_spec_and_closes_on_success(qtbot, 
     assert spec.iso_path is None
 
 
+def test_accept_resolves_an_exact_typed_iso_name_to_its_real_path(qtbot, monkeypatch):
+    # Regression test: QComboBox.currentData() does NOT reflect an exact
+    # text match unless the item was actually selected via the
+    # completer's own popup (confirmed live -- setCurrentText(), and
+    # real typed-then-moved-on text, both leave currentData() at
+    # whatever it was before). create_vm_dialog.resolve_data() is what
+    # actually fixes this; this test would fail again if _on_accept
+    # ever went back to reading self._iso_combo.currentData() directly.
+    volumes = (StorageVolume(name="ubuntu.iso", path="/isos/ubuntu.iso"),)
+    dialog = _make_dialog(qtbot, monkeypatch, volumes=volumes)
+    qtbot.waitUntil(lambda: dialog._iso_combo.count() == 2, timeout=1000)
+    dialog._name_edit.setText("my-new-vm")
+    dialog._iso_combo.setCurrentText("ubuntu.iso")
+
+    specs = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.create_vm_dialog.qemu_provisioning.create_vm",
+        lambda host, spec: specs.append(spec),
+    )
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: len(specs) == 1, timeout=1000)
+    assert specs[0].iso_path == "/isos/ubuntu.iso"
+
+
 def test_accept_surfaces_create_vm_error_and_reenables_buttons(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch)
     dialog._name_edit.setText("my-new-vm")
