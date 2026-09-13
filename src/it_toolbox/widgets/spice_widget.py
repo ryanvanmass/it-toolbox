@@ -27,7 +27,11 @@ whenever a resize settles -- the same mechanism virt-viewer uses to
 avoid scaling entirely when possible. A guest with no vdagent (or one
 without monitor-config support) just keeps working exactly as before,
 via the letterboxing/scaling above -- this is a pure enhancement, never
-a requirement.
+a requirement. The agent finishing its own handshake with the server is
+a real, separate, later event than the SPICE connection itself coming
+up (confirmed live) -- _on_agent_connected re-sends the current size as
+soon as that happens, since a resize attempted before then would
+otherwise silently do nothing and never get retried.
 
 Unlike RDP, SPICE's InputsChannel has no unicode-text fast path — every
 key goes through core/rdp/scancodes.SCANCODES (reused as-is; same PC/AT
@@ -97,6 +101,7 @@ class SpiceWidget(QWidget):
         self._worker = SpiceSessionWorker(host, port, password)
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
+        self._worker.signals.agent_connected.connect(self._on_agent_connected)
         self._worker.signals.error.connect(self._on_error)
         self._worker.signals.disconnected.connect(self._on_disconnected)
         self._worker.start()
@@ -111,6 +116,22 @@ class SpiceWidget(QWidget):
         # last, the widget's real tab layout or this connection completing,
         # is what actually gets requested once both are ready.
         self._resize_debounce_timer.start(_RESIZE_DEBOUNCE_MS)
+
+    def _on_agent_connected(self) -> None:
+        # The guest's agent (spice-vdagent or equivalent) finishing its own
+        # handshake is a real, separate, later event than the SPICE
+        # connection itself coming up -- confirmed live (MainChannel's
+        # "agent-connected" property starts False and flips True on its own
+        # schedule, not tied to anything this widget controls). Without
+        # this, a resize request sent before the agent was ready would
+        # silently do nothing (request_resize()'s own capability check
+        # would just see no agent yet) and nothing would ever retry --
+        # this is that retry, sent immediately once the agent is actually
+        # in a position to honor it, using whatever size this widget
+        # currently has (no need to debounce a one-off event that isn't
+        # coming from a user actively dragging a resize handle).
+        if self.width() > 0 and self.height() > 0:
+            self._worker.send_resize(self.width(), self.height())
 
     def _on_frame_ready(
         self, pixels: bytes, band_top: int, band_height: int, canvas_width: int, canvas_height: int, stride: int

@@ -149,6 +149,21 @@ class SpiceSession:
         self.on_connected: Callable[[], None] | None = None
         self.on_error: Callable[[SpiceError], None] | None = None
         self.on_disconnected: Callable[[], None] | None = None
+        # Fires once the guest's agent (spice-vdagent or equivalent)
+        # actually finishes connecting -- confirmed live this is a real,
+        # separate, *later* event than the main channel opening (on_connected
+        # above): MainChannel's own "agent-connected" property starts False
+        # and only flips True once the agent handshake completes, which can
+        # take a real, variable amount of time after the SPICE connection
+        # itself is already up (the guest OS has to start the agent service,
+        # which doesn't happen instantly on boot). request_resize()'s own
+        # capability check is only ever accurate *after* this fires -- a
+        # caller that only checks once, right after connecting (e.g. on a
+        # fixed timer), can easily race this and see agent_test_capability()
+        # incorrectly return False for an agent that's actually present and
+        # about to finish connecting, with nothing to ever retry once it
+        # does. See SpiceSessionWorker/SpiceWidget for how this gets used.
+        self.on_agent_connected: Callable[[], None] | None = None
 
         GObject.Object.connect(self._session, "channel-new", self._on_channel_new)
         GObject.Object.connect(self._session, "disconnected", self._on_session_disconnected)
@@ -308,6 +323,7 @@ class SpiceSession:
         if isinstance(channel, SpiceClientGLib.MainChannel):
             self._main_channel = channel
             GObject.Object.connect(channel, "channel-event", self._on_main_channel_event)
+            GObject.Object.connect(channel, "notify::agent-connected", self._on_agent_connected_changed)
         elif isinstance(channel, SpiceClientGLib.DisplayChannel):
             if channel.get_property("channel-id") != PRIMARY_DISPLAY_CHANNEL_ID:
                 return
@@ -331,6 +347,16 @@ class SpiceSession:
             self._connected.set()
             if self.on_error is not None:
                 self.on_error(error)
+
+    def _on_agent_connected_changed(
+        self, channel: SpiceClientGLib.MainChannel, pspec: GObject.ParamSpec
+    ) -> None:
+        # Only the *becomes-connected* transition is interesting here (see
+        # on_agent_connected's docstring) -- ignore it flipping back to
+        # False (e.g. the guest's agent service stopping), since there's
+        # nothing this callback needs to redo for that case.
+        if channel.get_property("agent-connected") and self.on_agent_connected is not None:
+            self.on_agent_connected()
 
     def _on_session_disconnected(self, session: SpiceClientGLib.Session) -> None:
         self._connected.set()

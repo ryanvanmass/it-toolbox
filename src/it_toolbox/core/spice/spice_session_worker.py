@@ -64,6 +64,12 @@ class SpiceSessionSignals(QObject):
     connected = Signal()
     error = Signal(str)
     disconnected = Signal()
+    # Fires once the guest's agent (spice-vdagent or equivalent) finishes
+    # connecting -- a real, separate, later event than `connected` above.
+    # See SpiceSession.on_agent_connected's docstring for why a caller
+    # that only tries a resize once, right after `connected`, can miss a
+    # real agent that hasn't finished its own handshake yet.
+    agent_connected = Signal()
 
 
 class SpiceSessionWorker:
@@ -146,6 +152,7 @@ class SpiceSessionWorker:
         self._loop = GLib.MainLoop()
         self._session.on_frame = self._on_frame
         self._session.on_connected = self.signals.connected.emit
+        self._session.on_agent_connected = self.signals.agent_connected.emit
         self._session.on_error = self._on_session_error
         self._session.on_disconnected = self._quit_loop
 

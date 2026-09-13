@@ -545,6 +545,53 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    with zero tunnel involved -- exactly the code path
    `_prepare_qemu_spice_connection`'s `(None, port)` result leads to.
 
+9. **Fixed a real race in guest auto-resize (section 7 above)**: reported
+   that a VM with a working agent (auto-resize confirmed working for the
+   same VM in `virt-viewer`) still wasn't resizing through this app.
+   First ruled out the obvious mix-up -- `qemu-guest-agent` (host/guest
+   management commands) and `spice-vdagent`/"SPICE Guest Tools" (SPICE
+   display/clipboard/cursor integration) are two entirely separate
+   packages despite the easily-confused names -- but the VM in question
+   turned out to have something resize-capable actually connected
+   (confirmed indirectly: `virt-viewer` resizing it at all requires that),
+   which pointed at a real bug in this code, not a missing guest package.
+
+   The bug: `request_resize()`'s `agent_test_capability()` check was only
+   ever attempted *once* -- whenever a resize settled (500ms after the
+   widget resizes, or once after connecting) -- with no way to retry.
+   Confirmed live that `MainChannel`'s own `agent-connected` property
+   starts `False` and only flips `True` once the agent's handshake with
+   the server actually completes, which is a real, separate, *later*
+   event than the SPICE connection itself coming up -- the guest OS has
+   to start the agent service, which doesn't happen instantly on boot.
+   A resize attempted before that flip (entirely plausible given the
+   500ms window) would see `agent_test_capability()` return `False`
+   (correctly, at that moment) and never be retried once the agent
+   actually finished connecting moments later -- exactly matching
+   "works in virt-viewer" (which reacts to this properly) vs. "doesn't
+   work here" (which didn't retry at all).
+
+   Fixed by hooking `notify::agent-connected` on the main channel (a new
+   `SpiceSession.on_agent_connected` callback, threaded through
+   `SpiceSessionWorker`'s new `agent_connected` signal to a new
+   `SpiceWidget._on_agent_connected`), which re-sends a resize request
+   using the widget's current size the moment the agent actually becomes
+   ready -- not tied to a resize event at all, so it catches the case
+   where the widget's size was already settled well before the agent
+   finished connecting.
+
+   **Verified live**: confirmed `MainChannel` really does expose an
+   `agent-connected` boolean property (`list_properties()` against the
+   real typelib) and that `notify::agent-connected` hooks and fires
+   without error against a real connection (0 times for a real VM with
+   no agent at all -- correctly never spuriously fired). Could not
+   reproduce the actual becomes-connected transition itself without a
+   full agent-equipped guest OS (same limitation as section 7's own
+   verification gap), but the offscreen widget-level wiring was verified
+   directly: calling `_on_agent_connected()` sends exactly one resize
+   request using the widget's current size, independent of any resize
+   event having fired at all.
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the
