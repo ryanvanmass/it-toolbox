@@ -25,11 +25,26 @@ GLib main loop already does).
 """
 
 import threading
+import time
 
 from gi.repository import GLib
 from PySide6.QtCore import QObject, Signal
 
 from it_toolbox.core.spice.spice_session import SpiceError, SpiceSession
+
+# Caps how often a display-invalidate burst (video, scrolling, animation --
+# anything that redraws faster than a human needs to see it) actually
+# triggers a real frame capture. Confirmed live this was the direct cause
+# of choppy playback under a busy guest desktop: SpiceSession.get_frame()
+# does a full ctypes.string_at() copy of the *entire* framebuffer on every
+# single invalidate signal regardless of how small the changed region was
+# (display-invalidate's own x/y/width/height args are otherwise unused),
+# and a busy guest can fire that signal far faster than 30/sec -- each one
+# also forcing a full Qt repaint downstream. 30fps is plenty for a remote
+# admin console (not a game) and cuts that copy+repaint rate dramatically
+# during bursts while never actually dropping the *latest* frame -- see
+# _on_frame's docstring for how the trailing-edge timeout guarantees that.
+_TARGET_FRAME_INTERVAL_SEC = 1 / 30
 
 
 class SpiceSessionSignals(QObject):
@@ -52,6 +67,8 @@ class SpiceSessionWorker:
         self._session = SpiceSession()
         self._loop: GLib.MainLoop | None = None
         self._thread: threading.Thread | None = None
+        self._last_emit_at = 0.0
+        self._frame_timeout_pending = False
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -105,8 +122,41 @@ class SpiceSessionWorker:
             self._loop.quit()
 
     def _on_frame(self) -> None:
-        # Runs on this thread (the one running the GLib main loop) — reads
-        # the shared pixel buffer here and hands plain bytes across via
-        # emit(), never the raw pointer.
-        pixels, width, height, stride = self._session.get_frame()
+        # Runs on this thread (the one running the GLib main loop), once per
+        # display-primary-create/display-invalidate signal -- which can fire
+        # much faster than _TARGET_FRAME_INTERVAL_SEC on a busy guest
+        # desktop. Trailing-edge throttle: if the last real capture was
+        # recent enough, just schedule one timeout for whenever the
+        # interval actually elapses rather than capturing again right now
+        # -- further invalidates before that timeout fires are free (the
+        # `_frame_timeout_pending` guard skips scheduling a second one).
+        # Everything here runs on this same GLib loop thread, so there's no
+        # race between "pending" being set and the timeout callback running.
+        # The timeout always captures whatever the *live* framebuffer looks
+        # like at that moment (get_frame() has no notion of a queued/stale
+        # frame), so the guest's actual latest state is never lost or
+        # delayed by more than one interval -- only the redundant
+        # intermediate captures are skipped.
+        now = time.monotonic()
+        remaining = _TARGET_FRAME_INTERVAL_SEC - (now - self._last_emit_at)
+        if remaining <= 0:
+            self._emit_frame()
+        elif not self._frame_timeout_pending:
+            self._frame_timeout_pending = True
+            GLib.timeout_add(int(remaining * 1000), self._on_frame_timeout)
+
+    def _on_frame_timeout(self) -> bool:
+        self._frame_timeout_pending = False
+        self._emit_frame()
+        return GLib.SOURCE_REMOVE  # one-shot, not repeating
+
+    def _emit_frame(self) -> None:
+        self._last_emit_at = time.monotonic()
+        try:
+            pixels, width, height, stride = self._session.get_frame()
+        except SpiceError:
+            # The primary surface can be torn down (e.g. a guest resolution
+            # change, or disconnect) between the invalidate that scheduled
+            # this and the timeout actually firing -- nothing to paint.
+            return
         self.signals.frame_ready.emit(pixels, width, height, stride)

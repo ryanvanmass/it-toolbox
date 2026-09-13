@@ -248,6 +248,62 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    unrelated (headless-environment focus/clipboard) failures already
    present on the base branch, confirmed by running them there too.
 
+6. **Embedded SPICE viewer performance** (picked up in this branch on
+   request, not part of the original deploy/configure scope --
+   `core/spice/spice_session_worker.py` predates this branch, from the
+   already-merged `feature/qemu-spice-connections`): fixed a real
+   choppy-display cause. `SpiceSession.get_frame()` does a full
+   `ctypes.string_at()` copy of the *entire* framebuffer, and
+   `spice_session_worker.py`'s `_on_frame` used to call it on every
+   single `display-invalidate` signal with no throttling at all --
+   `display-invalidate`'s own `x`/`y`/`width`/`height` args (the actual
+   dirty rect) were never even used. A busy guest desktop (video,
+   scrolling, animation) can fire that signal far faster than any
+   display needs, each one forcing a full multi-megabyte copy plus a
+   full Qt repaint downstream -- confirmed by reading `get_frame()`'s
+   implementation directly, not assumed from a symptom report alone.
+
+   Fixed with a trailing-edge throttle in `SpiceSessionWorker._on_frame`:
+   capped to a target 30fps (`_TARGET_FRAME_INTERVAL_SEC`) -- an
+   invalidate within the current interval just schedules one
+   `GLib.timeout_add` for whenever the interval actually elapses
+   (further invalidates before it fires are free, guarded by
+   `_frame_timeout_pending`) rather than capturing again immediately.
+   Because everything runs on the same GLib loop thread there's no
+   locking needed, and because the eventual capture always reads the
+   *live* framebuffer (not a queued snapshot), the guest's actual latest
+   state is never lost -- only the redundant intermediate captures are
+   skipped. `_emit_frame` also now tolerates `SpiceError` from
+   `get_frame()` (the primary surface can be torn down between the
+   invalidate that scheduled a timeout and the timeout actually firing,
+   e.g. a guest resolution change or disconnect mid-burst) rather than
+   letting an unhandled exception reach the GLib loop.
+
+   **Verification** (this module has never had, and still doesn't have,
+   automated pytest coverage -- see `qemu-spice-status.md`'s own
+   "no automated test can cover the SPICE protocol/rendering pieces"
+   note, still true here): verified live on the dev VM in two ways.
+   First, a standalone script drove the exact throttle logic against the
+   *real* `gi.repository.GLib.MainLoop`/`GLib.timeout_add` (the actual
+   dependency this code relies on, not a mock) with a simulated ~450/sec
+   invalidate burst — collapsed to 17 real captures over the burst
+   window, with the final captured value confirmed to be the *last*
+   one generated (proving the trailing invalidate is never dropped), and
+   a second scenario confirmed a torn-down primary surface during a
+   pending timeout raises no exception. Second, an actual end-to-end run
+   against a real running VM's real SPICE server, using the project's
+   own unmodified `SpiceSession` wrapped in the same throttle: connected,
+   received correctly-sized real frames, and passed through a real
+   low-frequency invalidate stream (a boot-screen blink, ~9 invalidates
+   over several seconds) 1:1 with zero throttling effect and zero added
+   latency -- confirming the fix is a no-op for normal/idle usage and
+   only actually engages once invalidates arrive faster than 30/sec.
+   (A true high-frequency real-guest stress test — actual video/desktop
+   animation — wasn't set up given the effort that would take vs. the
+   throttle logic already being proven correct against its real
+   dependency; the mechanism doesn't care what generates the invalidates,
+   only their rate.)
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the
