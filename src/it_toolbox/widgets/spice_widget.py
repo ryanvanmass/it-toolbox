@@ -51,6 +51,13 @@ class SpiceWidget(QWidget):
     # dropping the connection, or close_session() being called.
     finished = Signal()
 
+    # TEMPORARY diagnostic HUD (see paintEvent) -- printing the widget/
+    # canvas/target sizes directly on screen so a real report of "still
+    # looks distorted" after the letterbox fix can be checked against
+    # exact numbers instead of a manual measurement. Remove once the
+    # remaining distortion/blur report is resolved.
+    _DEBUG_OVERLAY_RECT = QRect(0, 0, 620, 20)
+
     def __init__(
         self,
         host: str,
@@ -67,6 +74,7 @@ class SpiceWidget(QWidget):
         # pixel data into the canvas's independently-allocated buffer, so
         # nothing needs to be kept alive past _on_frame_ready() returning.
         self._canvas: QImage | None = None
+        self._debug_overlay_text = ""  # TEMPORARY -- see paintEvent
         self._closing = False  # set by close_session(); suppresses finished re-emission
         self._finished_emitted = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -112,6 +120,7 @@ class SpiceWidget(QWidget):
             # store tried to end the paint cycle).
             painter.end()
         self.update(self._dirty_widget_rect(band_top, band_height))
+        self.update(self._DEBUG_OVERLAY_RECT)  # keep the diagnostic HUD current every frame
 
     def _scaled_canvas_rect(self) -> QRect:
         """The largest rect, centered in the widget, that fits self._canvas
@@ -170,6 +179,12 @@ class SpiceWidget(QWidget):
         if self._canvas is None or self.width() == 0 or self.height() == 0:
             return
         target = self._scaled_canvas_rect()
+        self._debug_overlay_text = (
+            f"widget={self.width()}x{self.height()}  "
+            f"canvas={self._canvas.width()}x{self._canvas.height()}  "
+            f"target={target.width()}x{target.height()} @ ({target.x()},{target.y()})  "
+            f"devicePixelRatio={self.devicePixelRatioF():.2f}"
+        )
         # Only re-composite the region Qt actually asked for (event.rect())
         # intersected with the actual image area -- update() above requests
         # just the dirty band's widget-space rect, so a partial update
@@ -182,6 +197,12 @@ class SpiceWidget(QWidget):
         try:
             if target != self.rect():
                 painter.fillRect(self.rect(), Qt.GlobalColor.black)
+            # TEMPORARY diagnostic HUD -- drawn unconditionally (even when
+            # `dest` below turns out empty) so it's always current; remove
+            # once the remaining distortion/blur report is resolved.
+            painter.fillRect(self._DEBUG_OVERLAY_RECT, Qt.GlobalColor.black)
+            painter.setPen(Qt.GlobalColor.yellow)
+            painter.drawText(self._DEBUG_OVERLAY_RECT.adjusted(4, 2, -4, -2), Qt.AlignmentFlag.AlignVCenter, self._debug_overlay_text)
             if dest.isEmpty():
                 return
             scale_x = self._canvas.width() / target.width()
