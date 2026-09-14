@@ -58,7 +58,7 @@ def test_fields_prefilled_with_current_values(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch, current_vcpus=4, current_memory_mib=8192)
 
     assert dialog._vcpus_spin.value() == 4
-    assert dialog._memory_spin.value() == 8192
+    assert dialog._memory_widget.value_mib() == 8192
 
 
 def test_disks_list_shows_only_data_disks_not_cdrom(qtbot, monkeypatch):
@@ -341,7 +341,7 @@ def test_running_vm_shows_resize_applies_after_restart_note(qtbot, monkeypatch):
     # dialog builds without error and the resize fields are still usable
     # (this is the one operation that's *never* live regardless of state).
     assert dialog._vcpus_spin.isEnabled()
-    assert dialog._memory_spin.isEnabled()
+    assert dialog._memory_widget.isEnabled()
 
 
 def test_running_vm_remove_disk_passes_live_true(qtbot, monkeypatch):

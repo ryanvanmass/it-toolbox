@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils
 from it_toolbox.modules.connection_manager import qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost, QemuVm, VmDisk, VmNetworkInterface
+from it_toolbox.modules.connection_manager.ui.memory_size_widget import MemorySizeWidget
 from it_toolbox.modules.connection_manager.ui.searchable_combo import make_searchable, resolve_data
 
 DISK_TARGET_ROLE = Qt.ItemDataRole.UserRole
@@ -86,14 +87,12 @@ class ConfigureVmDialog(QDialog):
         self._vcpus_spin.setRange(1, 64)
         self._vcpus_spin.setValue(current_vcpus)
 
-        self._memory_spin = QSpinBox()
-        self._memory_spin.setRange(128, 1_048_576)
-        self._memory_spin.setSuffix(" MiB")
-        self._memory_spin.setValue(current_memory_mib)
+        self._memory_widget = MemorySizeWidget()
+        self._memory_widget.set_value_mib(current_memory_mib)
 
         resource_form = QFormLayout()
         resource_form.addRow("vCPUs:", self._vcpus_spin)
-        resource_form.addRow("Memory:", self._memory_spin)
+        resource_form.addRow("Memory:", self._memory_widget)
         if self._is_running:
             # vCPU/memory changes are always --config-only regardless of
             # running state (confirmed live: a real vCPU reduction is
@@ -332,7 +331,7 @@ class ConfigureVmDialog(QDialog):
 
     def _on_accept(self) -> None:
         new_vcpus = self._vcpus_spin.value()
-        new_memory = self._memory_spin.value()
+        new_memory = self._memory_widget.value_mib()
         vcpus = new_vcpus if new_vcpus != self._current_vcpus else None
         memory_mib = new_memory if new_memory != self._current_memory_mib else None
 

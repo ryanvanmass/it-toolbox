@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils
 from it_toolbox.modules.connection_manager import qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost, StorageVolume, VmCreateSpec
+from it_toolbox.modules.connection_manager.ui.memory_size_widget import MemorySizeWidget
 from it_toolbox.modules.connection_manager.ui.searchable_combo import make_searchable, resolve_data
 
 _NONE_ISO_LABEL = "(None — boot the new disk directly)"
@@ -45,10 +46,8 @@ class CreateVmDialog(QDialog):
         # hardcoded values otherwise -- same fallback principle as
         # every other per-host default here (a host with nothing
         # configured behaves exactly like before this feature existed).
-        self._memory_spin = QSpinBox()
-        self._memory_spin.setRange(128, 1_048_576)
-        self._memory_spin.setSuffix(" MiB")
-        self._memory_spin.setValue(host.default_memory_mib or 2048)
+        self._memory_widget = MemorySizeWidget()
+        self._memory_widget.set_value_mib(host.default_memory_mib or 2048)
 
         self._vcpus_spin = QSpinBox()
         self._vcpus_spin.setRange(1, 64)
@@ -108,7 +107,7 @@ class CreateVmDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Name:", self._name_edit)
-        form.addRow("Memory:", self._memory_spin)
+        form.addRow("Memory:", self._memory_widget)
         form.addRow("vCPUs:", self._vcpus_spin)
         form.addRow("Disk size:", self._disk_spin)
         form.addRow("Disk storage pool:", self._disk_pool_combo)
@@ -241,7 +240,7 @@ class CreateVmDialog(QDialog):
 
         spec = VmCreateSpec(
             name=name,
-            memory_mib=self._memory_spin.value(),
+            memory_mib=self._memory_widget.value_mib(),
             vcpus=self._vcpus_spin.value(),
             disk_gib=self._disk_spin.value(),
             pool=self._disk_pool_combo.currentData(),

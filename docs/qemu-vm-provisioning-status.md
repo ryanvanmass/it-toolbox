@@ -656,6 +656,32 @@ mocked-only, not just checked against `virt-install --help`/man pages.
     tests confirming `live=True` is passed through correctly for each
     operation).
 
+11. **MiB/GiB unit picker for Memory fields** (usability request): typing
+    a large VM's memory in raw MiB is awkward (16 GiB is "16384"). New
+    `ui/memory_size_widget.py`'s `MemorySizeWidget` -- a `QSpinBox` +
+    MiB/GiB `QComboBox` -- always reports/accepts a plain MiB integer via
+    `value_mib()`/`set_value_mib()`, so every backend call site
+    (`memory_mib=...`) is unchanged; only `CreateVmDialog` and
+    `ConfigureVmDialog`'s own memory fields swapped their old plain
+    `QSpinBox` for this. Switching *to* GiB rounds a non-whole-GiB value
+    (e.g. 2500 MiB -> "2 GiB", i.e. 2048 MiB) -- an inherent, expected
+    trade-off of choosing the coarser unit, not a bug. The per-host
+    default memory field in "Manage Hosts…" was deliberately left as a
+    plain MiB spin -- that dialog's own established style is plain,
+    always-synchronous fields, and combining an "unset" sentinel
+    (`_UNSET_SPIN_VALUE`) with a unit toggle would have been a
+    meaningfully bigger change for a field that's typically set once,
+    not a quick swap like the two above.
+
+    8 new tests in `test_memory_size_widget.py` cover the widget
+    directly (unit conversion both directions, rounding on a lossy
+    GiB switch, and that `valueChangedMib` fires exactly once per unit
+    switch -- an early version fired multiple times with transient,
+    not-yet-correct intermediate values because `QSpinBox.setRange()`
+    alone can clamp the current value before the real converted value is
+    set; fixed by blocking signals during the reconfiguration and
+    emitting once at the end).
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the

@@ -54,7 +54,7 @@ def test_host_defaults_seed_memory_vcpus_disk_and_os_variant(qtbot, monkeypatch)
     )
     dialog = _make_dialog(qtbot, monkeypatch, host=host_with_defaults)
 
-    assert dialog._memory_spin.value() == 8192
+    assert dialog._memory_widget.value_mib() == 8192
     assert dialog._vcpus_spin.value() == 8
     assert dialog._disk_spin.value() == 100
     # Pre-filled, but still editable/searchable -- not the "start blank"
@@ -65,7 +65,7 @@ def test_host_defaults_seed_memory_vcpus_disk_and_os_variant(qtbot, monkeypatch)
 def test_host_without_defaults_keeps_the_plain_hardcoded_ones(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch, host=HOST)
 
-    assert dialog._memory_spin.value() == 2048
+    assert dialog._memory_widget.value_mib() == 2048
     assert dialog._vcpus_spin.value() == 2
     assert dialog._disk_spin.value() == 20
     assert dialog._os_variant_combo.currentText() == ""
@@ -242,7 +242,7 @@ def test_accept_requires_a_name(qtbot, monkeypatch):
 def test_accept_calls_create_vm_with_expected_spec_and_closes_on_success(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch)
     dialog._name_edit.setText("my-new-vm")
-    dialog._memory_spin.setValue(4096)
+    dialog._memory_widget.set_value_mib(4096)
     dialog._vcpus_spin.setValue(4)
     dialog._disk_spin.setValue(40)
     dialog._os_variant_combo.setCurrentText("win11")
