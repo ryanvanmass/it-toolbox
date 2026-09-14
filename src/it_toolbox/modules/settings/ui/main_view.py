@@ -11,7 +11,13 @@ sidebar_widget below and SettingsModule.create_sidebar_widget()), not in
 this view's own layout -- matching every other module with its own
 navigation (Connection Manager's sidebar_tree, Identity Management's
 sidebar_widget, ...) instead of bundling nav + content into one
-QSplitter the way an earlier version of this page did.
+QSplitter the way an earlier version of this page did. It's a
+QTreeWidget used flat (no children), not a QListWidget, purely for the
+free "Categories" header row -- matches every other module's sidebar
+widget (Connection Manager's "Connections", Cloud Storage's "Remotes",
+Identity Management's "Providers", Shell Launcher's "Shells"), giving
+this list the exact same section-header look as the rest of the app
+instead of a QListWidget with no header concept at all.
 """
 
 import os
@@ -29,12 +35,13 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QStackedWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -165,16 +172,24 @@ class SettingsView(QWidget):
             ("Terminal", [self._build_terminal_font_size_section()]),
         ]
 
-        self._category_list = QListWidget()
+        # A QTreeWidget (not QListWidget), used flat with no children --
+        # matches every other module's sidebar widget (Connection
+        # Manager's "Connections" header, Cloud Storage's "Remotes",
+        # Identity Management's "Providers", Shell Launcher's "Shells")
+        # purely for the free, pixel-identical header row that gives this
+        # list the same section-header look as the rest of the app,
+        # rather than a plain QListWidget with no header concept at all.
+        self._category_tree = QTreeWidget()
+        self._category_tree.setHeaderLabels(["Categories"])
         self._category_stack = QStackedWidget()
         for name, sections in categories:
-            self._category_list.addItem(name)
+            self._category_tree.addTopLevelItem(QTreeWidgetItem([name]))
             self._category_stack.addWidget(self._build_category_page(sections))
 
-        self._category_list.currentRowChanged.connect(self._category_stack.setCurrentIndex)
-        self._category_list.setCurrentRow(0)
+        self._category_tree.currentItemChanged.connect(self._on_category_changed)
+        self._category_tree.setCurrentItem(self._category_tree.topLevelItem(0))
 
-        # The category list itself lives in the app's own sidebar column
+        # The category tree itself lives in the app's own sidebar column
         # (see sidebar_widget below), not in this view's own layout --
         # matches every other module (Connection Manager's sidebar_tree,
         # Identity Management's sidebar_widget, ...), rather than this
@@ -183,14 +198,20 @@ class SettingsView(QWidget):
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addWidget(self._category_stack)
 
+    def _on_category_changed(
+        self, current: QTreeWidgetItem | None, previous: QTreeWidgetItem | None
+    ) -> None:
+        if current is not None:
+            self._category_stack.setCurrentIndex(self._category_tree.indexOfTopLevelItem(current))
+
     @property
     def sidebar_widget(self) -> QWidget:
-        """The category list (General/Integrations/Remote Desktop/
+        """The category tree (General/Integrations/Remote Desktop/
         Terminal), hosted in the app sidebar (nested under this module's
         entry) rather than in this view's own layout -- see
         SettingsModule.create_sidebar_widget().
         """
-        return self._category_list
+        return self._category_tree
 
     @staticmethod
     def _build_category_page(sections: list[QGroupBox]) -> QScrollArea:
