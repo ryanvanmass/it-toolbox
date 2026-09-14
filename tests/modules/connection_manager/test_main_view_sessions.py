@@ -1867,3 +1867,110 @@ def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
     assert saved["connections"] == [
         {"name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice"}
     ]
+
+
+# -- Search/filter box --------------------------------------------------
+
+
+def test_sidebar_widget_contains_the_search_box_and_the_tree(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    assert view._search_box.parent() is view.sidebar_widget
+    assert view._tree.parent() is view.sidebar_widget
+
+
+def test_filtering_by_vm_name_hides_non_matching_vms_but_keeps_the_host(qtbot, monkeypatch):
+    host = QemuHost(name="lab-host", uri="qemu+ssh://user@lab-host/system")
+    view = _make_view(qtbot, monkeypatch, qemu_hosts=[{"name": host.name, "uri": host.uri}])
+    host_item = view._qemu_root_item.child(0)
+    view._populate_qemu_vms(
+        host_item, host,
+        [QemuVm(id="1", name="web-server", state="running"), QemuVm(id="2", name="db-server", state="shut off")],
+    )
+
+    view._search_box.setText("web")
+
+    assert host_item.isHidden() is False
+    assert host_item.child(0).text(0) == "web-server"
+    assert host_item.child(0).isHidden() is False
+    assert host_item.child(1).text(0) == "db-server"
+    assert host_item.child(1).isHidden() is True
+
+
+def test_clearing_the_search_shows_everything_again(qtbot, monkeypatch):
+    host = QemuHost(name="lab-host", uri="qemu+ssh://user@lab-host/system")
+    view = _make_view(qtbot, monkeypatch, qemu_hosts=[{"name": host.name, "uri": host.uri}])
+    host_item = view._qemu_root_item.child(0)
+    view._populate_qemu_vms(
+        host_item, host,
+        [QemuVm(id="1", name="web-server", state="running"), QemuVm(id="2", name="db-server", state="shut off")],
+    )
+    view._search_box.setText("web")
+
+    view._search_box.setText("")
+
+    assert host_item.child(0).isHidden() is False
+    assert host_item.child(1).isHidden() is False
+
+
+def test_searching_a_container_name_shows_its_whole_subtree(qtbot, monkeypatch):
+    host = QemuHost(name="lab-host", uri="qemu+ssh://user@lab-host/system")
+    view = _make_view(qtbot, monkeypatch, qemu_hosts=[{"name": host.name, "uri": host.uri}])
+    host_item = view._qemu_root_item.child(0)
+    view._populate_qemu_vms(
+        host_item, host,
+        [QemuVm(id="1", name="web-server", state="running")],
+    )
+
+    view._search_box.setText("QEMU")
+
+    assert view._qemu_root_item.isHidden() is False
+    assert host_item.isHidden() is False
+    assert host_item.child(0).isHidden() is False
+
+
+def test_search_with_no_matches_hides_the_whole_family(qtbot, monkeypatch):
+    view = _make_view(
+        qtbot, monkeypatch,
+        manual_connections=[{"name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp"}],
+    )
+
+    view._search_box.setText("nonexistent-name-xyz")
+
+    assert view._manual_root_item.isHidden() is True
+
+
+def test_search_does_not_unhide_an_empty_buckets_category(qtbot, monkeypatch):
+    # Regression test: _populate_buckets deliberately hides its own
+    # category when a project has zero buckets (INTRINSIC_HIDE_ROLE) --
+    # the search filter must never override that, whether the query is
+    # empty, matches "Buckets" directly, or matches nothing at all.
+    view = _make_view(qtbot, monkeypatch, instances=[], buckets=[])
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+
+    view._apply_project_selection({"p1"})
+
+    project_item = view._gcp_root_item.child(0)
+    buckets_category = project_item.child(1)
+    assert buckets_category.text(0) == "Buckets"
+    qtbot.waitUntil(lambda: buckets_category.isHidden(), timeout=2000)
+
+    view._search_box.setText("Buckets")
+    assert buckets_category.isHidden() is True
+
+    view._search_box.setText("")
+    assert buckets_category.isHidden() is True
+
+
+def test_search_respects_a_buckets_category_that_later_gets_buckets(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, instances=[], buckets=[])
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    project_item = view._gcp_root_item.child(0)
+    buckets_category = project_item.child(1)
+    qtbot.waitUntil(lambda: buckets_category.isHidden(), timeout=2000)
+
+    view._populate_buckets(buckets_category, [GcsBucket(name="my-bucket", project_id="p1")])
+
+    assert buckets_category.isHidden() is False
+    assert buckets_category.child(0).text(0) == "my-bucket"

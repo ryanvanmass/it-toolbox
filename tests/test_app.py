@@ -54,7 +54,7 @@ def test_main_window_has_a_real_window_icon(qtbot, monkeypatch):
 
     # The GCP browser tree is nested under the module in the sidebar now,
     # not tab content in the main view.
-    assert window._sidebar_extras.currentWidget() is window._stack.widget(0).sidebar_tree
+    assert window._sidebar_extras.currentWidget() is window._stack.widget(0).sidebar_widget
 
 
 def test_module_list_height_is_capped_to_fit_its_rows(qtbot, monkeypatch):
