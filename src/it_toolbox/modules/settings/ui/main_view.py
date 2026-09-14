@@ -1,10 +1,17 @@
 """App-wide Settings page — categorized (not tab/session-based like the
 other modules, so it never touches the shared session-tab pane). A
-left-hand category list + right-hand per-category scrollable page mirrors
-app.py's own module-list/QStackedWidget navigation, rather than one long
-flat scroll through all eleven sections at once -- the same pattern
-already established for the app's top-level navigation, reused here one
-level down instead of inventing a second way to browse a list of things.
+category list (General/Integrations/Remote Desktop/Terminal) selects
+which per-category scrollable page shows in the main content area,
+instead of one long flat scroll through all eleven sections at once --
+the same categorization idea app.py's own top-level module list already
+uses, one level down.
+
+The category list itself lives in the app's *own* sidebar column (see
+sidebar_widget below and SettingsModule.create_sidebar_widget()), not in
+this view's own layout -- matching every other module with its own
+navigation (Connection Manager's sidebar_tree, Identity Management's
+sidebar_widget, ...) instead of bundling nav + content into one
+QSplitter the way an earlier version of this page did.
 """
 
 import os
@@ -27,7 +34,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -168,15 +174,23 @@ class SettingsView(QWidget):
         self._category_list.currentRowChanged.connect(self._category_stack.setCurrentIndex)
         self._category_list.setCurrentRow(0)
 
-        splitter = QSplitter()
-        splitter.addWidget(self._category_list)
-        splitter.addWidget(self._category_stack)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([160, 640])
-
+        # The category list itself lives in the app's own sidebar column
+        # (see sidebar_widget below), not in this view's own layout --
+        # matches every other module (Connection Manager's sidebar_tree,
+        # Identity Management's sidebar_widget, ...), rather than this
+        # page alone bundling its nav + content into one QSplitter.
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.addWidget(splitter)
+        outer_layout.addWidget(self._category_stack)
+
+    @property
+    def sidebar_widget(self) -> QWidget:
+        """The category list (General/Integrations/Remote Desktop/
+        Terminal), hosted in the app sidebar (nested under this module's
+        entry) rather than in this view's own layout -- see
+        SettingsModule.create_sidebar_widget().
+        """
+        return self._category_list
 
     @staticmethod
     def _build_category_page(sections: list[QGroupBox]) -> QScrollArea:
