@@ -38,7 +38,7 @@ class QemuApiError(Exception):
     pass
 
 
-def _run_virsh(host: QemuHost, *args: str) -> str:
+def run_virsh(host: QemuHost, *args: str) -> str:
     try:
         result = subprocess.run(
             [VIRSH_CMD, "-c", host.uri, *args],
@@ -57,7 +57,7 @@ def _run_virsh(host: QemuHost, *args: str) -> str:
 
 
 def list_vms(host: QemuHost) -> list[QemuVm]:
-    output = _run_virsh(host, "list", "--all")
+    output = run_virsh(host, "list", "--all")
     lines = output.splitlines()
 
     vms: list[QemuVm] = []
@@ -78,7 +78,7 @@ def get_vm_spice_port(host: QemuHost, vm_name: str) -> int | None:
     """The VM's SPICE port, or None if it has no SPICE graphics device, or
     its port hasn't been assigned yet (VM not currently running).
     """
-    xml_text = _run_virsh(host, "dumpxml", vm_name)
+    xml_text = run_virsh(host, "dumpxml", vm_name)
     root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
     graphics = root.find(".//graphics[@type='spice']")
     if graphics is None:
@@ -93,4 +93,4 @@ def power_action(host: QemuHost, vm_name: str, action: str) -> None:
     virsh_command = _POWER_ACTIONS.get(action)
     if virsh_command is None:
         raise QemuApiError(f"Unknown power action: {action!r}")
-    _run_virsh(host, virsh_command, vm_name)
+    run_virsh(host, virsh_command, vm_name)

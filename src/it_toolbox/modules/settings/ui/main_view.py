@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
-from it_toolbox.modules.connection_manager import qemu_client
+from it_toolbox.modules.connection_manager import qemu_client, qemu_provisioning
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
 from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
 
@@ -628,6 +628,23 @@ class SettingsView(QWidget):
                 "  Fedora/RHEL:   sudo dnf install libvirt-client"
             )
         layout.addWidget(self._qemu_status_label)
+
+        # Separate from virsh -- deploying a new VM ("Deploy VM…") needs
+        # virt-install specifically, which a virsh-only install (just
+        # libvirt-clients, no virt-install/virtinst) won't have, even
+        # though VM discovery/power control above works fine without it.
+        if qemu_provisioning.is_available():
+            self._virt_install_status_label = QLabel(
+                "virt-install found — deploying new VMs is available."
+            )
+        else:
+            self._virt_install_status_label = QLabel(
+                "virt-install not found — VM discovery/power control above still work, "
+                "but \"Deploy VM…\" also needs it:\n"
+                "  Debian/Ubuntu: sudo apt install virtinst\n"
+                "  Fedora/RHEL:   sudo dnf install virt-install"
+            )
+        layout.addWidget(self._virt_install_status_label)
 
         return box
 

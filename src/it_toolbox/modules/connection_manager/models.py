@@ -48,6 +48,20 @@ class GcsEntry:
 class QemuHost:
     name: str
     uri: str  # libvirt connection URI, e.g. "qemu+ssh://user@host/system"
+    # Per-host defaults for CreateVmDialog -- all optional (None = no
+    # override, fall back to the dialog's own hardcoded default). Pool/
+    # network/os-variant are matched by name against whatever's actually
+    # discovered live on that host at deploy time; a stale/typo'd name
+    # that no longer matches anything just silently falls back to the
+    # dialog's normal default rather than erroring -- same "safe,
+    # non-destructive fallback" principle as the rest of this feature.
+    default_memory_mib: int | None = None
+    default_vcpus: int | None = None
+    default_disk_gib: int | None = None
+    default_disk_pool: str | None = None
+    default_network: str | None = None
+    default_iso_pool: str | None = None
+    default_os_variant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +69,58 @@ class QemuVm:
     id: str  # libvirt domain id, or "-" when the VM is not running
     name: str
     state: str  # e.g. "running", "shut off", "paused"
+
+
+@dataclass(frozen=True)
+class VmDisk:
+    target: str  # device name, e.g. "hda", "vdb" -- whatever the VM's own scheme already uses
+    device: str  # "disk" or "cdrom" -- confirmed live via `virsh domblklist --details`
+    source: str | None  # None for an empty cdrom slot ("-" in domblklist's own output)
+
+
+@dataclass(frozen=True)
+class VmNetworkInterface:
+    mac: str
+    network: str
+    model: str
+
+
+@dataclass(frozen=True)
+class StoragePool:
+    name: str
+    state: str  # e.g. "active", "inactive"
+
+
+@dataclass(frozen=True)
+class StorageVolume:
+    name: str
+    path: str
+
+
+@dataclass(frozen=True)
+class VirtualNetwork:
+    name: str
+    state: str  # e.g. "active", "inactive"
+
+
+@dataclass(frozen=True)
+class VmCreateSpec:
+    """Everything needed to define+start a new VM via virt-install --
+    see qemu_provisioning.create_vm. iso_path=None means "boot the
+    fresh, empty disk directly" (virt-install --import) rather than
+    "install from media" (--cdrom) -- confirmed live that virt-install
+    refuses to create a domain at all without one or the other
+    ("An install method must be specified").
+    """
+
+    name: str
+    memory_mib: int
+    vcpus: int
+    disk_gib: int
+    pool: str
+    network: str
+    os_variant: str
+    iso_path: str | None = None
 
 
 @dataclass(frozen=True)

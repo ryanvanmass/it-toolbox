@@ -19,9 +19,9 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
-from it_toolbox.core.qemu_tunnel import QemuTunnel
+from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
 from it_toolbox.core.tunnel_session import BackgroundTunnel
-from it_toolbox.modules.connection_manager import gcp_client, qemu_client
+from it_toolbox.modules.connection_manager import gcp_client, qemu_client, qemu_provisioning
 from it_toolbox.modules.connection_manager.models import (
     RDP_PORT,
     SSH_PORT,
@@ -34,6 +34,8 @@ from it_toolbox.modules.connection_manager.models import (
 )
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError
 from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
+from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import ConfigureVmDialog
+from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
 from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import ManageHostsDialog
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
@@ -492,11 +494,39 @@ class ConnectionManagerView(QWidget):
 
     @staticmethod
     def _load_qemu_hosts() -> list[QemuHost]:
-        return [QemuHost(name=h["name"], uri=h["uri"]) for h in settings.load_qemu_hosts()]
+        return [
+            QemuHost(
+                name=h["name"],
+                uri=h["uri"],
+                default_memory_mib=h.get("default_memory_mib"),
+                default_vcpus=h.get("default_vcpus"),
+                default_disk_gib=h.get("default_disk_gib"),
+                default_disk_pool=h.get("default_disk_pool"),
+                default_network=h.get("default_network"),
+                default_iso_pool=h.get("default_iso_pool"),
+                default_os_variant=h.get("default_os_variant"),
+            )
+            for h in settings.load_qemu_hosts()
+        ]
 
     @staticmethod
     def _save_qemu_hosts(hosts: list[QemuHost]) -> None:
-        settings.save_qemu_hosts([{"name": h.name, "uri": h.uri} for h in hosts])
+        settings.save_qemu_hosts(
+            [
+                {
+                    "name": h.name,
+                    "uri": h.uri,
+                    "default_memory_mib": h.default_memory_mib,
+                    "default_vcpus": h.default_vcpus,
+                    "default_disk_gib": h.default_disk_gib,
+                    "default_disk_pool": h.default_disk_pool,
+                    "default_network": h.default_network,
+                    "default_iso_pool": h.default_iso_pool,
+                    "default_os_variant": h.default_os_variant,
+                }
+                for h in hosts
+            ]
+        )
 
     def _populate_qemu_hosts(self) -> None:
         # virsh isn't installed -- Settings' "QEMU / libvirt" section
@@ -638,6 +668,15 @@ class ConnectionManagerView(QWidget):
             self._show_qemu_vm_context_menu(pos, item, vm)
             return
 
+        # A bare QEMU host node -- not the "QEMU" root (that's
+        # IS_QEMU_ROOT_ROLE, above), not a VM leaf (that's VM_ROLE,
+        # just checked). Same HOST_ROLE-is-set/VM_ROLE-is-None check
+        # _load_qemu_vms's expand-on-click handler already uses.
+        host = item.data(0, HOST_ROLE)
+        if host is not None:
+            self._show_qemu_host_context_menu(pos, item, host)
+            return
+
         if item.data(0, IS_MANUAL_ROOT_ROLE):
             self._show_manual_root_context_menu(pos)
             return
@@ -702,6 +741,24 @@ class ConnectionManagerView(QWidget):
         menu.addAction("Manage Hosts…").triggered.connect(self._on_manage_hosts_clicked)
         menu.exec(self._tree.viewport().mapToGlobal(pos))
 
+    def _show_qemu_host_context_menu(self, pos, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        menu = QMenu(self)
+        # Only offered where virt-install itself is present -- resize/
+        # add-disk (on the VM context menu) only need virsh, already
+        # gated by qemu_client.is_available() disabling the whole QEMU
+        # tree, but creation has its own, separate dependency.
+        deploy_action = menu.addAction("Deploy VM…") if qemu_provisioning.is_available() else None
+        if deploy_action is None:
+            menu.addAction("Deploy VM… (requires virt-install)").setEnabled(False)
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if deploy_action is not None and chosen is deploy_action:
+            self._on_deploy_vm_clicked(host_item, host)
+
+    def _on_deploy_vm_clicked(self, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        dialog = CreateVmDialog(host, parent=self)
+        if dialog.exec() == CreateVmDialog.DialogCode.Accepted:
+            self._load_qemu_vms(host_item, host)
+
     def _show_qemu_vm_context_menu(self, pos, item: QTreeWidgetItem, vm: QemuVm) -> None:
         host = item.data(0, HOST_ROLE)
         menu = QMenu(self)
@@ -716,6 +773,14 @@ class ConnectionManagerView(QWidget):
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
+        # Available regardless of running state -- ConfigureVmDialog itself
+        # adapts what each change actually does per operation (see its own
+        # module docstring): vCPU/memory always stages for next restart,
+        # disk-add/CD-ROM-media apply immediately either way, and disk/
+        # network removal requests immediate effect but warns it isn't
+        # guaranteed while running.
+        menu.addSeparator()
+        configure_action = menu.addAction("Configure…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if connect_action is not None and chosen is connect_action:
             self._connect_qemu(host, vm)
@@ -727,6 +792,25 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
+        elif chosen is configure_action:
+            self._on_configure_vm_clicked(item, host, vm)
+
+    def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:
+        async_utils.run_in_background(
+            lambda: qemu_provisioning.get_vm_resources(host, vm.name),
+            on_result=lambda resources: self._open_configure_vm_dialog(item, host, vm, resources),
+            on_error=lambda error: QMessageBox.warning(self, "Failed to read VM resources", str(error)),
+        )
+
+    def _open_configure_vm_dialog(
+        self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm, resources: tuple[int, int]
+    ) -> None:
+        vcpus, memory_mib = resources
+        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, parent=self)
+        if dialog.exec() == ConfigureVmDialog.DialogCode.Accepted:
+            host_item = item.parent()
+            if host_item is not None:
+                self._load_qemu_vms(host_item, host)
 
     def _show_manual_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -1190,7 +1274,7 @@ class ConnectionManagerView(QWidget):
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
-    # -- Connect: QEMU/libvirt, tunnel over SSH, embed SPICE ------------------
+    # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------
 
     def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
         if SpiceWidget is None:
@@ -1202,28 +1286,41 @@ class ConnectionManagerView(QWidget):
             )
             return
         async_utils.run_in_background(
-            lambda: self._start_qemu_tunnel(host, vm),
-            on_result=lambda tunnel: self._on_qemu_tunnel_ready(tunnel, vm),
+            lambda: self._prepare_qemu_spice_connection(host, vm),
+            on_result=lambda result: self._on_qemu_spice_connection_ready(result, vm),
             on_error=self._on_session_error,
         )
 
     @staticmethod
-    def _start_qemu_tunnel(host: QemuHost, vm: QemuVm) -> QemuTunnel:
+    def _prepare_qemu_spice_connection(host: QemuHost, vm: QemuVm) -> tuple[QemuTunnel | None, int]:
+        """(tunnel, port-to-connect-to-on-127.0.0.1) -- tunnel is None for a
+        local libvirt host (see qemu_tunnel.is_local_uri()'s docstring for
+        why that case needs no tunnel at all: its SPICE port is already
+        directly reachable on this same machine)."""
         spice_port = qemu_client.get_vm_spice_port(host, vm.name)
         if spice_port is None:
             raise QemuApiError(f"{vm.name} has no SPICE port available — is it running?")
+        if is_local_uri(host.uri):
+            return None, spice_port
         tunnel = QemuTunnel(host.uri, spice_port)
         tunnel.start()
-        return tunnel
+        return tunnel, tunnel.port
 
-    def _on_qemu_tunnel_ready(self, tunnel: QemuTunnel, vm: QemuVm) -> None:
+    def _on_qemu_spice_connection_ready(
+        self, result: tuple[QemuTunnel | None, int], vm: QemuVm
+    ) -> None:
+        tunnel, port = result
         session_id = self._next_session_id
         self._next_session_id += 1
-        self._active_sessions[session_id] = ("spice", tunnel)
+        # No entry at all for the no-tunnel (local) case -- nothing to stop
+        # on disconnect, and _on_disconnect_requested/_stop_all_sessions
+        # already tolerate a session_id with no _active_sessions entry.
+        if tunnel is not None:
+            self._active_sessions[session_id] = ("spice", tunnel)
 
-        self._embed_spice(session_id, vm.name, tunnel.port)
+        self._embed_spice(session_id, vm.name, port)
 
-        label = f"{vm.name} (SPICE) — 127.0.0.1:{tunnel.port}"
+        label = f"{vm.name} (SPICE) — 127.0.0.1:{port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
     def _embed_spice(self, session_id: int, display_name: str, port: int) -> None:

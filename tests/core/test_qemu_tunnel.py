@@ -4,7 +4,20 @@ import subprocess
 import pytest
 
 from it_toolbox.core import qemu_tunnel
-from it_toolbox.core.qemu_tunnel import QemuTunnel, QemuTunnelError, _parse_ssh_target
+from it_toolbox.core.qemu_tunnel import QemuTunnel, QemuTunnelError, _parse_ssh_target, is_local_uri
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("qemu:///system", True),
+        ("qemu:///session", True),
+        ("qemu+ssh://alice@lab-host/system", False),
+        ("qemu+ssh://lab-host/system", False),
+    ],
+)
+def test_is_local_uri(uri, expected):
+    assert is_local_uri(uri) is expected
 
 
 @pytest.mark.parametrize(
