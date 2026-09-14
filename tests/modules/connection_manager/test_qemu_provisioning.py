@@ -33,6 +33,16 @@ _REAL_BLK_LIST_TWO_DISKS = (
     " hda      /var/lib/libvirt/images/testvm1.qcow2\n"
     " hdb      /var/lib/libvirt/images/testvm1-disk-2.qcow2\n"
 )
+# An IDE boot disk plus a virtio data disk -- a normal, valid mix
+# (confirmed live: mixing buses on one VM works fine), and the shape
+# add_disk(live=True) needs to handle correctly when picking the next
+# free *virtio* target specifically, ignoring the unrelated IDE one.
+_REAL_BLK_LIST_IDE_BOOT_PLUS_VIRTIO_DATA = (
+    " Target   Source\n"
+    "-------------------------------------------\n"
+    " hda      /var/lib/libvirt/images/testvm1.qcow2\n"
+    " vdb      /var/lib/libvirt/images/testvm1-disk-2.qcow2\n"
+)
 _REAL_VOL_LIST_AFTER_ADD_DISK = (
     " Name                Path\n"
     "----------------------------------------------------------\n"
@@ -256,6 +266,53 @@ def test_next_disk_target_raises_when_no_existing_disks(monkeypatch):
     monkeypatch.setattr(qemu_provisioning.subprocess, "run", lambda *a, **k: _completed(stdout=empty))
     with pytest.raises(qemu_provisioning.QemuApiError, match="no existing disks"):
         qemu_provisioning._next_disk_target(HOST, "myvm")
+
+
+def test_next_virtio_disk_target_returns_vda_when_none_exist(monkeypatch):
+    # Only an IDE boot disk -- no virtio disk to continue from at all.
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda *a, **k: _completed(stdout=_REAL_BLK_LIST_ONE_DISK),
+    )
+    assert qemu_provisioning._next_virtio_disk_target(HOST, "myvm") == "vda"
+
+
+def test_next_virtio_disk_target_increments_existing_virtio_ignoring_ide(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda *a, **k: _completed(stdout=_REAL_BLK_LIST_IDE_BOOT_PLUS_VIRTIO_DATA),
+    )
+    assert qemu_provisioning._next_virtio_disk_target(HOST, "myvm") == "vdc"
+
+
+def test_add_disk_live_forces_virtio_target_and_bus(monkeypatch):
+    # Regression test: confirmed live that add_disk's normal
+    # scheme-continuing target (_next_disk_target) produces another IDE
+    # target for a VM whose boot disk is IDE (this app's own common
+    # case for a plain "generic" os-variant), and IDE disks flatly
+    # refuse to hotplug at all -- the *entire* attach-disk call then
+    # fails outright, not just its live half. live=True must pick an
+    # explicit virtio target/bus instead, regardless of the boot disk's
+    # own bus.
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        if cmd[3:5] == ["domblklist", "myvm"]:
+            return _completed(stdout=_REAL_BLK_LIST_ONE_DISK)  # IDE boot disk only
+        if cmd[3] == "vol-list":
+            return _completed(stdout=_REAL_VOL_LIST_AFTER_ADD_DISK)
+        return _completed()
+
+    monkeypatch.setattr(qemu_provisioning.subprocess, "run", fake_run)
+
+    qemu_provisioning.add_disk(HOST, "myvm", pool="default", size_gib=5, live=True)
+
+    attach_call = next(c for c in calls if c[3] == "attach-disk")
+    assert attach_call == [
+        "virsh", "-c", HOST.uri, "attach-disk", "myvm",
+        "/var/lib/libvirt/images/myvm-disk-2.qcow2", "vda", "--targetbus", "virtio", "--config", "--persistent",
+    ]
 
 
 def test_is_available_true_when_virt_install_on_path(monkeypatch):

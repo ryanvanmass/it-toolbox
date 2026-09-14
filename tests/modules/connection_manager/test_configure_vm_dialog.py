@@ -13,6 +13,7 @@ from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import Configu
 
 HOST = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
 VM = QemuVm(id="-", name="myvm", state="shut off")
+VM_RUNNING = QemuVm(id="1", name="myvm", state="running")
 
 _ONE_DISK = (VmDisk(target="hda", device="disk", source="/pool/myvm.qcow2"),)
 _ONE_DISK_ONE_CDROM = _ONE_DISK + (VmDisk(target="hdb", device="cdrom", source=None),)
@@ -24,7 +25,7 @@ _ONE_NETWORK = (VirtualNetwork(name="default", state="active"),)
 def _make_dialog(
     qtbot, monkeypatch, current_vcpus=2, current_memory_mib=2048,
     disks=_ONE_DISK, interfaces=_ONE_INTERFACE, pools=_ONE_POOL, networks=_ONE_NETWORK,
-    volumes=(),
+    volumes=(), vm=VM,
 ):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.list_disks",
@@ -46,7 +47,7 @@ def _make_dialog(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.list_volumes",
         lambda host, pool_name: list(volumes),
     )
-    dialog = ConfigureVmDialog(HOST, VM, current_vcpus, current_memory_mib)
+    dialog = ConfigureVmDialog(HOST, vm, current_vcpus, current_memory_mib)
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitUntil(lambda: dialog._disk_pool_combo.count() == len(pools), timeout=1000)
@@ -169,14 +170,14 @@ def test_accept_with_add_disk_calls_add_disk_with_chosen_pool_and_size(qtbot, mo
     add_disk_calls = []
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.add_disk",
-        lambda host, vm_name, *, pool, size_gib: add_disk_calls.append((vm_name, pool, size_gib)),
+        lambda host, vm_name, *, pool, size_gib, live: add_disk_calls.append((vm_name, pool, size_gib, live)),
     )
     accepted = []
     dialog.accepted.connect(lambda: accepted.append(True))
 
     dialog._on_accept()
 
-    qtbot.waitUntil(lambda: add_disk_calls == [("myvm", "default", 50)], timeout=1000)
+    qtbot.waitUntil(lambda: add_disk_calls == [("myvm", "default", 50, False)], timeout=1000)
     qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
 
 
@@ -203,13 +204,13 @@ def test_remove_disk_requires_confirmation_and_defers_to_accept(qtbot, monkeypat
     remove_calls = []
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.remove_disk",
-        lambda host, vm_name, target: remove_calls.append(target),
+        lambda host, vm_name, target, *, live: remove_calls.append((target, live)),
     )
     accepted = []
     dialog.accepted.connect(lambda: accepted.append(True))
     dialog._on_accept()
 
-    qtbot.waitUntil(lambda: remove_calls == ["hda"], timeout=1000)
+    qtbot.waitUntil(lambda: remove_calls == [("hda", False)], timeout=1000)
     qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
 
 
@@ -236,13 +237,13 @@ def test_accept_with_change_media_inserts_chosen_iso(qtbot, monkeypatch):
     change_calls = []
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.change_cdrom_media",
-        lambda host, vm_name, target, iso_path: change_calls.append((vm_name, target, iso_path)),
+        lambda host, vm_name, target, iso_path, *, live: change_calls.append((vm_name, target, iso_path, live)),
     )
     accepted = []
     dialog.accepted.connect(lambda: accepted.append(True))
     dialog._on_accept()
 
-    qtbot.waitUntil(lambda: change_calls == [("myvm", "hdb", "/pool/ubuntu.iso")], timeout=1000)
+    qtbot.waitUntil(lambda: change_calls == [("myvm", "hdb", "/pool/ubuntu.iso", False)], timeout=1000)
     qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
 
 
@@ -259,13 +260,13 @@ def test_accept_with_change_media_left_blank_ejects(qtbot, monkeypatch):
     change_calls = []
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.change_cdrom_media",
-        lambda host, vm_name, target, iso_path: change_calls.append((vm_name, target, iso_path)),
+        lambda host, vm_name, target, iso_path, *, live: change_calls.append((vm_name, target, iso_path, live)),
     )
     accepted = []
     dialog.accepted.connect(lambda: accepted.append(True))
     dialog._on_accept()
 
-    qtbot.waitUntil(lambda: change_calls == [("myvm", "hdb", None)], timeout=1000)
+    qtbot.waitUntil(lambda: change_calls == [("myvm", "hdb", None, False)], timeout=1000)
     qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
 
 
@@ -281,13 +282,15 @@ def test_accept_with_change_network_to_a_different_network(qtbot, monkeypatch):
     change_calls = []
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.change_network",
-        lambda host, vm_name, *, old_mac, new_network: change_calls.append((vm_name, old_mac, new_network)),
+        lambda host, vm_name, *, old_mac, new_network, live: change_calls.append(
+            (vm_name, old_mac, new_network, live)
+        ),
     )
     accepted = []
     dialog.accepted.connect(lambda: accepted.append(True))
     dialog._on_accept()
 
-    qtbot.waitUntil(lambda: change_calls == [("myvm", "52:54:00:aa:bb:cc", "isolated")], timeout=1000)
+    qtbot.waitUntil(lambda: change_calls == [("myvm", "52:54:00:aa:bb:cc", "isolated", False)], timeout=1000)
     qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
 
 
@@ -326,3 +329,103 @@ def test_save_error_reenables_buttons_and_shows_message(qtbot, monkeypatch):
     qtbot.waitUntil(lambda: dialog._error_label.isVisible(), timeout=1000)
     assert "virsh" in dialog._error_label.text()
     assert dialog._buttons.isEnabled() is True
+
+
+# -- Running-VM behavior (Configure… is no longer stopped-VM-only) --------
+
+
+def test_running_vm_shows_resize_applies_after_restart_note(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, vm=VM_RUNNING)
+
+    # The note is only added to the layout when running -- just confirm the
+    # dialog builds without error and the resize fields are still usable
+    # (this is the one operation that's *never* live regardless of state).
+    assert dialog._vcpus_spin.isEnabled()
+    assert dialog._memory_spin.isEnabled()
+
+
+def test_running_vm_remove_disk_passes_live_true(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, vm=VM_RUNNING)
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    dialog._disks_list.setCurrentRow(0)
+    dialog._on_remove_disk_clicked()
+
+    remove_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.remove_disk",
+        lambda host, vm_name, target, *, live: remove_calls.append((target, live)),
+    )
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: remove_calls == [("hda", True)], timeout=1000)
+
+
+def test_running_vm_change_media_passes_live_true(qtbot, monkeypatch):
+    volumes = (StorageVolume(name="ubuntu.iso", path="/pool/ubuntu.iso"),)
+    dialog = _make_dialog(qtbot, monkeypatch, vm=VM_RUNNING, disks=_ONE_DISK_ONE_CDROM, volumes=volumes)
+    qtbot.waitUntil(lambda: dialog._cdrom_box.isVisible(), timeout=1000)
+
+    dialog._change_media_checkbox.setChecked(True)
+    qtbot.waitUntil(lambda: dialog._cdrom_iso_combo.count() == 2, timeout=1000)
+    dialog._cdrom_iso_combo.setCurrentText("ubuntu.iso")
+
+    change_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.change_cdrom_media",
+        lambda host, vm_name, target, iso_path, *, live: change_calls.append((target, iso_path, live)),
+    )
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: change_calls == [("hdb", "/pool/ubuntu.iso", True)], timeout=1000)
+
+
+def test_running_vm_change_network_passes_live_true(qtbot, monkeypatch):
+    networks = (VirtualNetwork(name="default", state="active"), VirtualNetwork(name="isolated", state="active"))
+    dialog = _make_dialog(qtbot, monkeypatch, vm=VM_RUNNING, networks=networks)
+    qtbot.waitUntil(lambda: dialog._network_box.isVisible(), timeout=1000)
+
+    dialog._change_network_checkbox.setChecked(True)
+    index = dialog._network_combo.findData("isolated")
+    dialog._network_combo.setCurrentIndex(index)
+
+    change_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.change_network",
+        lambda host, vm_name, *, old_mac, new_network, live: change_calls.append((old_mac, new_network, live)),
+    )
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: change_calls == [("52:54:00:aa:bb:cc", "isolated", True)], timeout=1000)
+
+
+def test_running_vm_add_disk_passes_live_true(qtbot, monkeypatch):
+    # add_disk(live=True) forces an explicit virtio target/bus -- see its
+    # own docstring for why this is required (not optional) for reliable
+    # hot-attach: continuing an IDE boot disk's own scheme fails outright.
+    dialog = _make_dialog(qtbot, monkeypatch, vm=VM_RUNNING)
+    dialog._add_disk_checkbox.setChecked(True)
+    dialog._disk_size_spin.setValue(10)
+
+    add_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.add_disk",
+        lambda host, vm_name, *, pool, size_gib, live: add_calls.append((pool, size_gib, live)),
+    )
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: add_calls == [("default", 10, True)], timeout=1000)
+
+
+def test_stopped_vm_add_disk_passes_live_false(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch)  # default vm=VM, state="shut off"
+    dialog._add_disk_checkbox.setChecked(True)
+    dialog._disk_size_spin.setValue(10)
+
+    add_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.add_disk",
+        lambda host, vm_name, *, pool, size_gib, live: add_calls.append((pool, size_gib, live)),
+    )
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: add_calls == [("default", 10, False)], timeout=1000)

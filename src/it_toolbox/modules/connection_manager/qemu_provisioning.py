@@ -196,6 +196,22 @@ def _next_disk_target(host: QemuHost, vm_name: str) -> str:
     return f"{prefix}{chr(ord(letter) + 1)}"
 
 
+def _next_virtio_disk_target(host: QemuHost, vm_name: str) -> str:
+    """Like _next_disk_target, but always finds the next free "vd*"
+    target specifically, regardless of what bus the VM's *other* disks
+    use -- for add_disk's live=True path, where the new disk's target
+    must actually be virtio for hot-attach to succeed at all (see that
+    docstring), independent of whatever the boot disk happens to be.
+    """
+    virtio_targets = sorted(t for t in _list_disk_targets(host, vm_name) if t.startswith("vd"))
+    if not virtio_targets:
+        return "vda"
+    letter = virtio_targets[-1][-1]
+    if letter == "z":
+        raise QemuApiError(f"{vm_name} already has the maximum number of virtio disk targets.")
+    return f"vd{chr(ord(letter) + 1)}"
+
+
 def get_vm_resources(host: QemuHost, vm_name: str) -> tuple[int, int]:
     """Current (vcpus, memory_mib) read from the VM's persistent
     definition (dumpxml) -- matches what resize_vm's --config-only
@@ -214,11 +230,16 @@ def get_vm_resources(host: QemuHost, vm_name: str) -> tuple[int, int]:
 
 
 def resize_vm(host: QemuHost, vm_name: str, *, vcpus: int | None = None, memory_mib: int | None = None) -> None:
-    """--config only, deliberately -- this is for a *stopped* VM's
-    persistent configuration, never a running VM's live resources.
-    The caller (ConfigureVmDialog) only ever offers this for a
-    non-running VM in the first place; this is defense in depth, not
-    the only place that's enforced.
+    """--config only, deliberately, regardless of whether the VM happens
+    to be running -- confirmed live that a real vCPU *reduction* is
+    flatly rejected as `--live` ("failed to find appropriate
+    hotpluggable vcpus") for a normally-provisioned VM, and that
+    `--config` alone on a running VM succeeds but has zero effect on its
+    current live allocation (confirmed via `vcpucount`) -- i.e. this
+    always just stages the change for the VM's next boot. `ConfigureVmDialog`
+    now allows opening this for a running VM too (per explicit product
+    decision -- vCPU/memory just isn't a *live* operation here), labeling
+    the change accordingly rather than pretending it applies immediately.
     """
     if vcpus is not None:
         # --maximum alone doesn't change the *current* allocation --
@@ -231,15 +252,42 @@ def resize_vm(host: QemuHost, vm_name: str, *, vcpus: int | None = None, memory_
         run_virsh(host, "setmem", vm_name, memory_kib, "--config")
 
 
-def add_disk(host: QemuHost, vm_name: str, *, pool: str, size_gib: int) -> None:
+def add_disk(host: QemuHost, vm_name: str, *, pool: str, size_gib: int, live: bool = False) -> None:
+    """`--config --persistent` (no explicit `--live` flag) already
+    hot-attaches immediately on a running VM in addition to persisting,
+    *when the target ends up virtio* -- but confirmed live this is NOT
+    reliable in general: continuing whatever scheme the VM's existing
+    disks already use (_next_disk_target, the non-live default below)
+    produces another IDE target for a VM whose boot disk is IDE --
+    virt-install's own default for a plain "generic" os-variant, i.e.
+    this app's own common case -- and IDE disks flatly refuse to
+    hotplug at all ("disk bus 'ide' cannot be hotplugged"). Worse, the
+    *entire* attach-disk call then fails outright, not just its live
+    half -- nothing gets persisted either.
+
+    `live=True` avoids this by forcing the new disk onto an explicit
+    virtio target/bus (`_next_virtio_disk_target`, `--targetbus
+    virtio`) regardless of what bus the VM's *other* disks use --
+    confirmed live this succeeds even when the boot disk itself is IDE
+    (mixing an IDE boot disk with virtio data disks is a normal, valid,
+    confirmed-working QEMU/libvirt configuration). When not live, the
+    original scheme-continuing behavior is unchanged.
+    """
     existing = len(_list_disk_targets(host, vm_name))
     volume_name = f"{vm_name}-disk-{existing + 1}.qcow2"
     run_virsh(host, "vol-create-as", pool, volume_name, f"{size_gib}G", "--format", "qcow2")
     volume_path = next((v.path for v in list_volumes(host, pool) if v.name == volume_name), None)
     if volume_path is None:
         raise QemuApiError(f"Created volume {volume_name!r} but couldn't find its path afterward.")
-    target = _next_disk_target(host, vm_name)
-    run_virsh(host, "attach-disk", vm_name, volume_path, target, "--config", "--persistent")
+    if live:
+        target = _next_virtio_disk_target(host, vm_name)
+        run_virsh(
+            host, "attach-disk", vm_name, volume_path, target,
+            "--targetbus", "virtio", "--config", "--persistent",
+        )
+    else:
+        target = _next_disk_target(host, vm_name)
+        run_virsh(host, "attach-disk", vm_name, volume_path, target, "--config", "--persistent")
 
 
 def list_disks(host: QemuHost, vm_name: str) -> list[VmDisk]:
@@ -263,7 +311,7 @@ def list_disks(host: QemuHost, vm_name: str) -> list[VmDisk]:
     return disks
 
 
-def remove_disk(host: QemuHost, vm_name: str, target: str) -> None:
+def remove_disk(host: QemuHost, vm_name: str, target: str, *, live: bool = False) -> None:
     """Detaches the disk from the VM's config -- deliberately does NOT
     delete the underlying volume file (confirmed live: `detach-disk`
     alone leaves it completely untouched), the same "never destroy real
@@ -271,8 +319,24 @@ def remove_disk(host: QemuHost, vm_name: str, target: str) -> None:
     An admin who actually wants the file gone can do that separately
     (outside this module, for now -- see docs/qemu-vm-provisioning-status.md's
     Deferred section).
+
+    `live=True` uses `--live --config` instead of the stopped-VM case's
+    `--config --persistent` -- confirmed live that combining all three
+    (`--config --persistent --live`) is untested and `--persistent`'s
+    exact interaction with an explicit `--live` is unclear, whereas
+    `--live --config` together is the same, directly-confirmed-working
+    combination change_cdrom_media uses. Even so, this is genuinely
+    unreliable: `virsh` reported "Disk detached successfully"
+    immediately in a real test, yet the disk was still fully attached
+    and visible 5+ seconds later, since disk hot-*removal* (unlike
+    hot-*add*, see add_disk) needs the guest OS to actually acknowledge
+    releasing the device, which doesn't happen at all without a real,
+    cooperating guest driver. The caller (ConfigureVmDialog) surfaces
+    this as a warning rather than a guarantee -- there's no reliable way
+    to force it from here.
     """
-    run_virsh(host, "detach-disk", vm_name, target, "--config", "--persistent")
+    flags = ["--live", "--config"] if live else ["--config", "--persistent"]
+    run_virsh(host, "detach-disk", vm_name, target, *flags)
 
 
 def list_network_interfaces(host: QemuHost, vm_name: str) -> list[VmNetworkInterface]:
@@ -289,16 +353,26 @@ def list_network_interfaces(host: QemuHost, vm_name: str) -> list[VmNetworkInter
     return interfaces
 
 
-def change_network(host: QemuHost, vm_name: str, *, old_mac: str, new_network: str) -> None:
+def change_network(host: QemuHost, vm_name: str, *, old_mac: str, new_network: str, live: bool = False) -> None:
     """Confirmed live: there's no "just change the source" virsh call --
     changing a NIC's network is detach-then-attach (a new MAC gets
     assigned to the new interface; nothing preserves the old one).
+
+    `live=True` additionally passes `--live` to both calls for a running
+    VM -- but the detach half has the same real reliability caveat as
+    remove_disk's own: confirmed live that `detach-interface --live`
+    reports success immediately while the interface was still fully
+    present 2+ seconds later, since NIC hot-*removal* also needs the
+    guest OS to actually release it. The caller (ConfigureVmDialog)
+    surfaces this as a warning, not a guarantee.
     """
-    run_virsh(host, "detach-interface", vm_name, "network", "--mac", old_mac, "--config")
-    run_virsh(host, "attach-interface", vm_name, "network", new_network, "--model", "virtio", "--config")
+    detach_flags = ["--config", "--live"] if live else ["--config"]
+    attach_flags = ["--model", "virtio", "--config", "--live"] if live else ["--model", "virtio", "--config"]
+    run_virsh(host, "detach-interface", vm_name, "network", "--mac", old_mac, *detach_flags)
+    run_virsh(host, "attach-interface", vm_name, "network", new_network, *attach_flags)
 
 
-def change_cdrom_media(host: QemuHost, vm_name: str, target: str, iso_path: str | None) -> None:
+def change_cdrom_media(host: QemuHost, vm_name: str, target: str, iso_path: str | None, *, live: bool = False) -> None:
     """iso_path=None leaves the drive ejected/empty; otherwise inserts
     the given ISO, swapping out whatever (if anything) was already
     there. Confirmed live: `change-media --insert` flatly refuses if
@@ -308,11 +382,19 @@ def change_cdrom_media(host: QemuHost, vm_name: str, target: str, iso_path: str 
     empty" failure as a no-op (a drive with nothing in it is exactly
     the state an eject is trying to reach anyway), then inserts only if
     new media was actually requested.
+
+    `live=True` additionally passes `--live` to both calls for a running
+    VM -- confirmed live, unlike disk/network hot-*removal*, media
+    change is genuinely reliable this way: eject and insert both took
+    effect immediately and were reflected in `domblklist` right away,
+    no guest cooperation needed (it's a much simpler operation than a
+    full PCI device hot-unplug).
     """
+    flags = ["--config", "--live"] if live else ["--config"]
     try:
-        run_virsh(host, "change-media", vm_name, target, "--eject", "--config")
+        run_virsh(host, "change-media", vm_name, target, "--eject", *flags)
     except QemuApiError as e:
         if "doesn't have media" not in str(e):
             raise
     if iso_path is not None:
-        run_virsh(host, "change-media", vm_name, target, "--insert", iso_path, "--config")
+        run_virsh(host, "change-media", vm_name, target, "--insert", iso_path, *flags)

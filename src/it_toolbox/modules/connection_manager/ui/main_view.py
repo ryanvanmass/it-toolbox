@@ -773,14 +773,14 @@ class ConnectionManagerView(QWidget):
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
-        # Resize/add-disk only ever applies to a stopped VM -- resize_vm
-        # itself is --config-only as a second line of defense, but a
-        # running VM shouldn't even be offered the option in the first
-        # place, to avoid implying it'll take effect immediately.
-        configure_action = None
-        if vm.state != "running":
-            menu.addSeparator()
-            configure_action = menu.addAction("Configure…")
+        # Available regardless of running state -- ConfigureVmDialog itself
+        # adapts what each change actually does per operation (see its own
+        # module docstring): vCPU/memory always stages for next restart,
+        # disk-add/CD-ROM-media apply immediately either way, and disk/
+        # network removal requests immediate effect but warns it isn't
+        # guaranteed while running.
+        menu.addSeparator()
+        configure_action = menu.addAction("Configure…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if connect_action is not None and chosen is connect_action:
             self._connect_qemu(host, vm)
@@ -792,7 +792,7 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
-        elif configure_action is not None and chosen is configure_action:
+        elif chosen is configure_action:
             self._on_configure_vm_clicked(item, host, vm)
 
     def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:

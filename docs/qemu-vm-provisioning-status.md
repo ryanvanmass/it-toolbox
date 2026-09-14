@@ -592,25 +592,90 @@ mocked-only, not just checked against `virt-install --help`/man pages.
    request using the widget's current size, independent of any resize
    event having fired at all.
 
+10. **Configure… now works for a running VM too, not just a stopped
+    one** -- reported as a bug ("running VMs have no configure option"),
+    but the real answer turned out to need real, per-operation
+    verification, not just removing the menu's `vm.state != "running"`
+    check. Confirmed live, on a real running VM, what each operation
+    actually does:
+    - **vCPU/memory resize**: always `--config`-only, unconditionally --
+      confirmed live that a real vCPU *reduction* is flatly rejected as
+      a live change for a normally-provisioned VM ("failed to find
+      appropriate hotpluggable vcpus"), and that `--config` alone on a
+      running VM succeeds but has zero live effect (confirmed via
+      `vcpucount`). `ConfigureVmDialog` shows a plain note ("applies the
+      next time this VM restarts") rather than pretending otherwise.
+    - **Add disk**: hot-attaches reliably when running, but only because
+      `add_disk(live=True)` forces the new disk onto an explicit virtio
+      target/bus (`--targetbus virtio`) -- a real, load-bearing
+      correction to an earlier, incomplete finding in this same round:
+      continuing whatever scheme the VM's *existing* disks use (the
+      original, still-default behavior when not live) produces another
+      IDE target for a VM whose boot disk is IDE, which is virt-install's
+      own default for a plain `"generic"` os-variant -- i.e. this app's
+      own common case. IDE disks flatly refuse to hotplug at all, and
+      the *entire* `attach-disk` call then fails outright, not just its
+      live half (nothing gets persisted either). Forcing virtio for the
+      new disk specifically works regardless of the boot disk's own bus
+      (mixing an IDE boot disk with virtio data disks is a normal, valid,
+      confirmed-working QEMU/libvirt configuration) -- no UI caveat
+      needed, since the fix is unconditional inside `add_disk` itself.
+    - **Remove disk / change network**: `live=True` adds an explicit
+      `--live` flag, but confirmed live this is genuinely unreliable --
+      `virsh` reports success immediately (`"Disk detached
+      successfully"` / `"Interface detached successfully"`) while the
+      old device was still fully present several seconds later, since
+      hot-*removal* (unlike hot-*add*) needs the guest OS to actually
+      acknowledge releasing the device, which a real driver may or may
+      not do promptly. The *new* interface in a network change still
+      attaches immediately and reliably either way. `ConfigureVmDialog`
+      shows an explicit warning for both rather than promising immediate
+      completion.
+    - **CD-ROM media**: reliably immediate when running, via the same
+      `--live` flag added to `change_cdrom_media` -- confirmed live that
+      eject and insert both take effect right away with no guest
+      cooperation needed (a much simpler operation than a full PCI
+      device hot-unplug). No caveat needed.
+
+    The "Configure…" context-menu action is now always offered,
+    regardless of `vm.state`.
+
+    **Verification**: every finding above came from live testing against
+    real running VMs on the dev VM, in the exact sequence discovered
+    (including a real self-correction mid-round: `add_disk` was first
+    reported as "already works live, no change needed" based on a test
+    that manually forced a virtio target rather than exercising the
+    actual `_next_disk_target` scheme-continuation logic a real
+    `create_vm()`-created VM would produce -- re-tested against an
+    actual `create_vm()`-created VM with its real IDE boot disk once
+    that gap was noticed, which is what surfaced the real bug). 20 new/
+    updated tests across `test_qemu_provisioning.py` (new
+    `_next_virtio_disk_target` tests, `add_disk(live=True)`'s forced
+    virtio target/bus) and `test_configure_vm_dialog.py` (every backend
+    call site updated for its new `live` kwarg, plus new running-VM
+    tests confirming `live=True` is passed through correctly for each
+    operation).
+
 ## Deferred (explicitly out of scope for this branch)
 
 Cloud-init/unattended install, uploading local media from the
 it-toolbox machine to the libvirt host (media has to already be on the
-host, discovered via `list_volumes`), editing a *running* VM's
-resources (live hotplug — `resize_vm` is `--config`-only, by design),
-multi-NIC network editing (`ConfigureVmDialog`'s Network section only
-shows for a VM with exactly one interface — adding/removing NICs, or
-picking which one to change on a multi-NIC VM, is deferred), boot-order
-changes, snapshot support, and *automatic* OS-variant detection from the
-chosen ISO/image (the OS variant combo is a full, real, searchable list
-of every valid value — added after the first cut, see above — but
-nothing inspects the attached media to guess which one applies; the
-admin still picks it, defaulting to `generic`). Disk removal, CD-ROM
-media management, and single-NIC network changes on an existing VM —
-originally deferred here — were added in a later round (see
-`ConfigureVmDialog` above). All of the above are real, natural
-follow-ups once this core deploy/configure path has been used for a
-while — not silently half-built here.
+host, discovered via `list_volumes`), multi-NIC network editing
+(`ConfigureVmDialog`'s Network section only shows for a VM with exactly
+one interface — adding/removing NICs, or picking which one to change on
+a multi-NIC VM, is deferred), boot-order changes, snapshot support, and
+*automatic* OS-variant detection from the chosen ISO/image (the OS
+variant combo is a full, real, searchable list of every valid value —
+added after the first cut, see above — but nothing inspects the
+attached media to guess which one applies; the admin still picks it,
+defaulting to `generic`). Disk removal, CD-ROM media management, and
+single-NIC network changes on an existing VM — originally deferred here
+— were added in a later round (see `ConfigureVmDialog` above), and
+editing a *running* VM's resources (also originally deferred here) was
+added in a further round after that (see section 10 below) — all real,
+natural follow-ups picked up once this core deploy/configure path had
+actually been used for a while, not silently half-built from the
+start.
 
 ## Environment note
 

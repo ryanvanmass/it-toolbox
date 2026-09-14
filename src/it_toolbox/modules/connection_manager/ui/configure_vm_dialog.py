@@ -1,16 +1,33 @@
-""""Configure…" dialog — edits an existing, *stopped* VM: resize vCPUs/
-memory, add or remove disks, change/eject CD-ROM media (only offered
-when the VM actually has a cdrom device -- confirmed live that a VM
-deployed without an ISO chosen at create time has none at all), and
-change its network (only offered when it has exactly one network
+""""Configure…" dialog — edits an existing VM's resources: resize
+vCPUs/memory, add or remove disks, change/eject CD-ROM media (only
+offered when the VM actually has a cdrom device -- confirmed live that
+a VM deployed without an ISO chosen at create time has none at all),
+and change its network (only offered when it has exactly one network
 interface -- multiple-NIC VMs are a real, deliberately deferred case,
-see docs/qemu-vm-provisioning-status.md). Only ever opened by the
-caller (main_view.py) for a VM whose state isn't "running" -- every
-backend call this dialog makes (resize_vm, remove_disk, add_disk,
-change_cdrom_media, change_network) is persistent-config-only by
-design, this dialog being gated to stopped VMs is what keeps that safe
-in practice for the ones that don't take a --live/--config flag
-themselves.
+see docs/qemu-vm-provisioning-status.md).
+
+Openable for a running VM too (not just a stopped one) -- confirmed
+live, per operation, what that actually means:
+- vCPU/memory resize is *always* --config-only regardless of running
+  state (a real vCPU reduction is flatly rejected live for a normally-
+  provisioned VM) -- shown with a note that it applies on next restart.
+- Adding a disk hot-attaches reliably when running, but only because
+  add_disk(live=True) forces the new disk onto an explicit virtio
+  target/bus -- confirmed live that continuing whatever scheme the
+  VM's *existing* disks use (this app's own common case: a plain
+  "generic" os-variant VM gets an IDE boot disk from virt-install by
+  default) produces another IDE target, and IDE disks flatly refuse to
+  hotplug at all, failing the *entire* call outright, not just its live
+  half. No caveat needed in the UI -- the fix is unconditional inside
+  add_disk itself, not something the user needs to know about.
+- Removing a disk or changing the network *requests* an immediate
+  removal (via an extra `--live` flag) when running, but confirmed live
+  this is genuinely unreliable -- `virsh` reports success immediately
+  while the old device was still fully present several seconds later,
+  since hot-*removal* needs the guest OS to actually release it. Shown
+  with an explicit warning rather than pretending it's guaranteed.
+- Changing CD-ROM media is reliably immediate when running (confirmed
+  live) -- no caveat needed, unlike disk/network removal.
 
 All edits are batched -- nothing actually runs against the host until
 OK is pressed, same as the original vCPU/memory/add-disk-only version
@@ -55,6 +72,7 @@ class ConfigureVmDialog(QDialog):
         super().__init__(parent)
         self._host = host
         self._vm = vm
+        self._is_running = vm.state == "running"
         self._current_vcpus = current_vcpus
         self._current_memory_mib = current_memory_mib
         self._cdrom_target: str | None = None
@@ -76,6 +94,16 @@ class ConfigureVmDialog(QDialog):
         resource_form = QFormLayout()
         resource_form.addRow("vCPUs:", self._vcpus_spin)
         resource_form.addRow("Memory:", self._memory_spin)
+        if self._is_running:
+            # vCPU/memory changes are always --config-only regardless of
+            # running state (confirmed live: a real vCPU reduction is
+            # flatly rejected as a live change for a normally-provisioned
+            # VM) -- this is the one place in the dialog where "running"
+            # doesn't unlock anything extra, so say so plainly.
+            resize_note = QLabel("vCPU/memory changes apply the next time this VM restarts.")
+            resize_note.setWordWrap(True)
+            resize_note.setStyleSheet("color: gray;")
+            resource_form.addRow("", resize_note)
 
         # -- Disks --------------------------------------------------------
         self._disks_list = QListWidget()
@@ -95,6 +123,20 @@ class ConfigureVmDialog(QDialog):
         disks_layout = QVBoxLayout()
         disks_layout.addWidget(self._disks_list)
         disks_layout.addWidget(remove_disk_button)
+        if self._is_running:
+            # Adding a disk hot-attaches reliably (confirmed live), but
+            # removal is a genuinely different story -- confirmed live
+            # that virsh reports success immediately while the disk was
+            # still fully attached several seconds later, since it needs
+            # the guest OS to actually release it first.
+            remove_note = QLabel(
+                "Removing a disk while running requests immediate removal, but full "
+                "completion depends on the guest OS releasing it -- it may not actually "
+                "disappear until this VM restarts."
+            )
+            remove_note.setWordWrap(True)
+            remove_note.setStyleSheet("color: gray;")
+            disks_layout.addWidget(remove_note)
         add_disk_form = QFormLayout()
         add_disk_form.addRow("", self._add_disk_checkbox)
         add_disk_form.addRow("New disk size:", self._disk_size_spin)
@@ -137,6 +179,17 @@ class ConfigureVmDialog(QDialog):
         network_form.addRow("Current:", self._network_current_label)
         network_form.addRow("", self._change_network_checkbox)
         network_form.addRow("New network:", self._network_combo)
+        if self._is_running:
+            # Attaching the new network hot-attaches reliably (confirmed
+            # live), but detaching the old interface has the same
+            # guest-cooperation caveat as disk removal above.
+            network_note = QLabel(
+                "The new network is added immediately, but the old interface may not "
+                "fully disappear until this VM restarts."
+            )
+            network_note.setWordWrap(True)
+            network_note.setStyleSheet("color: gray;")
+            network_form.addRow("", network_note)
         self._network_box = QGroupBox("Network")
         self._network_box.setLayout(network_form)
         self._network_box.setVisible(False)
@@ -318,14 +371,22 @@ class ConfigureVmDialog(QDialog):
             if vcpus is not None or memory_mib is not None:
                 qemu_provisioning.resize_vm(self._host, self._vm.name, vcpus=vcpus, memory_mib=memory_mib)
             for target in disks_to_remove:
-                qemu_provisioning.remove_disk(self._host, self._vm.name, target)
+                qemu_provisioning.remove_disk(self._host, self._vm.name, target, live=self._is_running)
             if add_disk:
-                qemu_provisioning.add_disk(self._host, self._vm.name, pool=disk_pool, size_gib=disk_size)
+                qemu_provisioning.add_disk(
+                    self._host, self._vm.name, pool=disk_pool, size_gib=disk_size, live=self._is_running
+                )
             if change_media:
-                qemu_provisioning.change_cdrom_media(self._host, self._vm.name, self._cdrom_target, new_iso_path)
+                qemu_provisioning.change_cdrom_media(
+                    self._host, self._vm.name, self._cdrom_target, new_iso_path, live=self._is_running
+                )
             if network_actually_changes:
                 qemu_provisioning.change_network(
-                    self._host, self._vm.name, old_mac=self._network_mac, new_network=new_network
+                    self._host,
+                    self._vm.name,
+                    old_mac=self._network_mac,
+                    new_network=new_network,
+                    live=self._is_running,
                 )
 
         self._error_label.setVisible(False)
