@@ -86,6 +86,11 @@ VM_ROLE = Qt.ItemDataRole.UserRole + 8
 IS_MANUAL_ROOT_ROLE = Qt.ItemDataRole.UserRole + 9
 MANUAL_CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 10
 IS_LOADING_ROLE = Qt.ItemDataRole.UserRole + 11
+# Marks an item as deliberately hidden for a reason *other* than the
+# search filter (currently just the empty-Buckets-category case in
+# _populate_buckets) -- the filter must never override this, regardless
+# of query match, or clearing/typing a search would fight with it.
+INTRINSIC_HIDE_ROLE = Qt.ItemDataRole.UserRole + 12
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
@@ -161,12 +166,33 @@ class ConnectionManagerView(QWidget):
         top_bar.addStretch()
         top_bar.addWidget(self._sign_in_button)
 
+        # Filters the tree by substring match on item text (case-
+        # insensitive) -- mirrors Identity Management's own search box,
+        # but simpler: no separate leaf-materialization step, since
+        # every connection already exists as a real tree item once
+        # loaded (this tree was never built around "too many to list as
+        # permanent children" the way Identity Management's device/user
+        # counts can be). Only ever filters what's already in the tree --
+        # a category that hasn't been expanded yet (still showing its
+        # "Loading…" placeholder) has nothing real to search until
+        # expanded, same limitation Identity Management's own search has
+        # for data it hasn't fetched yet.
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Filter connections…")
+        self._search_box.textChanged.connect(self._on_search_text_changed)
+
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Connections"])
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
+
+        self._sidebar_widget = QWidget()
+        sidebar_layout = QVBoxLayout(self._sidebar_widget)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.addWidget(self._search_box)
+        sidebar_layout.addWidget(self._tree, 1)
 
         # A shared tabs widget (injected by ConnectionManagerModule/
         # MainWindow in the real app) is owned and wired up centrally —
@@ -219,12 +245,63 @@ class ConnectionManagerView(QWidget):
         )
 
     @property
-    def sidebar_tree(self) -> QTreeWidget:
-        """The GCP project/instance browser, hosted in the app sidebar
-        (nested under this module's entry) rather than in this view's own
-        layout — see ConnectionManagerModule.create_sidebar_widget().
+    def sidebar_widget(self) -> QWidget:
+        """The filter box + GCP/QEMU/manual connection browser tree,
+        hosted in the app sidebar (nested under this module's entry)
+        rather than in this view's own layout — see
+        ConnectionManagerModule.create_sidebar_widget().
         """
-        return self._tree
+        return self._sidebar_widget
+
+    # -- Filtering the tree --------------------------------------------------
+
+    def _on_search_text_changed(self, _text: str) -> None:
+        self._apply_tree_filter()
+
+    def _apply_tree_filter(self) -> None:
+        query = self._search_box.text().strip().lower()
+        for i in range(self._tree.topLevelItemCount()):
+            self._filter_tree_item(self._tree.topLevelItem(i), query)
+
+    def _filter_tree_item(self, item: QTreeWidgetItem, query: str) -> bool:
+        """Recursively hides items that don't match `query` (case-
+        insensitive substring; an empty query matches everything).
+
+        A container (project/host) stays visible if any descendant
+        matches even when its own name doesn't -- finding a matching VM
+        should surface the host it's under, not require typing the
+        host's own name too. A container whose *own* name matches shows
+        its entire subtree unconditionally -- searching "QEMU" means
+        "show me everything under QEMU", not just entries also
+        (redundantly) named "QEMU". Returns whether `item` ended up
+        visible, so a parent call can tell whether to stay visible too.
+
+        INTRINSIC_HIDE_ROLE (currently just an empty Buckets category)
+        always wins over a search match -- there's nothing to show
+        either way, and the search filter has no business overriding a
+        hide decision it didn't make.
+        """
+        if item.data(0, INTRINSIC_HIDE_ROLE):
+            item.setHidden(True)
+            return False
+        if not query or query in item.text(0).lower():
+            self._show_subtree(item)
+            return True
+        child_visible = False
+        for i in range(item.childCount()):
+            if self._filter_tree_item(item.child(i), query):
+                child_visible = True
+        item.setHidden(not child_visible)
+        return child_visible
+
+    @staticmethod
+    def _show_subtree(item: QTreeWidgetItem) -> None:
+        if item.data(0, INTRINSIC_HIDE_ROLE):
+            item.setHidden(True)
+            return
+        item.setHidden(False)
+        for i in range(item.childCount()):
+            ConnectionManagerView._show_subtree(item.child(i))
 
     # -- Sign in / out -----------------------------------------------------
 
@@ -321,8 +398,9 @@ class ConnectionManagerView(QWidget):
                 # rather than waiting for that expand to even start fetching.
                 self._load_category(category_item, project.project_id, category)
         gcp_category.setExpanded(True)
-        self._populate_qemu_hosts()
-        self._populate_manual_connections()
+        self._apply_tree_filter()  # covers the GCP items just added above
+        self._populate_qemu_hosts()  # each of these two reapplies the
+        self._populate_manual_connections()  # filter again internally
 
     def _on_select_projects_clicked(self) -> None:
         # Re-fetch rather than reusing self._all_projects (populated once at
@@ -431,6 +509,11 @@ class ConnectionManagerView(QWidget):
     def _on_category_loaded(self, item: QTreeWidgetItem, populate, data) -> None:
         item.setData(0, IS_LOADING_ROLE, False)
         populate(item, data)
+        # Covers both _populate_instances and _populate_buckets in one
+        # place -- newly-arrived children (first expand, a periodic
+        # refresh, or "Refresh") respect an already-typed filter instead
+        # of always showing up unfiltered until the next keystroke.
+        self._apply_tree_filter()
 
     def _on_category_load_failed(self, item: QTreeWidgetItem, error: Exception) -> None:
         item.setData(0, IS_LOADING_ROLE, False)
@@ -472,6 +555,10 @@ class ConnectionManagerView(QWidget):
         # Stays hidden/shown correctly across periodic/manual refreshes
         # since setHidden() re-evaluates from the latest result every time
         # (buckets added later un-hide it; all deleted re-hides it).
+        # INTRINSIC_HIDE_ROLE marks this as *not* the search filter's
+        # business -- _filter_tree_item/_show_subtree must never override
+        # it, or clearing/typing a search would fight with it.
+        category_item.setData(0, INTRINSIC_HIDE_ROLE, not buckets)
         category_item.setHidden(not buckets)
         category_item.takeChildren()
         for bucket in buckets:
@@ -483,6 +570,7 @@ class ConnectionManagerView(QWidget):
         # Always surface errors — never leave a category hidden (from a
         # prior empty-but-successful load) while silently swallowing a
         # real failure on a later refresh.
+        category_item.setData(0, INTRINSIC_HIDE_ROLE, False)
         category_item.setHidden(False)
         category_item.takeChildren()
         category_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
@@ -553,6 +641,7 @@ class ConnectionManagerView(QWidget):
             host_item.setData(0, CHILDREN_LOADED_ROLE, False)
             host_item.addChild(QTreeWidgetItem(["Loading…"]))
             self._qemu_root_item.addChild(host_item)
+        self._apply_tree_filter()
 
     def _find_qemu_host_item(self, host: QemuHost) -> QTreeWidgetItem | None:
         if self._qemu_root_item is None:
@@ -576,6 +665,7 @@ class ConnectionManagerView(QWidget):
         host_item.takeChildren()
         if not vms:
             host_item.addChild(QTreeWidgetItem(["(no VMs)"]))
+            self._apply_tree_filter()
             return
         for vm in vms:
             item = QTreeWidgetItem([vm.name])
@@ -583,6 +673,7 @@ class ConnectionManagerView(QWidget):
             item.setData(0, VM_ROLE, vm)
             item.setToolTip(0, f"State: {vm.state}")
             host_item.addChild(item)
+        self._apply_tree_filter()
 
     def _on_manage_hosts_clicked(self) -> None:
         dialog = ManageHostsDialog(self._load_qemu_hosts(), parent=self)
@@ -641,6 +732,7 @@ class ConnectionManagerView(QWidget):
             item.setData(0, MANUAL_CONNECTION_ROLE, connection)
             item.setToolTip(0, f"{connection.kind.upper()} {connection.host}:{connection.port}")
             self._manual_root_item.addChild(item)
+        self._apply_tree_filter()
 
     def _on_manage_manual_connections_clicked(self) -> None:
         dialog = ManageManualConnectionsDialog(self._load_manual_connections(), parent=self)
