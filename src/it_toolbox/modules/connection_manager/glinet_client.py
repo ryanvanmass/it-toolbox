@@ -135,7 +135,7 @@ def get_overview(host: GlinetHost, password: str) -> GlinetOverview:
             return _find_by_name(service_list, name).get("status") == 1
 
         return GlinetOverview(
-            uptime=str(system.get("uptime", "")),
+            uptime=_format_uptime(system.get("uptime")),
             lan_ip=system.get("lan_ip", ""),
             memory_used_pct=_percent_used(system.get("memory_total"), system.get("memory_free")),
             cpu_temp=_as_float((system.get("cpu") or {}).get("temperature")),
@@ -180,6 +180,30 @@ def _as_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _format_uptime(value) -> str:
+    """system.get_status()'s uptime is a raw seconds count (confirmed
+    against a real router: fractional, e.g. 862.15 -- not the whole
+    integer the API's own bundled example shows), not a display string
+    -- render it as a human-readable duration instead of the bare
+    number."""
+    try:
+        total_seconds = int(float(value))
+    except (TypeError, ValueError):
+        return ""
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if days or hours:
+        parts.append(f"{hours}h")
+    if days or hours or minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
 
 
 def list_clients(host: GlinetHost, password: str) -> list[GlinetClientInfo]:

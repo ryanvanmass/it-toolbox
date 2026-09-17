@@ -164,7 +164,7 @@ def test_get_overview_parses_status_response(monkeypatch):
 
     overview = glinet_client.get_overview(HOST, "secret")
 
-    assert overview.uptime == "111"
+    assert overview.uptime == "1m 51s"
     assert overview.lan_ip == "192.168.8.1"
     assert overview.cpu_temp == 45.5
     assert overview.memory_used_pct == 75.0
@@ -192,6 +192,20 @@ def test_get_overview_handles_client_as_a_bare_dict_too(monkeypatch):
 
     assert overview.wireless_client_count == 2
     assert overview.cable_client_count == 0
+
+
+@pytest.mark.parametrize(("seconds", "expected"), [
+    (0, "0s"),
+    (45, "45s"),
+    (111, "1m 51s"),
+    (862.15, "14m 22s"),  # the fractional-seconds shape seen from a real router
+    (3661, "1h 1m 1s"),
+    (90000, "1d 1h 0m 0s"),
+    (None, ""),
+    ("garbage", ""),
+])
+def test_format_uptime(seconds, expected):
+    assert glinet_client._format_uptime(seconds) == expected
 
 
 def test_list_clients_parses_and_sorts(monkeypatch):
