@@ -85,9 +85,10 @@ class GlinetClientInfo:
 class GlinetWifiRadio:
     device: str  # e.g. "radio0" -- required for device-level set_config params
     iface_name: str  # e.g. "default_radio0" -- required for iface-level set_config params
-    band: str  # e.g. "2.4G" / "5G"
+    band: str  # e.g. "2G" / "5G"
     ssid: str
     enabled: bool
+    guest: bool = False
 
 
 @dataclass(frozen=True)

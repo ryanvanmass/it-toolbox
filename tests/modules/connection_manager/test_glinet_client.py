@@ -239,7 +239,10 @@ def test_get_wifi_config_parses_bands_and_ifaces(monkeypatch):
                 # same value.
                 "band": "2.4G",
                 "hwmode": "11ac/ax",
-                "ifaces": [{"name": "default_radio0", "ssid": "MyWifi", "enabled": True}],
+                "ifaces": [
+                    {"name": "default_radio0", "ssid": "MyWifi", "enabled": True, "guest": False},
+                    {"name": "guest_radio0", "ssid": "MyWifi-Guest", "enabled": True, "guest": True},
+                ],
             }
         ]
     }
@@ -247,12 +250,14 @@ def test_get_wifi_config_parses_bands_and_ifaces(monkeypatch):
 
     radios = glinet_client.get_wifi_config(HOST, "secret")
 
-    assert len(radios) == 1
+    assert len(radios) == 2
     assert radios[0].device == "radio0"
     assert radios[0].iface_name == "default_radio0"
     assert radios[0].band == "2.4G"
     assert radios[0].ssid == "MyWifi"
     assert radios[0].enabled is True
+    assert radios[0].guest is False
+    assert radios[1].guest is True
 
 
 def test_set_wifi_config_sends_expected_params(monkeypatch):

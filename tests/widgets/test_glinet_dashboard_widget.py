@@ -90,6 +90,28 @@ def test_wifi_tab_builds_a_group_per_radio(qtbot, monkeypatch):
     assert dashboard._wifi_layout.count() == 2  # one QGroupBox + the trailing stretch
 
 
+def test_wifi_tab_labels_main_and_guest_networks_distinctly(qtbot, monkeypatch):
+    # Regression test: a radio's main and guest networks otherwise render
+    # as two identically-titled group boxes (same device+band) --
+    # confirmed live against a real router where both showed
+    # "mt798111 (2G)" with nothing to tell them apart but the SSID text.
+    radios = [
+        GlinetWifiRadio(device="radio0", iface_name="wifi2g", band="2G",
+                          ssid="MyWifi", enabled=True, guest=False),
+        GlinetWifiRadio(device="radio0", iface_name="guest2g", band="2G",
+                          ssid="MyWifi-Guest", enabled=True, guest=True),
+    ]
+    dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
+    qtbot.waitUntil(lambda: dashboard._wifi_layout.count() > 2, timeout=2000)
+
+    titles = [
+        dashboard._wifi_layout.itemAt(i).widget().title()
+        for i in range(dashboard._wifi_layout.count())
+        if dashboard._wifi_layout.itemAt(i).widget() is not None
+    ]
+    assert titles == ["radio0 (2G) — Main", "radio0 (2G) — Guest"]
+
+
 def test_wifi_save_calls_set_wifi_config_with_expected_params(qtbot, monkeypatch):
     import it_toolbox.widgets.glinet_dashboard_widget as module
 

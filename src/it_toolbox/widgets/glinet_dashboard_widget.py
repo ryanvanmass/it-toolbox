@@ -175,7 +175,12 @@ class GlinetDashboardWidget(QWidget):
         self._wifi_layout.addStretch(1)
 
     def _build_radio_group(self, radio: GlinetWifiRadio) -> QGroupBox:
-        box = QGroupBox(f"{radio.device} ({radio.band})" if radio.band else radio.device)
+        # A radio's main and guest networks otherwise render as two
+        # identically-titled boxes (same device+band), distinguishable
+        # only by reading the SSID field itself -- label which is which.
+        label = f"{radio.device} ({radio.band})" if radio.band else radio.device
+        label += " — Guest" if radio.guest else " — Main"
+        box = QGroupBox(label)
         form = QFormLayout()
 
         ssid_edit = QLineEdit(radio.ssid)

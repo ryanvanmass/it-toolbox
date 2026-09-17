@@ -124,6 +124,7 @@ def get_overview(host: GlinetHost, password: str) -> GlinetOverview:
                 band=radio.get("band", ""),
                 ssid=radio.get("ssid", ""),
                 enabled=bool(radio.get("up", False)),
+                guest=bool(radio.get("guest", False)),
             )
             for radio in wifi_list
         )
@@ -250,6 +251,7 @@ def get_wifi_config(host: GlinetHost, password: str) -> list[GlinetWifiRadio]:
                         band=band_config.get("band", ""),
                         ssid=iface.get("ssid", ""),
                         enabled=bool(iface.get("enabled", False)),
+                        guest=bool(iface.get("guest", False)),
                     )
                 )
         return radios
