@@ -40,8 +40,9 @@ pip install python-glinet
 - **WiFi** — view and edit SSID/password/enabled per radio/interface via
   `wifi.get_config()`/`wifi.set_config()`.
 - **VPN** — **read-only** list of configured tunnels (name, type,
-  enabled, up/down) via `list_vpn_tunnels()`. Adding, editing, or
-  toggling VPN tunnels is out of scope for v1.
+  enabled/up status, routing criteria from/to/via, kill switch) via
+  `list_vpn_tunnels()`. Adding, editing, or toggling VPN tunnels is out
+  of scope for v1.
 - **Reboot** — immediate reboot with a confirmation prompt.
 
 Not in scope for v1: VPN tunnel configuration, full WiFi parameter

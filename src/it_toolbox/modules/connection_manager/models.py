@@ -115,6 +115,13 @@ class GlinetVpnTunnel:
     type: str  # "wireguard" or "openvpn"
     enabled: bool  # the tunnel/policy's own on/off toggle
     up: bool  # actually connected right now
+    # Routing criteria (from vpn-client's separate get_tunnel() policy
+    # call) -- empty strings/False for a tunnel from the classic
+    # single-tunnel fallback endpoints, which expose no such policy.
+    from_summary: str = ""
+    to_summary: str = ""
+    via_summary: str = ""
+    killswitch: bool = False
 
 
 @dataclass(frozen=True)

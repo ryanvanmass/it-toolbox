@@ -148,33 +148,54 @@ def list_vpn_tunnels(host: GlinetHost, password: str) -> list[GlinetVpnTunnel]:
     GL.iNet's newer firmware has a "VPN Policy" feature: any number of
     independently named tunnels (e.g. "Bonkcloud"), each wrapping a
     WireGuard/OpenVPN client or server config, each with its own
-    on/off toggle. This lives behind a "vpn-client" (hyphenated) RPC
-    module confirmed via a real router's own web UI network capture --
-    it isn't in pyglinet's bundled api_description.json at all, so
-    there's no api_client.vpn_client wrapper for it; reaching the
-    session's own request() through api_client's private _session
-    attribute is the only way to call it through this library.
+    on/off toggle and its own routing criteria (from/to/via/kill
+    switch). This lives behind a "vpn-client" (hyphenated) RPC module
+    confirmed via a real router's own web UI network capture -- it
+    isn't in pyglinet's bundled api_description.json at all, so there's
+    no api_client.vpn_client wrapper for it; reaching the session's own
+    request() through api_client's private _session attribute is the
+    only way to call it through this library. Two of its methods are
+    combined here: get_tunnel() (the policy: name/enabled/from/to/via/
+    killswitch) and get_status() (live connection status + peer_name),
+    matched up by their shared tunnel_id.
 
     Falls back to the classic single-tunnel wg_client/wg_server/
     ovpn_client/ovpn_server endpoints (each surfaced as one fixed-name
-    tunnel) for a router without this newer module -- get_status() for
-    the whole "vpn-client" module raises outright (confirmed live) when
-    it's absent, not just for one missing tunnel type.
+    tunnel, with no routing-criteria info) for a router without this
+    newer module -- get_tunnel()/get_status() for the whole "vpn-client"
+    module raise outright (confirmed live) when it's absent, not just
+    for one missing tunnel type.
     """
 
     def fetch(api_client) -> list[GlinetVpnTunnel]:
         try:
-            result = api_client._session.request(
+            tunnel_result = api_client._session.request(
+                "call", ["vpn-client", "get_tunnel", {}]
+            ).result
+            status_result = api_client._session.request(
                 "call", ["vpn-client", "get_status", {}]
             ).result
+            status_by_tunnel_id = {
+                entry.get("tunnel_id"): entry for entry in status_result.get("status_list") or []
+            }
             return [
                 GlinetVpnTunnel(
-                    name=entry.get("name", ""),
-                    type=entry.get("type", ""),
-                    enabled=bool(entry.get("enabled", False)),
-                    up=entry.get("status") == 1,
+                    name=policy.get("name", ""),
+                    type=(policy.get("via") or {}).get("type", ""),
+                    enabled=bool(policy.get("enabled", False)),
+                    up=status_by_tunnel_id.get(policy.get("tunnel_id"), {}).get("status") == 1,
+                    from_summary=_format_vpn_from(policy.get("from") or {}),
+                    to_summary=_format_vpn_to(policy.get("to") or {}),
+                    via_summary=_vpn_via_summary(
+                        api_client, policy.get("via") or {},
+                        status_by_tunnel_id.get(policy.get("tunnel_id"), {}),
+                    ),
+                    killswitch=bool(policy.get("killswitch", False)),
                 )
-                for entry in result.get("status_list") or []
+                # "tunnels" only -- "default_tunnels" is the router's own
+                # built-in fallback policy (e.g. "last sort default
+                # policy"), not a real named VPN tunnel an admin created.
+                for policy in tunnel_result.get("tunnels") or []
             ]
         except Exception:  # noqa: BLE001 - fall back below; not every router has this module
             pass
@@ -194,6 +215,48 @@ def list_vpn_tunnels(host: GlinetHost, password: str) -> list[GlinetVpnTunnel]:
         ]
 
     return _call(host, password, fetch)
+
+
+def _format_vpn_from(from_obj: dict) -> str:
+    """Matches the router's own web UI wording ("All Clients" / "1
+    Connection Type") for a policy's traffic-source criteria."""
+    if from_obj.get("type") == "interface":
+        count = len(from_obj.get("interface_list") or [])
+        return f"{count} connection type" + ("" if count == 1 else "s")
+    return "All clients"
+
+
+def _format_vpn_to(to_obj: dict) -> str:
+    """Matches the router's own web UI wording ("All targets" / "3
+    Addresses") for a policy's traffic-destination criteria."""
+    if to_obj.get("type") == "domain":
+        count = len([line for line in (to_obj.get("domain_list") or "").splitlines() if line.strip()])
+        return f"{count} address" + ("" if count == 1 else "es")
+    return "All targets"
+
+
+def _vpn_via_summary(api_client, via: dict, status_entry: dict) -> str:
+    """"<group name> / <peer name>", matching the router's own web UI
+    (e.g. "Bonkcloud / WireGuard-Server-GLINet") -- peer_name comes from
+    the matched get_status() entry; the group name needs its own lookup
+    (wg_client/ovpn_client.get_group_list(), by the policy's group_id),
+    which is best-effort: an older/different firmware might not expose
+    it the same way, in which case the peer name alone is still useful.
+    """
+    peer_name = status_entry.get("peer_name", "")
+    group_id = via.get("group_id")
+    if group_id is None:
+        return peer_name
+    module_name = "wg_client" if via.get("type") == "wireguard" else "ovpn_client"
+    try:
+        groups = getattr(api_client, module_name).get_group_list().get("groups") or []
+        group = next((g for g in groups if g.get("group_id") == group_id), None)
+        group_name = group.get("group_name") if group else None
+    except Exception:  # noqa: BLE001 - the peer name alone is still a useful fallback
+        group_name = None
+    if group_name and peer_name:
+        return f"{group_name} / {peer_name}"
+    return group_name or peer_name
 
 
 def _classic_vpn_status_code(api_client, module_name: str) -> int | None:

@@ -63,18 +63,25 @@ def test_overview_tab_populates_from_get_overview(qtbot, monkeypatch):
 
 def test_vpn_tab_populates_from_list_vpn_tunnels(qtbot, monkeypatch):
     tunnels = [
-        GlinetVpnTunnel(name="Bonkcloud", type="wireguard", enabled=True, up=True),
-        GlinetVpnTunnel(name="Guest Wifi", type="wireguard", enabled=True, up=True),
+        GlinetVpnTunnel(name="Bonkcloud", type="wireguard", enabled=True, up=True,
+                         from_summary="1 connection type", to_summary="3 addresses",
+                         via_summary="Bonkcloud / WireGuard-Server-GLINet", killswitch=True),
+        GlinetVpnTunnel(name="Guest Wifi", type="wireguard", enabled=True, up=True,
+                         from_summary="All clients", to_summary="All targets",
+                         via_summary="Bonkcloud / Privacy-VPN-Client-1", killswitch=True),
         GlinetVpnTunnel(name="Backup Tunnel", type="openvpn", enabled=False, up=False),
     ]
     dashboard = _make_dashboard(qtbot, monkeypatch, vpn_tunnels=tunnels)
     qtbot.waitUntil(lambda: dashboard._vpn_table.rowCount() == 3, timeout=2000)
 
-    assert dashboard._vpn_table.item(0, 0).text() == "Bonkcloud"
+    assert dashboard._vpn_table.item(0, 0).text() == "Bonkcloud (Kill Switch)"
     assert dashboard._vpn_table.item(0, 1).text() == "wireguard"
-    assert dashboard._vpn_table.item(0, 2).text() == "Up"
+    assert dashboard._vpn_table.item(0, 2).text() == "1 connection type"
+    assert dashboard._vpn_table.item(0, 3).text() == "3 addresses"
+    assert dashboard._vpn_table.item(0, 4).text() == "Bonkcloud / WireGuard-Server-GLINet"
+    assert dashboard._vpn_table.item(0, 5).text() == "Up"
     assert dashboard._vpn_table.item(2, 0).text() == "Backup Tunnel"
-    assert dashboard._vpn_table.item(2, 2).text() == "Disabled"
+    assert dashboard._vpn_table.item(2, 5).text() == "Disabled"
 
 
 def test_vpn_tab_shows_enabled_but_not_connected(qtbot, monkeypatch):
@@ -82,7 +89,7 @@ def test_vpn_tab_shows_enabled_but_not_connected(qtbot, monkeypatch):
     dashboard = _make_dashboard(qtbot, monkeypatch, vpn_tunnels=tunnels)
     qtbot.waitUntil(lambda: dashboard._vpn_table.rowCount() == 1, timeout=2000)
 
-    assert dashboard._vpn_table.item(0, 2).text() == "Enabled"
+    assert dashboard._vpn_table.item(0, 5).text() == "Enabled"
 
 
 def test_clients_tab_populates_from_list_clients(qtbot, monkeypatch):

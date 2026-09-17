@@ -31,21 +31,28 @@ class _FakeSession:
     that has no api_client.* wrapper at all (see glinet_client.py's
     list_vpn_tunnels docstring)."""
 
-    def __init__(self, vpn_client_result=None, vpn_client_raises=None):
-        self._vpn_client_result = vpn_client_result
+    def __init__(self, vpn_client_tunnel_result=None, vpn_client_status_result=None,
+                 vpn_client_raises=None):
+        self._results = {
+            "get_tunnel": vpn_client_tunnel_result or {},
+            "get_status": vpn_client_status_result or {},
+        }
         self._vpn_client_raises = vpn_client_raises
 
     def request(self, method, params):
         if self._vpn_client_raises is not None:
             raise self._vpn_client_raises
-        return _FakeApiGroup(result=self._vpn_client_result or {})
+        _module, sub_method, _args = params
+        return _FakeApiGroup(result=self._results.get(sub_method, {}))
 
 
 class _FakeApiClient:
     def __init__(self, status=None, clients=None, wifi_config=None, set_config_calls=None,
                  reboot_calls=None, wg_client_status=None, wg_server_status=None,
                  ovpn_client_status=None, ovpn_server_status=None,
-                 vpn_client_result=None, vpn_client_raises=None):
+                 wg_client_groups=None, ovpn_client_groups=None,
+                 vpn_client_tunnel_result=None, vpn_client_status_result=None,
+                 vpn_client_raises=None):
         self.system = _FakeApiGroup(
             get_status=lambda: status or {},
             reboot=lambda params=None: (reboot_calls if reboot_calls is not None else []).append(
@@ -59,11 +66,18 @@ class _FakeApiClient:
                 set_config_calls if set_config_calls is not None else []
             ).append(params),
         )
-        self.wg_client = _FakeApiGroup(get_status=_status_or_raise(wg_client_status))
+        self.wg_client = _FakeApiGroup(
+            get_status=_status_or_raise(wg_client_status),
+            get_group_list=lambda: {"groups": wg_client_groups or []},
+        )
         self.wg_server = _FakeApiGroup(get_status=_status_or_raise(wg_server_status))
-        self.ovpn_client = _FakeApiGroup(get_status=_status_or_raise(ovpn_client_status))
+        self.ovpn_client = _FakeApiGroup(
+            get_status=_status_or_raise(ovpn_client_status),
+            get_group_list=lambda: {"groups": ovpn_client_groups or []},
+        )
         self.ovpn_server = _FakeApiGroup(get_status=_status_or_raise(ovpn_server_status))
-        self._session = _FakeSession(vpn_client_result, vpn_client_raises)
+        self._session = _FakeSession(vpn_client_tunnel_result, vpn_client_status_result,
+                                      vpn_client_raises)
 
 
 class _FakeGlInet:
@@ -213,29 +227,96 @@ def test_list_vpn_tunnels_uses_the_vpn_client_module_when_available(monkeypatch)
     # newer multi-tunnel "VPN Policy" feature and isn't in pyglinet's
     # bundled api_description.json at all, so this goes through
     # api_client._session.request() directly rather than a normal
-    # api_client.<module>.<method>() wrapper call.
-    vpn_client_result = {
+    # api_client.<module>.<method>() wrapper call. get_tunnel() (the
+    # policy: name/enabled/from/to/via/killswitch) and get_status()
+    # (live status + peer_name) are merged by their shared tunnel_id.
+    tunnel_result = {
+        "tunnels": [
+            {
+                "enabled": True,
+                "to": {"manual": True, "type": "domain",
+                       "domain_list": "192.168.2.0/24\n172.16.42.0/24\n192.168.50.0/24"},
+                "id": "cfg0492bd",
+                "via": {"type": "wireguard", "peer_id": 2001, "group_id": 7462, "via": "wgclient1"},
+                "name": "Bonkcloud",
+                "killswitch": True,
+                "from": {"type": "interface", "interface_list": ["lan"]},
+                "tunnel_id": 10,
+            },
+            {
+                "enabled": True,
+                "to": {"manual": True, "type": "default", "domain_list": ""},
+                "id": "cfg0692bd",
+                "via": {"type": "wireguard", "peer_id": 2006, "group_id": 7462, "via": "wgclient2"},
+                "name": "Guest Wifi",
+                "killswitch": True,
+                "from": {"type": "default"},
+                "tunnel_id": 2159,
+            },
+        ],
+        "default_tunnels": [
+            {"enabled": True, "to": {"type": "default"}, "name": "last sort default policy",
+             "killswitch": False, "from": {"type": "default"}, "tunnel_id": 100},
+        ],
+        "global_enabled": False,
+    }
+    status_result = {
         "status_list": [
-            {"enabled": True, "type": "wireguard", "name": "Bonkcloud", "status": 1},
-            {"enabled": True, "type": "wireguard", "name": "Guest Wifi", "status": 1},
-            {"enabled": False, "type": "openvpn", "name": "Backup Tunnel", "status": 0},
+            {"enabled": True, "type": "wireguard", "peer_name": "WireGuard-Server-GLINet",
+             "group_id": 7462, "tunnel_id": 10, "status": 1, "name": "Bonkcloud"},
+            {"enabled": True, "type": "wireguard", "peer_name": "Privacy-VPN-Client-1",
+             "group_id": 7462, "tunnel_id": 2159, "status": 0, "name": "Guest Wifi"},
         ],
         "mode": 1,
     }
-    _install_fake_glinet(
-        monkeypatch, api_client=_FakeApiClient(vpn_client_result=vpn_client_result)
-    )
+    wg_client_groups = [{"group_id": 7462, "group_name": "Bonkcloud", "peer_count": 2}]
+    _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(
+        vpn_client_tunnel_result=tunnel_result,
+        vpn_client_status_result=status_result,
+        wg_client_groups=wg_client_groups,
+    ))
 
     tunnels = glinet_client.list_vpn_tunnels(HOST, "secret")
 
-    assert len(tunnels) == 3
-    assert tunnels[0].name == "Bonkcloud"
-    assert tunnels[0].type == "wireguard"
-    assert tunnels[0].enabled is True
-    assert tunnels[0].up is True
-    assert tunnels[2].name == "Backup Tunnel"
-    assert tunnels[2].enabled is False
-    assert tunnels[2].up is False
+    # "default_tunnels" isn't a real admin-created tunnel -- excluded.
+    assert len(tunnels) == 2
+
+    bonkcloud = tunnels[0]
+    assert bonkcloud.name == "Bonkcloud"
+    assert bonkcloud.type == "wireguard"
+    assert bonkcloud.enabled is True
+    assert bonkcloud.up is True
+    assert bonkcloud.from_summary == "1 connection type"
+    assert bonkcloud.to_summary == "3 addresses"
+    assert bonkcloud.via_summary == "Bonkcloud / WireGuard-Server-GLINet"
+    assert bonkcloud.killswitch is True
+
+    guest_wifi = tunnels[1]
+    assert guest_wifi.from_summary == "All clients"
+    assert guest_wifi.to_summary == "All targets"
+    assert guest_wifi.via_summary == "Bonkcloud / Privacy-VPN-Client-1"
+    assert guest_wifi.up is False  # status: 0 in this fixture
+
+
+def test_vpn_via_summary_falls_back_to_peer_name_when_group_lookup_fails(monkeypatch):
+    tunnel_result = {"tunnels": [{
+        "enabled": True, "to": {"type": "default"}, "id": "cfg1", "name": "Solo",
+        "via": {"type": "wireguard", "group_id": 999}, "killswitch": False,
+        "from": {"type": "default"}, "tunnel_id": 1,
+    }]}
+    status_result = {"status_list": [
+        {"peer_name": "SomePeer", "tunnel_id": 1, "status": 1},
+    ]}
+    # No matching group in wg_client_groups -- group lookup finds nothing.
+    _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(
+        vpn_client_tunnel_result=tunnel_result,
+        vpn_client_status_result=status_result,
+        wg_client_groups=[{"group_id": 111, "group_name": "Other"}],
+    ))
+
+    tunnels = glinet_client.list_vpn_tunnels(HOST, "secret")
+
+    assert tunnels[0].via_summary == "SomePeer"
 
 
 def test_list_vpn_tunnels_falls_back_to_classic_endpoints(monkeypatch):

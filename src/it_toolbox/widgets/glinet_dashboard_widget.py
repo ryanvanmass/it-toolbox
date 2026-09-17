@@ -246,8 +246,10 @@ class GlinetDashboardWidget(QWidget):
 
     def _build_vpn_tab(self) -> QWidget:
         widget = QWidget()
-        self._vpn_table = QTableWidget(0, 3)
-        self._vpn_table.setHorizontalHeaderLabels(["Name", "Type", "Status"])
+        self._vpn_table = QTableWidget(0, 6)
+        self._vpn_table.setHorizontalHeaderLabels(
+            ["Name", "Type", "From", "To", "Via", "Status"]
+        )
         self._vpn_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._vpn_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
@@ -279,9 +281,13 @@ class GlinetDashboardWidget(QWidget):
         self._vpn_table.setRowCount(len(tunnels))
         for row, tunnel in enumerate(tunnels):
             status_text = "Up" if tunnel.up else ("Enabled" if tunnel.enabled else "Disabled")
-            self._vpn_table.setItem(row, 0, QTableWidgetItem(tunnel.name))
+            name_text = f"{tunnel.name} (Kill Switch)" if tunnel.killswitch else tunnel.name
+            self._vpn_table.setItem(row, 0, QTableWidgetItem(name_text))
             self._vpn_table.setItem(row, 1, QTableWidgetItem(tunnel.type))
-            self._vpn_table.setItem(row, 2, QTableWidgetItem(status_text))
+            self._vpn_table.setItem(row, 2, QTableWidgetItem(tunnel.from_summary))
+            self._vpn_table.setItem(row, 3, QTableWidgetItem(tunnel.to_summary))
+            self._vpn_table.setItem(row, 4, QTableWidgetItem(tunnel.via_summary))
+            self._vpn_table.setItem(row, 5, QTableWidgetItem(status_text))
 
     # -- Reboot -----------------------------------------------------------
 
