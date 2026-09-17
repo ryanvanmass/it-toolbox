@@ -109,7 +109,7 @@ def test_wifi_tab_labels_main_and_guest_networks_distinctly(qtbot, monkeypatch):
         for i in range(dashboard._wifi_layout.count())
         if dashboard._wifi_layout.itemAt(i).widget() is not None
     ]
-    assert titles == ["radio0 (2G) — Main", "radio0 (2G) — Guest"]
+    assert titles == ["Main — radio0 (2.4G)", "Guest — radio0 (2.4G)"]
 
 
 def test_wifi_save_calls_set_wifi_config_with_expected_params(qtbot, monkeypatch):

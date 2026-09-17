@@ -177,10 +177,12 @@ class GlinetDashboardWidget(QWidget):
     def _build_radio_group(self, radio: GlinetWifiRadio) -> QGroupBox:
         # A radio's main and guest networks otherwise render as two
         # identically-titled boxes (same device+band), distinguishable
-        # only by reading the SSID field itself -- label which is which.
-        label = f"{radio.device} ({radio.band})" if radio.band else radio.device
-        label += " — Guest" if radio.guest else " — Main"
-        box = QGroupBox(label)
+        # only by reading the SSID field itself -- label which is which,
+        # leading with that distinction rather than burying it at the end.
+        network_label = "Guest" if radio.guest else "Main"
+        band_label = "2.4G" if radio.band == "2G" else radio.band
+        device_label = f"{radio.device} ({band_label})" if band_label else radio.device
+        box = QGroupBox(f"{network_label} — {device_label}")
         form = QFormLayout()
 
         ssid_edit = QLineEdit(radio.ssid)
