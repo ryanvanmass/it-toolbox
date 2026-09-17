@@ -80,6 +80,24 @@ def list_projects(credentials: Credentials) -> list[GcpProject]:
     return sorted(projects, key=lambda p: p.display_name.lower())
 
 
+def _os_hint_from_disks(disks: list[dict]) -> str | None:
+    """Best-effort Windows-vs-Linux guess from the boot disk's license URLs
+    (e.g. ".../licenses/windows-server-2022-dc") -- the Compute Engine API
+    has no plain "OS" field on an instance, but every real image carries
+    at least one license entry, and Windows images are unambiguous by
+    name. None means inconclusive (no boot disk found, or no license
+    entries at all) -- callers fall back to a user-configured default in
+    that case rather than guessing further.
+    """
+    boot_disk = next((d for d in disks if d.get("boot")), None)
+    if boot_disk is None:
+        return None
+    licenses = boot_disk.get("licenses", [])
+    if any("windows" in lic.lower() for lic in licenses):
+        return "windows"
+    return "linux" if licenses else None
+
+
 def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
     instances: list[Instance] = []
     page_token = None
@@ -109,6 +127,7 @@ def list_instances(credentials: Credentials, project_id: str) -> list[Instance]:
                         project_id=project_id,
                         status=instance.get("status", "UNKNOWN"),
                         network_interface=network_interface,
+                        os_hint=_os_hint_from_disks(instance.get("disks", [])),
                     )
                 )
         page_token = data.get("nextPageToken")
@@ -165,6 +184,51 @@ def reset_windows_password(
         extra_headers={"X-Goog-User-Project": project_id},
     )
     return data["userName"], data["password"]
+
+
+def add_ssh_key(
+    credentials: Credentials,
+    project_id: str,
+    zone: str,
+    name: str,
+    username: str,
+    public_key: str,
+) -> None:
+    """Grants SSH access to a Linux instance by appending an instance-
+    metadata SSH key entry -- the mechanism Linux guest images actually
+    use (password auth is disabled by default on GCP's images), the same
+    one `gcloud compute ssh` sets up automatically on a first connection.
+    Unlike reset_windows_password, this is a read-modify-write: setMetadata
+    replaces the whole metadata payload, so existing items (including any
+    other users' ssh-keys entries) must be preserved, and the current
+    fingerprint must be echoed back so the update is rejected instead of
+    silently clobbering a concurrent metadata change.
+    """
+    instance = _get(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}",
+        credentials.token,
+        extra_headers={"X-Goog-User-Project": project_id},
+    )
+    metadata = instance.get("metadata", {})
+    items = list(metadata.get("items", []))
+    ssh_keys_item = next((item for item in items if item["key"] == "ssh-keys"), None)
+    existing_lines = ssh_keys_item["value"].splitlines() if ssh_keys_item else []
+    new_line = f"{username}:{public_key}"
+    if new_line not in existing_lines:
+        existing_lines.append(new_line)
+    new_value = "\n".join(existing_lines)
+
+    if ssh_keys_item is not None:
+        ssh_keys_item["value"] = new_value
+    else:
+        items.append({"key": "ssh-keys", "value": new_value})
+
+    _post(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/setMetadata",
+        credentials.token,
+        json_body={"fingerprint": metadata.get("fingerprint"), "items": items},
+        extra_headers={"X-Goog-User-Project": project_id},
+    )
 
 
 def list_buckets(credentials: Credentials, project_id: str) -> list[GcsBucket]:

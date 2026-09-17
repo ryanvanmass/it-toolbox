@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "it-toolbox"
-version = "0.2.0"
+version = "0.3.3"
 description = "Cross-platform IT tooling desktop app — starting with a GCP IAP connection manager for RDP/SSH."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -30,8 +30,19 @@ dev = [
     "pytest-qt",
 ]
 
-[project.scripts]
+[project.gui-scripts]
+# gui-scripts (not scripts) so pip generates a GUI-subsystem launcher on
+# Windows -- a console one would flash/show a console window behind the
+# actual Qt GUI. No effect on Linux/macOS, where console_scripts and
+# gui_scripts produce identical plain shebang wrapper scripts (the
+# subsystem distinction is Windows-only).
 it-toolbox = "it_toolbox.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# The app's own window icon (app.py) -- also the single source packaging/
+# {linux,windows}'s build scripts copy from for the desktop entry/installer
+# icon, so it has to actually ship in the wheel, not just exist in the repo.
+"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg"]

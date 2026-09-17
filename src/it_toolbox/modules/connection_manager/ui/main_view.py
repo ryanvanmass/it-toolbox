@@ -1,4 +1,5 @@
 import base64
+import platform
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -19,9 +20,14 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
-from it_toolbox.core.qemu_tunnel import QemuTunnel
+from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
 from it_toolbox.core.tunnel_session import BackgroundTunnel
-from it_toolbox.modules.connection_manager import gcp_client, glinet_client, qemu_client
+from it_toolbox.modules.connection_manager import (
+    gcp_client,
+    glinet_client,
+    qemu_client,
+    qemu_provisioning,
+)
 from it_toolbox.modules.connection_manager.models import (
     RDP_PORT,
     SSH_PORT,
@@ -34,11 +40,19 @@ from it_toolbox.modules.connection_manager.models import (
     QemuVm,
 )
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError
-from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
+from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import (
+    ActiveSessionsDialog,
+)
+from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import (
+    ConfigureVmDialog,
+)
+from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
 from it_toolbox.modules.connection_manager.ui.manage_glinet_hosts_dialog import (
     ManageGlinetHostsDialog,
 )
-from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import ManageHostsDialog
+from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import (
+    ManageHostsDialog,
+)
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
 )
@@ -47,8 +61,18 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
 from it_toolbox.widgets.glinet_dashboard_widget import GlinetDashboardWidget
-from it_toolbox.widgets.rdp_widget import RdpWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
+
+try:
+    # RdpWidget pulls in the FreeRDP native libraries at import time
+    # (core/rdp/freerdp_client.py's module-level _load() raises OSError if
+    # they aren't found) — importing it unconditionally here would crash
+    # the *entire app* at startup on any machine missing them, not just
+    # disable the RDP feature. GCP/SSH, Cloud Storage, QEMU/SPICE etc. all
+    # work fine without this; only "Connect via RDP" needs it.
+    from it_toolbox.widgets.rdp_widget import RdpWidget
+except (ImportError, OSError):
+    RdpWidget = None
 
 try:
     # SpiceWidget pulls in PyGObject/spice-glib (core/spice/spice_session_worker.py
@@ -58,9 +82,13 @@ try:
     # just disable the QEMU/SPICE feature. VM discovery/power actions
     # (qemu_client.py, pure subprocess/virsh) don't need this and stay
     # available regardless; only the actual "Connect via SPICE" action is
-    # gated on SpiceWidget being importable.
+    # gated on SpiceWidget being importable. ValueError (not just
+    # ImportError) is the realistic failure mode: PyGObject itself can be
+    # present while the spice-glib GObject-Introspection typelib specifically
+    # is missing, which surfaces as gi.require_version() raising ValueError,
+    # not an ImportError.
     from it_toolbox.widgets.spice_widget import SpiceWidget
-except ImportError:
+except (ImportError, ValueError):
     SpiceWidget = None
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
@@ -83,6 +111,35 @@ CATEGORY_BUCKETS = "buckets"
 
 GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it sooner"
 
+# ssh's null device, for discarding a known_hosts write — see _embed_ssh's
+# skip_host_key_check.
+_NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
+
+
+def _instance_supports_password_reset(instance: Instance) -> bool:
+    """gcp_client.reset_windows_password() calls Compute Engine's
+    resetWindowsPassword API, which only exists for Windows instances —
+    it 404s against a Linux one. Gate the "Set Password…" menu item on
+    the same os_hint used to pick RDP/SSH defaults elsewhere
+    (_resolve_double_click_kind) rather than always offering an action
+    that's certain to fail for a known-Linux VM. An instance with no
+    os_hint (undetected) still gets the option, since we can't be sure
+    it doesn't apply.
+    """
+    return instance.os_hint != "linux"
+
+
+def _instance_supports_ssh_key_upload(instance: Instance) -> bool:
+    """The Linux counterpart to _instance_supports_password_reset — GCP's
+    Linux images have SSH password auth disabled by default, so access is
+    granted via an SSH public key in instance metadata instead (see
+    gcp_client.add_ssh_key), not a password. Gate "Upload Public Key…" on
+    the same os_hint, the mirror image of the password-reset gate; an
+    unknown os_hint gets both options, since we can't be sure which
+    applies.
+    """
+    return instance.os_hint != "windows"
+
 
 class ConnectionManagerView(QWidget):
     def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
@@ -97,6 +154,17 @@ class ConnectionManagerView(QWidget):
         # modules (see ConnectionManagerModule / MainWindow).
         self._owned_tab_widgets: set[QWidget] = set()
         self._next_session_id = 1
+        # Remembers the account an "Upload Public Key…" grant was made
+        # for, per instance — see _on_ssh_key_uploaded. An instance often
+        # has no access at all under the global default username, so a
+        # subsequent SSH connection should use the account we just
+        # actually granted access to instead of silently trying (and
+        # failing under) the unrelated default. Persisted to disk (see
+        # _on_ssh_key_uploaded's save call) so it survives a restart —
+        # the grant itself is permanent (GCP instance metadata), so
+        # forgetting the account to connect as on every relaunch would
+        # just reintroduce the same failure this override exists to fix.
+        self._instance_ssh_username_overrides = settings.load_instance_ssh_username_overrides()
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
@@ -450,13 +518,54 @@ class ConnectionManagerView(QWidget):
 
     @staticmethod
     def _load_qemu_hosts() -> list[QemuHost]:
-        return [QemuHost(name=h["name"], uri=h["uri"]) for h in settings.load_qemu_hosts()]
+        return [
+            QemuHost(
+                name=h["name"],
+                uri=h["uri"],
+                default_memory_mib=h.get("default_memory_mib"),
+                default_vcpus=h.get("default_vcpus"),
+                default_disk_gib=h.get("default_disk_gib"),
+                default_disk_pool=h.get("default_disk_pool"),
+                default_network=h.get("default_network"),
+                default_iso_pool=h.get("default_iso_pool"),
+                default_os_variant=h.get("default_os_variant"),
+            )
+            for h in settings.load_qemu_hosts()
+        ]
 
     @staticmethod
     def _save_qemu_hosts(hosts: list[QemuHost]) -> None:
-        settings.save_qemu_hosts([{"name": h.name, "uri": h.uri} for h in hosts])
+        settings.save_qemu_hosts(
+            [
+                {
+                    "name": h.name,
+                    "uri": h.uri,
+                    "default_memory_mib": h.default_memory_mib,
+                    "default_vcpus": h.default_vcpus,
+                    "default_disk_gib": h.default_disk_gib,
+                    "default_disk_pool": h.default_disk_pool,
+                    "default_network": h.default_network,
+                    "default_iso_pool": h.default_iso_pool,
+                    "default_os_variant": h.default_os_variant,
+                }
+                for h in hosts
+            ]
+        )
 
     def _populate_qemu_hosts(self) -> None:
+        # virsh isn't installed -- Settings' "QEMU / libvirt" section
+        # already surfaces that; nothing under this root could actually be
+        # used (not even "Manage Hosts…", since there'd be no way to
+        # connect to a registered host), so don't clutter the tree with a
+        # root that leads nowhere.
+        if not qemu_client.is_available():
+            if self._qemu_root_item is not None:
+                index = self._tree.indexOfTopLevelItem(self._qemu_root_item)
+                if index != -1:
+                    self._tree.takeTopLevelItem(index)
+                self._qemu_root_item = None
+            return
+
         if self._qemu_root_item is None:
             self._qemu_root_item = QTreeWidgetItem(["QEMU"])
             self._qemu_root_item.setData(0, IS_QEMU_ROOT_ROLE, True)
@@ -697,6 +806,15 @@ class ConnectionManagerView(QWidget):
             self._show_qemu_vm_context_menu(pos, item, vm)
             return
 
+        # A bare QEMU host node -- not the "QEMU" root (that's
+        # IS_QEMU_ROOT_ROLE, above), not a VM leaf (that's VM_ROLE,
+        # just checked). Same HOST_ROLE-is-set/VM_ROLE-is-None check
+        # _load_qemu_vms's expand-on-click handler already uses.
+        host = item.data(0, HOST_ROLE)
+        if host is not None:
+            self._show_qemu_host_context_menu(pos, item, host)
+            return
+
         if item.data(0, IS_MANUAL_ROOT_ROLE):
             self._show_manual_root_context_menu(pos)
             return
@@ -739,8 +857,16 @@ class ConnectionManagerView(QWidget):
         turn_on_action = menu.addAction("Turn On")
         turn_off_action = menu.addAction("Turn Off")
         force_shutdown_action = menu.addAction("Force Shutdown…")
-        menu.addSeparator()
-        set_password_action = menu.addAction("Set Password…")
+        show_password_reset = _instance_supports_password_reset(instance)
+        show_key_upload = _instance_supports_ssh_key_upload(instance)
+        set_password_action = None
+        upload_key_action = None
+        if show_password_reset or show_key_upload:
+            menu.addSeparator()
+            if show_password_reset:
+                set_password_action = menu.addAction("Set Password…")
+            if show_key_upload:
+                upload_key_action = menu.addAction("Upload Public Key…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
@@ -752,13 +878,33 @@ class ConnectionManagerView(QWidget):
             self._run_instance_power_action(instance, "stop")
         elif chosen is force_shutdown_action:
             self._run_instance_power_action(instance, "force_stop")
-        elif chosen is set_password_action:
+        elif set_password_action is not None and chosen is set_password_action:
             self._on_set_instance_password_clicked(instance)
+        elif upload_key_action is not None and chosen is upload_key_action:
+            self._on_upload_ssh_key_clicked(instance)
 
     def _show_qemu_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
         menu.addAction("Manage Hosts…").triggered.connect(self._on_manage_hosts_clicked)
         menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _show_qemu_host_context_menu(self, pos, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        menu = QMenu(self)
+        # Only offered where virt-install itself is present -- resize/
+        # add-disk (on the VM context menu) only need virsh, already
+        # gated by qemu_client.is_available() disabling the whole QEMU
+        # tree, but creation has its own, separate dependency.
+        deploy_action = menu.addAction("Deploy VM…") if qemu_provisioning.is_available() else None
+        if deploy_action is None:
+            menu.addAction("Deploy VM… (requires virt-install)").setEnabled(False)
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if deploy_action is not None and chosen is deploy_action:
+            self._on_deploy_vm_clicked(host_item, host)
+
+    def _on_deploy_vm_clicked(self, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        dialog = CreateVmDialog(host, parent=self)
+        if dialog.exec() == CreateVmDialog.DialogCode.Accepted:
+            self._load_qemu_vms(host_item, host)
 
     def _show_qemu_vm_context_menu(self, pos, item: QTreeWidgetItem, vm: QemuVm) -> None:
         host = item.data(0, HOST_ROLE)
@@ -774,6 +920,14 @@ class ConnectionManagerView(QWidget):
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
+        # Available regardless of running state -- ConfigureVmDialog itself
+        # adapts what each change actually does per operation (see its own
+        # module docstring): vCPU/memory always stages for next restart,
+        # disk-add/CD-ROM-media apply immediately either way, and disk/
+        # network removal requests immediate effect but warns it isn't
+        # guaranteed while running.
+        menu.addSeparator()
+        configure_action = menu.addAction("Configure…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if connect_action is not None and chosen is connect_action:
             self._connect_qemu(host, vm)
@@ -785,6 +939,25 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
+        elif chosen is configure_action:
+            self._on_configure_vm_clicked(item, host, vm)
+
+    def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:
+        async_utils.run_in_background(
+            lambda: qemu_provisioning.get_vm_resources(host, vm.name),
+            on_result=lambda resources: self._open_configure_vm_dialog(item, host, vm, resources),
+            on_error=lambda error: QMessageBox.warning(self, "Failed to read VM resources", str(error)),
+        )
+
+    def _open_configure_vm_dialog(
+        self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm, resources: tuple[int, int]
+    ) -> None:
+        vcpus, memory_mib = resources
+        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, parent=self)
+        if dialog.exec() == ConfigureVmDialog.DialogCode.Accepted:
+            host_item = item.parent()
+            if host_item is not None:
+                self._load_qemu_vms(host_item, host)
 
     def _show_manual_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -834,6 +1007,62 @@ class ConnectionManagerView(QWidget):
         glinet_host = item.data(0, GLINET_HOST_ROLE)
         if glinet_host is not None:
             self._open_glinet_dashboard(glinet_host)
+            return
+
+        instance = item.data(0, INSTANCE_ROLE)
+        if instance is not None:
+            kind = self._resolve_double_click_kind(instance)
+            if kind is not None:
+                self._start_session_from_instance(instance, kind)
+            return
+
+        manual_connection = item.data(0, MANUAL_CONNECTION_ROLE)
+        if manual_connection is not None:
+            # Manual connections already know their own kind -- no
+            # ambiguity, so (unlike a GCP instance) there's nothing to
+            # resolve via Settings/os_hint here.
+            self._start_session_from_manual_connection(manual_connection)
+            return
+
+        vm = item.data(0, VM_ROLE)
+        if vm is not None:
+            # QEMU's only session type is SPICE -- always launch it
+            # directly, no default-action resolution needed.
+            host = item.data(0, HOST_ROLE)
+            self._connect_qemu(host, vm)
+            return
+
+    def _resolve_double_click_kind(self, instance: Instance) -> str | None:
+        """RDP/SSH for a double-clicked GCP instance, or None if the user
+        cancelled an "ask each time" prompt. Prefers instance.os_hint
+        (detected from the boot disk's license, see gcp_client.py) over
+        the Settings-configured default, since it's actually accurate
+        instead of a guess.
+        """
+        if instance.os_hint == "windows":
+            return "rdp"
+        if instance.os_hint == "linux":
+            return "ssh"
+
+        action = settings.load_default_double_click_action()
+        if action in ("rdp", "ssh"):
+            return action
+        return self._ask_double_click_kind(instance)
+
+    def _ask_double_click_kind(self, instance: Instance) -> str | None:
+        box = QMessageBox(self)
+        box.setWindowTitle("Connect")
+        box.setText(f"Connect to {instance.name} via:")
+        rdp_button = box.addButton("RDP", QMessageBox.ButtonRole.AcceptRole)
+        ssh_button = box.addButton("SSH", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is rdp_button:
+            return "rdp"
+        if clicked is ssh_button:
+            return "ssh"
+        return None
 
     def _open_bucket_browser(self, bucket: GcsBucket) -> None:
         browser = BucketBrowserWidget(bucket, get_credentials=gcp_auth.get_credentials)
@@ -842,7 +1071,22 @@ class ConnectionManagerView(QWidget):
         self._tabs.setCurrentIndex(index)
 
     def _start_session_from_instance(self, instance: Instance, kind: str) -> None:
-        username = settings.load_default_username()
+        if kind == "rdp" and RdpWidget is None:
+            QMessageBox.warning(
+                self,
+                "RDP unavailable",
+                "Embedded RDP needs FreeRDP's native libraries, which aren't available on "
+                "this machine — see docs/embedded-rdp-status.md.",
+            )
+            return
+
+        username = None
+        if kind == "ssh":
+            username = self._instance_ssh_username_overrides.get(
+                (instance.project_id, instance.zone, instance.name)
+            )
+        if username is None:
+            username = settings.load_default_username()
         if username is None:
             username, ok = QInputDialog.getText(
                 self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
@@ -970,6 +1214,66 @@ class ConnectionManagerView(QWidget):
     def _on_instance_action_error(self, error: Exception) -> None:
         QMessageBox.warning(self, "Instance action failed", str(error))
 
+    def _on_upload_ssh_key_clicked(self, instance: Instance) -> None:
+        # Same "ask, don't silently pick one" reasoning as Set Password's
+        # username prompt above.
+        username, ok = QInputDialog.getText(
+            self,
+            "Upload Public Key",
+            f"Username to grant SSH access as on {instance.name}:",
+            QLineEdit.EchoMode.Normal,
+            settings.load_default_username() or "",
+        )
+        if not ok or not username.strip():
+            return
+        username = username.strip()
+
+        # Pre-filled from the Settings-configured default (or the same
+        # ~/.ssh/id_ed25519 / id_rsa discovery JumpCloud's own SSH key
+        # setting falls back to) so the common case needs no manual
+        # pasting — still editable/clearable for a one-off different key.
+        public_key, ok = QInputDialog.getText(
+            self,
+            "Upload Public Key",
+            f"Public key to authorize for {username}@{instance.name}:",
+            QLineEdit.EchoMode.Normal,
+            settings.resolve_gcp_ssh_public_key() or "",
+        )
+        if not ok or not public_key.strip():
+            return
+        public_key = public_key.strip()
+
+        async_utils.run_in_background(
+            lambda: gcp_client.add_ssh_key(
+                gcp_auth.get_credentials(),
+                instance.project_id,
+                instance.zone,
+                instance.name,
+                username,
+                public_key,
+            ),
+            on_result=lambda _: self._on_ssh_key_uploaded(instance, username),
+            on_error=self._on_instance_action_error,
+        )
+
+    def _on_ssh_key_uploaded(self, instance: Instance, username: str) -> None:
+        # If this granted access under a different account than the global
+        # default, a subsequent "Connect via SSH" should use *this*
+        # account -- the default may well have no access on this instance
+        # at all, which is the whole reason a different username was
+        # entered above. See _start_session_from_instance's lookup.
+        if username != settings.load_default_username():
+            self._instance_ssh_username_overrides[
+                (instance.project_id, instance.zone, instance.name)
+            ] = username
+            settings.save_instance_ssh_username_overrides(self._instance_ssh_username_overrides)
+        QMessageBox.information(
+            self,
+            "Public Key Uploaded",
+            f"Granted SSH access to {instance.name} as {username}. It can take up to a "
+            "minute for the guest agent to apply it before connecting will work.",
+        )
+
     # -- Connect: tunnel, then embed SSH or launch external RDP ---------------
 
     def _connect(
@@ -1020,7 +1324,7 @@ class ConnectionManagerView(QWidget):
         self._active_sessions[session_id] = (kind, tunnel)
 
         if kind == "ssh":
-            self._embed_ssh(session_id, display_name, tunnel.port, username)
+            self._embed_ssh(session_id, display_name, tunnel.port, username, skip_host_key_check=True)
         else:
             self._embed_rdp(session_id, display_name, tunnel.port, username, password)
 
@@ -1034,9 +1338,28 @@ class ConnectionManagerView(QWidget):
         port: int,
         username: str | None,
         host: str = "127.0.0.1",
+        skip_host_key_check: bool = False,
     ) -> None:
         target = f"{username}@{host}" if username else host
-        terminal = TerminalWidget(["ssh", "-p", str(port), target])
+        args = ["ssh", "-p", str(port)]
+        if skip_host_key_check:
+            # GCP/IAP-tunneled SSH always connects to 127.0.0.1 on a
+            # fresh, ephemeral local port BackgroundTunnel picks per
+            # session -- ssh's normal known_hosts check treats every new
+            # port as an unrecognized host, so each connection (even to
+            # the same real VM) prompts to accept a "new" host key and
+            # then writes it to ~/.ssh/known_hosts, accumulating junk
+            # entries for a local port number that means nothing the next
+            # time some other tunnel reuses it. The actual trust boundary
+            # here is IAP's own OAuth-authenticated tunnel, not this local
+            # hop's host key, so skip the check rather than prompting for
+            # something with no real security value. Only passed True
+            # from the GCP/IAP path -- a Manual connection (a real
+            # external host, no tunnel) still gets normal host-key
+            # checking.
+            args += ["-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={_NULL_DEVICE}"]
+        args.append(target)
+        terminal = TerminalWidget(args, font_point_size=settings.load_terminal_font_size())
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
         self._owned_tab_widgets.add(terminal)
@@ -1054,7 +1377,15 @@ class ConnectionManagerView(QWidget):
         host: str = "127.0.0.1",
     ) -> None:
         desktop_size = settings.load_default_rdp_resolution()
-        rdp = RdpWidget(host, port, username or "", password or "", desktop_size=desktop_size)
+        keyboard_layout = settings.load_rdp_keyboard_layout()
+        rdp = RdpWidget(
+            host,
+            port,
+            username or "",
+            password or "",
+            desktop_size=desktop_size,
+            keyboard_layout=keyboard_layout,
+        )
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = rdp
         self._owned_tab_widgets.add(rdp)
@@ -1065,6 +1396,15 @@ class ConnectionManagerView(QWidget):
     # -- Connect: manually-configured RDP/SSH, direct (no tunnel) ---------
 
     def _start_session_from_manual_connection(self, connection: ManualConnection) -> None:
+        if connection.kind == "rdp" and RdpWidget is None:
+            QMessageBox.warning(
+                self,
+                "RDP unavailable",
+                "Embedded RDP needs FreeRDP's native libraries, which aren't available on "
+                "this machine — see docs/embedded-rdp-status.md.",
+            )
+            return
+
         username = connection.username or settings.load_default_username()
         if username is None:
             username, ok = QInputDialog.getText(
@@ -1098,7 +1438,7 @@ class ConnectionManagerView(QWidget):
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
-    # -- Connect: QEMU/libvirt, tunnel over SSH, embed SPICE ------------------
+    # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------
 
     def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
         if SpiceWidget is None:
@@ -1110,28 +1450,41 @@ class ConnectionManagerView(QWidget):
             )
             return
         async_utils.run_in_background(
-            lambda: self._start_qemu_tunnel(host, vm),
-            on_result=lambda tunnel: self._on_qemu_tunnel_ready(tunnel, vm),
+            lambda: self._prepare_qemu_spice_connection(host, vm),
+            on_result=lambda result: self._on_qemu_spice_connection_ready(result, vm),
             on_error=self._on_session_error,
         )
 
     @staticmethod
-    def _start_qemu_tunnel(host: QemuHost, vm: QemuVm) -> QemuTunnel:
+    def _prepare_qemu_spice_connection(host: QemuHost, vm: QemuVm) -> tuple[QemuTunnel | None, int]:
+        """(tunnel, port-to-connect-to-on-127.0.0.1) -- tunnel is None for a
+        local libvirt host (see qemu_tunnel.is_local_uri()'s docstring for
+        why that case needs no tunnel at all: its SPICE port is already
+        directly reachable on this same machine)."""
         spice_port = qemu_client.get_vm_spice_port(host, vm.name)
         if spice_port is None:
             raise QemuApiError(f"{vm.name} has no SPICE port available — is it running?")
+        if is_local_uri(host.uri):
+            return None, spice_port
         tunnel = QemuTunnel(host.uri, spice_port)
         tunnel.start()
-        return tunnel
+        return tunnel, tunnel.port
 
-    def _on_qemu_tunnel_ready(self, tunnel: QemuTunnel, vm: QemuVm) -> None:
+    def _on_qemu_spice_connection_ready(
+        self, result: tuple[QemuTunnel | None, int], vm: QemuVm
+    ) -> None:
+        tunnel, port = result
         session_id = self._next_session_id
         self._next_session_id += 1
-        self._active_sessions[session_id] = ("spice", tunnel)
+        # No entry at all for the no-tunnel (local) case -- nothing to stop
+        # on disconnect, and _on_disconnect_requested/_stop_all_sessions
+        # already tolerate a session_id with no _active_sessions entry.
+        if tunnel is not None:
+            self._active_sessions[session_id] = ("spice", tunnel)
 
-        self._embed_spice(session_id, vm.name, tunnel.port)
+        self._embed_spice(session_id, vm.name, port)
 
-        label = f"{vm.name} (SPICE) — 127.0.0.1:{tunnel.port}"
+        label = f"{vm.name} (SPICE) — 127.0.0.1:{port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
     def _embed_spice(self, session_id: int, display_name: str, port: int) -> None:

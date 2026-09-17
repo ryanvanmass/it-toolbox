@@ -233,38 +233,113 @@ against a real server, ideally adding a log line at the point
 confirms whether/when the channel actually binds, rather than inferring
 it indirectly from whether the resolution visibly changed.
 
-## Clipboard sync — attempted, reverted, worth knowing before retrying
+## Clipboard sync — local→remote text, re-attempted with real reference source (2026-09-09)
 
-A full bidirectional clipboard bridge (`core/rdp/cliprdr.py`,
-`CliprdrClientContext` + the `CLIPRDR_FORMAT_LIST`/`FORMAT_DATA_*`
-message structs, wired through `RdpSessionWorker`/`RdpWidget` to Qt's
-`QClipboard`) was built and partially verified, then **reverted** at the
-user's request rather than shipped half-working. Do this over with
-better tooling before re-attempting rather than repeating the same
-trial-and-error:
+The first attempt at this feature (below, kept for history) was reverted
+after local→remote paste never worked and the root cause was never found.
+This session re-implemented it — local→remote text only, remote→local
+still out of scope — grounded in the real, current FreeRDP source fetched
+directly from `github.com/FreeRDP/FreeRDP` (the header structs, the
+channel-plugin internals, and — the piece unavailable last time — the X11
+reference client, `client/X11/xf_cliprdr.c`) rather than guesswork. That
+surfaced three concrete requirements the previous attempt likely got wrong
+or never knew about:
+
+1. **`cliprdr` is a static channel and must be explicitly loaded.**
+   `freerdp_client_load_channels(instance)` — confirmed exported from
+   `libfreerdp-client3.so.3` via `nm -D` against this project's real
+   installed copy — must be called after settings are configured, before
+   `freerdp_connect()`. Nothing in this codebase called it before now;
+   `disp` (a DVC) never needed it, which is exactly what this doc's own
+   "Dynamic resolution resizing" section above already flagged as a gap.
+2. **`RedirectClipboard` and `ClipboardFeatureMask` settings**, resolved
+   by name at runtime via the existing `_settings_key_for_name()` helper
+   (same treatment as `DesktopWidth`/`DesktopHeight` — neither has a
+   stable literal in a checked-in header). Verified against this
+   machine's real installed `libfreerdp3.so.3`: `"FreeRDP_RedirectClipboard"`
+   resolves to `4800`, `"FreeRDP_ClipboardFeatureMask"` to `4801`.
+   `ClipboardFeatureMask` is already FreeRDP's own compiled-in default for
+   a fresh settings object; set explicitly anyway.
+3. **`ClientCapabilities` must be sent explicitly, with `CB_USE_LONG_FORMAT_NAMES`
+   requested, in response to `MonitorReady`** — confirmed by reading
+   `xf_cliprdr_monitor_ready()`, which always does exactly this before
+   sending its format list. `cliprdr_main.c`'s own fallback path forces
+   `useLongFormatNames = FALSE` whenever the server never sends its own
+   capabilities PDU (legal and common — the protocol comment there
+   explicitly says the server capabilities PDU is optional), so skipping
+   this call is a real, previously-untested-but-now-confirmed way for the
+   first attempt's symptom (`ClientFormatList` "succeeds" but the server
+   never follows up with a `ServerFormatDataRequest`) to happen.
+
+New module `core/rdp/cliprdr.py` (mirrors `disp.py`'s shape): hand-written
+`CliprdrClientContext` + `CLIPRDR_HEADER`/`CLIPRDR_CAPABILITIES`/
+`CLIPRDR_FORMAT_LIST`/`CLIPRDR_FORMAT_DATA_REQUEST`/`CLIPRDR_FORMAT_DATA_RESPONSE`
+structs, sourced from the real current headers, not memory. `ClipboardChannel`
+binds on the `"cliprdr"` `ChannelConnected` event (confirmed still its
+literal short name, no DVC-style full-name gotcha, same as before), sends
+capabilities + an initial format list on `MonitorReady`, and responds to
+`ServerFormatDataRequest` with the current local clipboard text
+(UTF-16LE-encoded `CF_UNICODETEXT`, matching the exact field-population
+requirements confirmed by reading `cliprdr_client_format_data_response`'s
+own serializer). `ServerFormatList` is intentionally left unimplemented —
+this client only ever announces its own clipboard, never reads the
+server's.
+
+Wired through `FreeRdpSession.announce_clipboard_text()` →
+`RdpSessionWorker.send_clipboard_text()` (queued the same way mouse/
+keyboard/resize events are) → `RdpWidget`, which connects
+`QApplication.clipboard().dataChanged` to push every local copy, plus one
+push on `_on_connected` so a session that connects with existing clipboard
+content doesn't need a fresh copy first. `close_session()` disconnects
+that signal — a new cleanup requirement, since `QApplication.clipboard()`
+is a process-wide singleton that outlives any single tab, unlike every
+other signal source this widget listens to.
+
+**Known, accepted v1 behavior**: with multiple RDP tabs open, every local
+copy is broadcast to every open session (not scoped to the focused tab) —
+no existing precedent in this codebase scopes clipboard by tab/focus.
+
+**Verified end-to-end against a real server** (2026-09-09, Windows Server
+2025, provided by the user for exactly this test): connected via the
+`core/rdp/freerdp_client.py` CLI layer directly (`WLOG_LEVEL=DEBUG` set),
+drove the session with synthetic input to open Notepad, called
+`announce_clipboard_text("hello from it-toolbox clipboard test")`, then
+sent a Ctrl+V keystroke into the remote session. The full protocol
+round trip fired exactly as designed:
+`cliprdr_process_format_data_request: ServerFormatDataRequest (0x0000000d
+[CF_UNICODETEXT])` → our `ClientFormatDataResponse` → `cliprdr_packet_send:
+Cliprdr Sending (82 bytes)` (37 characters, UTF-16LE + null terminator +
+the 6-byte header — the exact expected size) — and a captured frame
+confirmed the text actually appeared in Notepad, character-for-character.
+This is precisely the step that never fired in the first attempt
+(`ServerFormatDataRequest` never arriving after `ClientFormatList`) — the
+three fixes above (explicit channel load, the two settings, and sending
+`ClientCapabilities` with `CB_USE_LONG_FORMAT_NAMES` before the format
+list) resolved it. Multi-tab clipboard scoping (see above) and
+remote→local are still unverified/out of scope, but local→remote text is
+now confirmed working, not just protocol-plausible.
+
+### First attempt — reverted, kept for history
+
+A full bidirectional clipboard bridge was built and partially verified,
+then reverted at the user's request rather than shipped half-working:
 
 - **Remote→local text sync worked**, verified twice against the real
-  remote server with fresh (non-stale) data each time.
+  remote server with fresh (non-stale) data each time. (Not reimplemented
+  in the 2026-09-09 rework above — still explicitly out of scope.)
 - **Local→remote (pasting local content into the remote session) did
-  not work**, and the root cause was never found. The client-side
-  `ClientFormatList` call returns success (`0`/`CHANNEL_RC_OK`), but the
-  server never follows up with a `ServerFormatDataRequest` — ruled out
-  timing (tested with a 6s wait) and widget-focus mixups (confirmed via
-  screenshot the target window stayed empty). Best remaining guesses,
-  untested: something in the `CLIPRDR_FORMAT_LIST` wire serialization
-  (the `formats` array / `dataLen` handling), or a capability-
-  negotiation default (`CB_USE_LONG_FORMAT_NAMES`) that needs setting
-  explicitly via `ClientCapabilities` rather than relying on whatever
-  FreeRDP defaults to unset.
-- Getting further would need either a packet capture (Wireshark on the
-  `cliprdr` static channel) to see the actual wire bytes, or reading
-  FreeRDP's own `client/cliprdr_main.c` reference implementation (not
-  vendored in this repo — only headers were available), rather than
-  more guessing from the header alone.
-- One thing confirmed *not* the bug, worth not re-litigating: `cliprdr`
-  is a static channel and its `ChannelConnected` name genuinely is
-  `"cliprdr"` (unlike `disp`, see above) — channel binding itself
-  worked fine on the first try.
+  not work**, and the root cause was never found at the time. The
+  client-side `ClientFormatList` call returned success (`0`/`CHANNEL_RC_OK`),
+  but the server never followed up with a `ServerFormatDataRequest` —
+  timing and widget-focus mixups were both ruled out. The two guesses
+  recorded as untested — a `CLIPRDR_FORMAT_LIST` serialization issue, or
+  a missing explicit `CB_USE_LONG_FORMAT_NAMES` capability negotiation —
+  are addressed directly above; the second is now confirmed as a real,
+  necessary step via the reference client, not just a guess.
+- One thing confirmed *not* the bug, still true: `cliprdr` is a static
+  channel and its `ChannelConnected` name genuinely is `"cliprdr"`
+  (unlike `disp`) — channel binding itself worked fine on the first try,
+  both times.
 
 ## Fixed resolution option, for GCP/IAP-tunnel connections (2026-09-08)
 
@@ -431,12 +506,148 @@ longer true. It now maps through the same letterboxed rect, and clamps
 clicks that land in the bars themselves to the nearest image edge
 instead of producing a negative or out-of-range remote coordinate.
 
+## Tab-stealing and unset keyboard layout (2026-09-10, resolved)
+
+A user report of inconsistent behavior — Tab appearing to do nothing, and
+Shift+key combos for punctuation like `"`/`:` producing wrong or no
+characters — turned out to be two independent bugs:
+
+1. **Qt's own focus-traversal was stealing Tab/Shift+Tab.**
+   `QWidget::event()` intercepts these to cycle keyboard focus between
+   widgets before `keyPressEvent()` ever runs — `setFocusPolicy(StrongFocus)`
+   doesn't disable that. Once Tab moved local Qt focus away from the
+   `RdpWidget`, every subsequent keystroke (Shift+key combos included)
+   went to whatever local widget picked up focus instead, until a click
+   brought focus back — explaining the "inconsistent" pattern, since it
+   depends on what else was focusable nearby. Fixed with an `event()`
+   override intercepting Tab/`Key_Backtab` KeyPress before Qt's default
+   handling runs; confirmed for real via a test that fails without the
+   fix and passes with it (not just reasoned). `scancodes.py` also had no
+   mapping for `Key_Backtab` at all (Shift+Tab reports as this distinct
+   key, not `Key_Tab` + a modifier) — added, mapped to the same scancode
+   as plain Tab. The identical fix was applied to `SpiceWidget`, which
+   shares the exact same input-handling shape and vulnerability.
+2. **`KeyboardLayout` was never set, defaulting to 0** — confirmed
+   against FreeRDP's own `libfreerdp/core/settings.c`: every other
+   keyboard-related setting (`KeyboardType`/`SubType`/`FunctionKey`) gets
+   a sane compiled-in default, but `KeyboardLayout` doesn't. A real
+   client is expected to set this itself — confirmed by reading the
+   actual X11 reference client (`client/X11/xf_keyboard.c`'s
+   `xf_keyboard_init`), which auto-detects a layout from XKB/system
+   locale and falls back to `ENGLISH_UNITED_STATES` (`0x0409`,
+   `freerdp/locale/locale.h`) only if that fails. Left at 0, the server
+   has no declared layout to interpret our scancodes against — plausible
+   root cause for exactly this shape of bug (basic letters/numbers stay
+   broadly consistent across layouts, punctuation varies a lot more).
+   Since `scancodes.py`'s table is a fixed US QWERTY Set-1 mapping, not
+   layout-adaptive, `freerdp_client.py` now hardcodes
+   `KeyboardLayout = 0x0409` unconditionally in `_configure_settings` —
+   the correct match for what this client actually sends, not a
+   placeholder. Verified the setting round-trips through a real
+   `FreeRdpSession` context (get/set via the real installed
+   `libfreerdp3`), but — like everything else in this file needing a
+   live server — the actual fix for real Shift+punctuation typing still
+   needs to be confirmed against one.
+
+## Keyboard layout is now a Settings override (2026-09-10)
+
+The hardcoded `KeyboardLayout = 0x0409` (English (US)) fix above was
+confirmed live against the original VM, but a second VM hit the exact
+same Shift+punctuation symptom despite it — the declared layout is only
+useful if the *server* actually has it installed, and a non-English-
+language Windows image may simply not have English (US) available.
+There's no way for the client to know what's installed on an arbitrary
+target server ahead of time, so this can't be auto-detected/fixed once
+and for all the way the original bug could.
+
+Made it a Settings option instead (`settings.load_rdp_keyboard_layout`,
+default unchanged at English (US)/`0x0409`), threaded through
+`RdpWidget` -> `RdpSessionWorker` -> `FreeRdpSession.connect` ->
+`_configure_settings`, the identical shape `desktop_size` already uses.
+A "RDP Keyboard Layout" section (10 common-layout presets) lets a user
+hitting this on a specific VM pick the layout that's actually installed
+there instead.
+
+## Shift+symbol in console apps: scancode+Shift vs Unicode input (2026-09-10)
+
+Live investigation of the "second VM" report above ruled out a layout
+mismatch entirely: the declared layout (English (US)) matched the VM's
+own Windows language settings exactly, and Windows' own Remote Desktop
+Connection (`mstsc`) typed Shift+symbol correctly against the very same
+VM. So it was a bug in this client specifically, not a server-config
+issue -- but every character/scancode/modifier looked individually
+correct, which didn't fit until one more fact came in: **it worked when
+typed into a GUI text field within the RDP session, but not into a
+PowerShell/console prompt in that same session.**
+
+That's the real signature. A GUI text control gets an already-resolved
+character via `WM_CHAR` -- generated upstream in Windows' input
+pipeline. A console app (PowerShell, cmd) instead resolves the raw
+Shift+scancode pair itself, via its own lower-level keyboard-state
+translation, reading each key as a separate synthetic event -- and is
+evidently less forgiving about it than the WM_CHAR path GUI controls
+already get for free.
+
+`scancodes.py`'s own module docstring already said one possible fix:
+"[Unicode input] sidesteps scancode/shift mapping entirely and works
+correctly across keyboard layouts" -- but no printable character ever
+actually used that path, because every one (letters, digits,
+punctuation) had its own `SCANCODES` entry, so `_forward_key_event`
+always took the scancode branch first. **Tried and reverted**:
+restructured it to prefer sending the already-resolved Unicode
+character for any printable key with no Ctrl/Alt held. Live-tested
+result: this broke typing in PowerShell/cmd *entirely*, not just
+Shift+symbol -- RDP's Unicode keyboard input synthesizes a Windows
+`VK_PACKET` key event, and raw console input (unlike GUI controls,
+which handle it fine via `WM_CHAR`) is a documented weak spot for
+`VK_PACKET`-based synthetic keystrokes; it isn't reliably recognized
+as a real keystroke at all there. So scancode has to stay the primary
+path for anything with a `SCANCODES` entry -- back to this file's
+original shape, Shift+symbol-in-console bug included and still
+unresolved. The real fix needs to stay within scancode-based input,
+not swap the transport.
+
+## Shift+symbol in console apps: the actual fix (2026-09-10)
+
+Root cause, finally pinned down from a real `IT_TOOLBOX_LOG_LEVEL=DEBUG`
+capture of the live session: Qt (at least on Windows) reports Shift+
+symbol keys -- Shift+`;` -> `:`, Shift+`1` -> `!`, and so on -- as their
+own distinct `Key_*` constants (`Key_Colon`, `Key_Exclam`, ...), *not*
+the unshifted key (`Key_Semicolon`, `Key_1`, ...) with a Shift modifier
+set. None of those distinct constants had a `SCANCODES` entry, so every
+one of them has *always* fallen through to `send_key_unicode()` -- fine
+in a GUI text field, but the exact `VK_PACKET`-based path confirmed
+broken in a Windows console in the entry above. This explains the whole
+shape of the bug: plain letters and unshifted symbols (real `SCANCODES`
+entries) always worked in both places; every Shift-row symbol (no
+entry) only ever worked where Unicode input happens to work -- GUI
+controls, not consoles.
+
+Fix: added `SCANCODES` entries for all the Shift-row symbol keys
+(`Key_Exclam` through `Key_Question` -- see `scancodes.py`), each
+mapped to the *same physical scancode* as its unshifted key. Shift's
+own press/release is already sent as a separate scancode event (visible
+in the capture, right before each of these), so this uses the exact
+scancode+Shift mechanism that was already proven working for everything
+else -- no unicode/`VK_PACKET` involved at all for these keys anymore.
+
 ## What's still open
 
+- Confirm the fix above against the actual reporting VM's PowerShell
+  prompt -- strongly evidenced from a real live capture (the exact
+  `Key_Colon`/`Key_QuoteDbl`/etc. codes were seen going through the
+  unicode path), reasoned + unit-tested, but the live keystroke-level
+  confirmation still needs to come from the user.
+- The keyboard-layout Settings override (two sections up) turned out
+  not to be what actually needed fixing for this specific report, but
+  is still worth keeping for a case where a target VM's declared
+  layout genuinely doesn't match what's installed there.
 - The MD4/legacy-provider gap noted above, if it turns out to matter
   for a real target server (e.g. one that needs NTLM fallback rather
   than NLA, or RC4-based licensing/security).
-- Clipboard sync (see above) — reverted, not on this branch.
+- Clipboard sync, local→remote text (see above) — implemented and verified
+  end-to-end against a real server on `feature/rdp-clipboard-local-to-remote`.
+  Remote→local (and non-text formats/files) still out of scope.
 - Everything verified so far has been manual smoke-testing (the CLI
   harness and throwaway Qt scripts), not automated tests — there's
   still no pytest coverage for `core/rdp/` itself (only the

@@ -91,6 +91,46 @@ def save_manual_connections(connections: list[dict]) -> None:
     manual_connections_path().write_text(json.dumps(connections))
 
 
+def instance_ssh_username_overrides_path() -> Path:
+    return data_dir() / "instance_ssh_username_overrides.json"
+
+
+def load_instance_ssh_username_overrides() -> dict[tuple[str, str, str], str]:
+    """Per-GCP-instance SSH usernames remembered after "Upload Public
+    Key…" granted access under an account other than the global default
+    (see connection_manager/ui/main_view.py's
+    _instance_ssh_username_overrides) -- the global default may have no
+    access at all on that instance, so a later SSH connection should use
+    the account actually granted instead. Stored as a list of
+    {"project_id", "zone", "name", "username"} dicts (JSON object keys
+    must be strings, so the natural (project_id, zone, name) tuple can't
+    be used as a key directly) and returned keyed by that tuple for the
+    caller's convenience.
+    """
+    path = instance_ssh_username_overrides_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    overrides: dict[tuple[str, str, str], str] = {}
+    for entry in raw:
+        try:
+            overrides[(entry["project_id"], entry["zone"], entry["name"])] = entry["username"]
+        except (KeyError, TypeError):
+            continue
+    return overrides
+
+
+def save_instance_ssh_username_overrides(overrides: dict[tuple[str, str, str], str]) -> None:
+    raw = [
+        {"project_id": project_id, "zone": zone, "name": name, "username": username}
+        for (project_id, zone, name), username in overrides.items()
+    ]
+    instance_ssh_username_overrides_path().write_text(json.dumps(raw))
+
+
 def default_username_path() -> Path:
     return data_dir() / "default_username.txt"
 
@@ -150,6 +190,87 @@ def save_default_rdp_resolution(resolution: tuple[int, int] | None) -> None:
     else:
         width, height = resolution
         path.write_text(f"{width}x{height}")
+
+
+def rdp_keyboard_layout_path() -> Path:
+    return data_dir() / "rdp_keyboard_layout.txt"
+
+
+def load_rdp_keyboard_layout() -> int:
+    """The Windows keyboard layout ID declared to the RDP server for
+    embedded RDP sessions -- see core/rdp/freerdp_client.py's
+    KEYBOARD_LAYOUT_ENGLISH_US for why this must be declared at all
+    (left unset, Shift+punctuation like `"`/`:` silently breaks). Defaults
+    to English (US) (0x0409), matching that constant, but the *server*
+    must actually have the declared layout installed to interpret
+    scancodes with it -- a non-English-language Windows image may not
+    have English (US) installed, reproducing the exact same symptom
+    despite a validly-declared layout, and needs a different one picked
+    here instead. Not core/rdp/freerdp_client.py's own default directly
+    -- this module must stay importable without FreeRDP's native
+    libraries present (that module loads them at import time).
+    """
+    path = rdp_keyboard_layout_path()
+    if not path.is_file():
+        return 0x0409
+    try:
+        return int(path.read_text().strip(), 0)
+    except ValueError:
+        return 0x0409
+
+
+def save_rdp_keyboard_layout(layout: int) -> None:
+    rdp_keyboard_layout_path().write_text(hex(layout))
+
+
+def default_double_click_action_path() -> Path:
+    return data_dir() / "default_double_click_action.txt"
+
+
+def load_default_double_click_action() -> str:
+    """"rdp", "ssh", or "ask" (the default). Only consulted for a GCP
+    instance whose OS couldn't be inferred from its boot disk license (see
+    gcp_client.list_instances' os_hint) -- Manual connections already know
+    their own kind, and QEMU VMs always launch SPICE, so neither needs
+    this.
+    """
+    path = default_double_click_action_path()
+    if not path.is_file():
+        return "ask"
+    value = path.read_text().strip()
+    return value if value in ("rdp", "ssh", "ask") else "ask"
+
+
+def save_default_double_click_action(action: str) -> None:
+    default_double_click_action_path().write_text(action)
+
+
+def terminal_font_size_path() -> Path:
+    return data_dir() / "terminal_font_size.txt"
+
+
+def load_terminal_font_size() -> int | None:
+    """The embedded terminal's font point size (widgets/terminal_widget.py
+    and shell_launcher/connection_manager's SSH sessions, which both use
+    it). None means "use the default monospace size" -- TerminalWidget
+    leaves the font's point size unset in that case rather than being
+    given a specific stored value.
+    """
+    path = terminal_font_size_path()
+    if not path.is_file():
+        return None
+    try:
+        return int(path.read_text().strip())
+    except ValueError:
+        return None
+
+
+def save_terminal_font_size(size: int | None) -> None:
+    path = terminal_font_size_path()
+    if size is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(str(size))
 
 
 def rclone_path_path() -> Path:
@@ -212,6 +333,52 @@ def default_ssh_key_path() -> Path | None:
 
 def resolve_jumpcloud_ssh_key_path() -> Path | None:
     return load_jumpcloud_ssh_key_path() or default_ssh_key_path()
+
+
+def gcp_ssh_key_path_path() -> Path:
+    return data_dir() / "gcp_ssh_key_path.txt"
+
+
+def load_gcp_ssh_key_path() -> Path | None:
+    """An explicit SSH key configured to prefill GCP's "Upload Public
+    Key…" instance action (connection_manager/ui/main_view.py) with. Can
+    point at either a private key or its matching .pub file --
+    resolve_gcp_ssh_public_key() normalizes either. None means fall back
+    to default_ssh_key_path()'s ~/.ssh/id_ed25519 / id_rsa search, same
+    as JumpCloud's own SSH key setting does.
+    """
+    path = gcp_ssh_key_path_path()
+    if not path.is_file():
+        return None
+    text = path.read_text().strip()
+    return Path(text) if text else None
+
+
+def save_gcp_ssh_key_path(ssh_key_path: str | None) -> None:
+    path = gcp_ssh_key_path_path()
+    if ssh_key_path and ssh_key_path.strip():
+        path.write_text(ssh_key_path.strip())
+    else:
+        path.unlink(missing_ok=True)
+
+
+def resolve_gcp_ssh_public_key() -> str | None:
+    """The public key text to prefill in GCP's Upload Public Key action --
+    from the explicitly configured path above, falling back to the same
+    ~/.ssh/id_ed25519 / id_rsa default JumpCloud's own SSH key setting
+    falls back to. Accepts either a private key path or its .pub file
+    directly. None if nothing resolves or the matching .pub file doesn't
+    exist (e.g. a private key with no sibling .pub file).
+    """
+    key_path = load_gcp_ssh_key_path() or default_ssh_key_path()
+    if key_path is None:
+        return None
+    public_key_path = (
+        key_path if key_path.suffix == ".pub" else key_path.parent / f"{key_path.name}.pub"
+    )
+    if not public_key_path.is_file():
+        return None
+    return public_key_path.read_text().strip() or None
 
 
 def jumpcloud_api_key_path() -> Path:
@@ -355,3 +522,23 @@ def save_glinet_hosts(hosts: list[dict]) -> None:
     """hosts' "password_encrypted" must already be a base64 str or None —
     callers encrypt via encrypt_glinet_password() before calling this."""
     glinet_hosts_path().write_text(json.dumps(hosts))
+
+
+def include_prerelease_updates_path() -> Path:
+    return data_dir() / "include_prerelease_updates.txt"
+
+
+def load_include_prerelease_updates() -> bool:
+    """Whether Settings > App Updates should also offer pre-release
+    (beta) builds -- off by default. File-present-means-enabled, same
+    shape as this file's other settings even though this is the first
+    genuinely boolean one."""
+    return include_prerelease_updates_path().is_file()
+
+
+def save_include_prerelease_updates(enabled: bool) -> None:
+    path = include_prerelease_updates_path()
+    if enabled:
+        path.write_text("1")
+    else:
+        path.unlink(missing_ok=True)

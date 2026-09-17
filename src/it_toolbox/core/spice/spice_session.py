@@ -72,6 +72,15 @@ _MOUSE_BUTTON_MASK = {"left": 1 << 0, "middle": 1 << 1, "right": 1 << 2}
 _WHEEL_UP_BUTTON = 4
 _WHEEL_DOWN_BUTTON = 5
 
+# spice-vdagent capability bit for "the guest can be asked to resize its
+# display" -- verified against the real installed spice-protocol package's
+# spice/vd_agent.h on the dev VM (`enum { VD_AGENT_CAP_MOUSE_STATE = 0,
+# VD_AGENT_CAP_MONITORS_CONFIG, ... }`), not recalled from memory alone.
+# Not exposed as a GObject-Introspection enum (it's a plain C #define-style
+# enum spice-glib's typelib doesn't reflect), so this is the raw bit
+# position, passed straight to MainChannel.agent_test_capability().
+_VD_AGENT_CAP_MONITORS_CONFIG = 1
+
 _ERROR_EVENTS = {
     SpiceClientGLib.ChannelEvent.ERROR_CONNECT,
     SpiceClientGLib.ChannelEvent.ERROR_TLS,
@@ -116,6 +125,19 @@ class SpiceSession:
         self._stride: int = 0
         self._imgdata: int | None = None
 
+        # Union of every display-invalidate row range seen since the last
+        # get_dirty_band() call, as (top, bottom_exclusive) -- e.g. dragging
+        # a window only ever touches a limited vertical band of the full
+        # display, not the whole thing, so tracking rows (not just "some
+        # invalidate happened, somewhere") is what lets a caller copy and
+        # repaint only what actually changed. Row range only, not a full
+        # x/y/width/height rectangle -- the framebuffer is row-major/
+        # stride-contiguous, so clipping columns too would need per-row
+        # slicing for a much smaller extra win than clipping rows already
+        # gives on the common case (something moved/scrolled vertically
+        # within a bounded band).
+        self._dirty_rows: tuple[int, int] | None = None
+
         # Called (from the GLib main loop thread) whenever a new frame is
         # available to read via get_frame() — on the initial full-frame
         # primary-create, and on every subsequent display-invalidate.
@@ -127,6 +149,21 @@ class SpiceSession:
         self.on_connected: Callable[[], None] | None = None
         self.on_error: Callable[[SpiceError], None] | None = None
         self.on_disconnected: Callable[[], None] | None = None
+        # Fires once the guest's agent (spice-vdagent or equivalent)
+        # actually finishes connecting -- confirmed live this is a real,
+        # separate, *later* event than the main channel opening (on_connected
+        # above): MainChannel's own "agent-connected" property starts False
+        # and only flips True once the agent handshake completes, which can
+        # take a real, variable amount of time after the SPICE connection
+        # itself is already up (the guest OS has to start the agent service,
+        # which doesn't happen instantly on boot). request_resize()'s own
+        # capability check is only ever accurate *after* this fires -- a
+        # caller that only checks once, right after connecting (e.g. on a
+        # fixed timer), can easily race this and see agent_test_capability()
+        # incorrectly return False for an agent that's actually present and
+        # about to finish connecting, with nothing to ever retry once it
+        # does. See SpiceSessionWorker/SpiceWidget for how this gets used.
+        self.on_agent_connected: Callable[[], None] | None = None
 
         GObject.Object.connect(self._session, "channel-new", self._on_channel_new)
         GObject.Object.connect(self._session, "disconnected", self._on_session_disconnected)
@@ -170,12 +207,48 @@ class SpiceSession:
         """The current primary display surface as (pixels, width, height,
         stride), pixels in BGRX32 byte order (see module docstring).
         Raises SpiceError if no primary surface has been created yet.
+
+        Always copies the *entire* surface -- fine for a one-shot read
+        (the CLI smoke tests below), but see get_dirty_band() for the
+        streaming case (SpiceSessionWorker), where re-copying the whole
+        thing on every single display-invalidate turned out to be a real,
+        measured cause of choppy playback under a busy guest desktop.
         """
         if self._imgdata is None:
             raise SpiceError("no primary display surface yet")
         size = self._stride * self._height
         pixels = ctypes.string_at(self._imgdata, size)
         return pixels, self._width, self._height, self._stride
+
+    def get_dirty_band(self) -> tuple[bytes, int, int, int, int, int]:
+        """Like get_frame(), but copies only the row range covering every
+        display-invalidate seen since the last call (the full frame, the
+        first time this is called after a new primary surface) --
+        (pixels, band_top, band_height, canvas_width, canvas_height,
+        stride). `pixels` is exactly `stride * band_height` bytes, the
+        rows `[band_top, band_top + band_height)` of the full canvas.
+
+        This is what actually makes a partial update (dragging a window,
+        scrolling a terminal, ...) cheap: `get_frame()` would re-copy and
+        the caller would then have to re-composite the *entire* display
+        for even a one-pixel change; this copies (and lets the caller
+        repaint) only the rows that could plausibly have changed. Raises
+        SpiceError if no primary surface has been created yet.
+        """
+        if self._imgdata is None:
+            raise SpiceError("no primary display surface yet")
+        top, bottom = self._pop_dirty_rows()
+        top = max(0, min(top, self._height))
+        bottom = max(top, min(bottom, self._height))
+        band_height = bottom - top
+        offset = self._imgdata + top * self._stride
+        pixels = ctypes.string_at(offset, self._stride * band_height)
+        return pixels, top, band_height, self._width, self._height, self._stride
+
+    def _pop_dirty_rows(self) -> tuple[int, int]:
+        rows = self._dirty_rows if self._dirty_rows is not None else (0, self._height)
+        self._dirty_rows = None
+        return rows
 
     # --- input: absolute position + scancode-based keyboard -------------
     #
@@ -224,12 +297,33 @@ class SpiceSession:
         else:
             self._inputs_channel.key_release(scancode)
 
+    def request_resize(self, width: int, height: int) -> None:
+        """Asks the guest's spice-vdagent (if one is present and it
+        advertises monitor-config support) to resize its display to
+        width x height -- the same mechanism a native SPICE client (e.g.
+        virt-viewer) uses to avoid ever needing to scale the picture at
+        all: the guest renders at exactly the requested size instead of
+        the client shrinking/enlarging whatever the guest happens to be
+        using. Silently does nothing if there's no agent yet or it
+        doesn't support this (most guests without spice-vdagent
+        installed) -- the caller keeps working exactly as it does today
+        either way, just still scaling/letterboxing since the guest's
+        own resolution never changes in that case.
+        """
+        if self._main_channel is None:
+            return
+        if not self._main_channel.agent_test_capability(_VD_AGENT_CAP_MONITORS_CONFIG):
+            return
+        self._main_channel.update_display(0, 0, 0, width, height, True)
+        self._main_channel.send_monitor_config()
+
     def _on_channel_new(
         self, session: SpiceClientGLib.Session, channel: SpiceClientGLib.Channel
     ) -> None:
         if isinstance(channel, SpiceClientGLib.MainChannel):
             self._main_channel = channel
             GObject.Object.connect(channel, "channel-event", self._on_main_channel_event)
+            GObject.Object.connect(channel, "notify::agent-connected", self._on_agent_connected_changed)
         elif isinstance(channel, SpiceClientGLib.DisplayChannel):
             if channel.get_property("channel-id") != PRIMARY_DISPLAY_CHANNEL_ID:
                 return
@@ -254,6 +348,16 @@ class SpiceSession:
             if self.on_error is not None:
                 self.on_error(error)
 
+    def _on_agent_connected_changed(
+        self, channel: SpiceClientGLib.MainChannel, pspec: GObject.ParamSpec
+    ) -> None:
+        # Only the *becomes-connected* transition is interesting here (see
+        # on_agent_connected's docstring) -- ignore it flipping back to
+        # False (e.g. the guest's agent service stopping), since there's
+        # nothing this callback needs to redo for that case.
+        if channel.get_property("agent-connected") and self.on_agent_connected is not None:
+            self.on_agent_connected()
+
     def _on_session_disconnected(self, session: SpiceClientGLib.Session) -> None:
         self._connected.set()
         if self.on_disconnected is not None:
@@ -274,6 +378,11 @@ class SpiceSession:
         self._height = height
         self._stride = stride
         self._imgdata = imgdata
+        # The whole new surface counts as "dirty" -- there's nothing to
+        # diff against yet, and a resolution change means whatever was in
+        # get_dirty_band()'s bookkeeping before this referred to a canvas
+        # size that no longer exists.
+        self._dirty_rows = (0, height)
         if self.on_frame is not None:
             self.on_frame()
 
@@ -283,10 +392,13 @@ class SpiceSession:
         # the same stale-pointer hazard class as freerdp_client.py's
         # disconnect()/DisplayChannel issue.
         self._imgdata = None
+        self._dirty_rows = None
 
     def _on_invalidate(
         self, channel: SpiceClientGLib.DisplayChannel, x: int, y: int, width: int, height: int
     ) -> None:
+        top, bottom = self._dirty_rows if self._dirty_rows is not None else (y, y + height)
+        self._dirty_rows = (min(top, y), max(bottom, y + height))
         if self.on_frame is not None:
             self.on_frame()
 

@@ -28,6 +28,22 @@ class QemuTunnelError(Exception):
     pass
 
 
+def is_local_uri(uri: str) -> bool:
+    """True for a bare local libvirt connection -- "qemu:///system" or
+    "qemu:///session", no host component at all -- meaning the libvirt
+    daemon (and so the VM/its SPICE server) already runs on this same
+    machine. SPICE's 127.0.0.1 bind is then already directly reachable
+    with no tunnel at all -- QemuTunnel exists specifically for the
+    qemu+ssh:// case, where the SPICE port lives on a genuinely different
+    machine and needs an SSH-forwarded local port to reach it from here.
+    Confirmed live: a QemuHost pointed at the *same* machine running
+    it-toolbox (a real, valid libvirt setup, not just a remote lab host)
+    previously always failed to connect, since the caller unconditionally
+    tried to build an SSH tunnel for every QEMU host regardless of URI.
+    """
+    return urlsplit(uri).scheme == "qemu"
+
+
 def _parse_ssh_target(uri: str) -> tuple[str, int | None]:
     """Extract an ssh(1) "[user@]host" target and optional port from a
     qemu+ssh:// libvirt connection URI, e.g. "qemu+ssh://alice@lab-host:2222/system".

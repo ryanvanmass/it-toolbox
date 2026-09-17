@@ -7,17 +7,20 @@ is colored text, this one is monochrome) — a known, deliberate simplification
 to get a working embedded shell first rather than a fully-faithful one.
 """
 
+import logging
 import sys
 import threading
 
 import pyte
-from PySide6.QtCore import QSocketNotifier, Qt, Signal
-from PySide6.QtGui import QFont, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QEvent, QSocketNotifier, Qt, Signal
+from PySide6.QtGui import QFontDatabase, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
 from it_toolbox.widgets.pty_backend import PtyHandle
 
 _IS_WINDOWS = sys.platform == "win32"
+
+logger = logging.getLogger(__name__)
 
 # Keys without a meaningful event.text() get translated to the escape
 # sequence a real terminal would send for them.
@@ -47,14 +50,39 @@ class TerminalWidget(QPlainTextEdit):
     finished = Signal()
     _output_ready = Signal(bytes)  # background-thread -> main-thread bridge (Windows only)
 
-    def __init__(self, argv: list[str], cols: int = 100, rows: int = 30, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        argv: list[str],
+        cols: int = 100,
+        rows: int = 30,
+        font_point_size: int | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        font = QFont("Monospace")
-        font.setStyleHint(QFont.StyleHint.TypeWriter)
+        # QFont("Monospace") is a Linux/fontconfig generic-alias name --
+        # Windows has no font literally called that, and Qt's substitution
+        # for an unrecognized family name there is not guaranteed to give
+        # metrics (self.fontMetrics(), used by resizeEvent below) that
+        # match what's actually rendered. QFontDatabase's FixedFont is the
+        # correct, cross-platform-safe way to ask for "the system's real
+        # monospace font" -- resolves to Consolas on Windows, an
+        # appropriate default elsewhere -- with no name-lookup ambiguity.
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        if font_point_size is not None:
+            font.setPointSize(font_point_size)
         self.setFont(font)
+        logger.debug(
+            "terminal-resize: font requested family=%r pointSize=%d -> "
+            "effective family=%r pointSize=%d exactMatch=%s",
+            font.family(),
+            font.pointSize(),
+            self.font().family(),
+            self.font().pointSize(),
+            self.fontInfo().exactMatch(),
+        )
 
         self._cols = cols
         self._rows = rows
@@ -142,6 +170,19 @@ class TerminalWidget(QPlainTextEdit):
 
     # -- writing keystrokes ------------------------------------------------
 
+    def event(self, e) -> bool:  # noqa: N802 - Qt override signature
+        # Same fix as RdpWidget/SpiceWidget's own event() override --
+        # QWidget's default focus-traversal intercepts Key_Tab/Key_Backtab
+        # at this level, before keyPressEvent() ever runs, so shell
+        # tab-completion silently never reached the pty: Tab just moved
+        # Qt focus to whatever widget was next in line instead. Forward
+        # these directly and report the event as handled so that
+        # focus-traversal never runs.
+        if e.type() == QEvent.Type.KeyPress and e.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(e)
+            return True
+        return super().event(e)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
         modifiers = event.modifiers()
@@ -150,8 +191,18 @@ class TerminalWidget(QPlainTextEdit):
         # this resolves to Ctrl+V (Windows/Linux) it would otherwise be
         # swallowed as the literal ^V control byte, which is where "can't
         # paste into the terminal" came from — Ctrl+V never reached
-        # anything but that byte.
-        if event.matches(QKeySequence.StandardKey.Paste):
+        # anything but that byte. Ctrl+Shift+V is also accepted directly
+        # (real terminal emulators — GNOME Terminal, Konsole, etc. — bind
+        # paste there instead of/alongside Ctrl+V, precisely because Ctrl+V
+        # is already a real, differently-meaningful control byte to a
+        # shell): QKeySequence.StandardKey.Paste never matches it, so
+        # without this it fell through to the same Ctrl+letter branch and
+        # sent ^V instead of pasting, exactly the bug this whole check
+        # exists to avoid for plain Ctrl+V.
+        if event.matches(QKeySequence.StandardKey.Paste) or (
+            modifiers == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+            and key == Qt.Key.Key_V
+        ):
             self._paste_clipboard()
             return
 
@@ -196,6 +247,47 @@ class TerminalWidget(QPlainTextEdit):
         self._cols, self._rows = cols, rows
         self._screen.resize(rows, cols)
         self._pty.resize(cols, rows)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        super().resizeEvent(event)
+        # The pty/pyte screen is otherwise a fixed cols x rows grid (100x30
+        # by default) with no connection at all to this widget's actual
+        # pixel size -- a real terminal emulator always keeps the two in
+        # sync (via TIOCSWINCH, which resizeTerminal's _pty.resize already
+        # sends), so a full-screen program like nano or vim only ever
+        # redraws to fill whatever size the pty *reports*, regardless of
+        # how large the widget itself has grown to. Without this, the
+        # rendered content stays pinned to its size at construction time,
+        # leaving the rest of the widget as dead, unused space.
+        metrics = self.fontMetrics()
+        char_width = metrics.horizontalAdvance("M") or 1
+        char_height = metrics.height() or 1
+        # QPlainTextEdit's document has its own margin around the text
+        # (QTextDocument.documentMargin(), 4px on each side by default) --
+        # real usable space for character cells is inside that, not the
+        # full viewport.
+        margin = self.document().documentMargin()
+        available_width = max(0, self.viewport().width() - 2 * margin)
+        available_height = max(0, self.viewport().height() - 2 * margin)
+        cols = max(1, int(available_width // char_width))
+        rows = max(1, int(available_height // char_height))
+        logger.debug(
+            "terminal-resize: widget=%dx%d viewport=%dx%d margin=%.1f "
+            "char=%dx%d -> cols=%d rows=%d (was %d,%d)",
+            self.width(),
+            self.height(),
+            self.viewport().width(),
+            self.viewport().height(),
+            margin,
+            char_width,
+            char_height,
+            cols,
+            rows,
+            self._cols,
+            self._rows,
+        )
+        if (cols, rows) != (self._cols, self._rows):
+            self.resizeTerminal(cols, rows)
 
     def close_session(self) -> None:
         if self._notifier is not None:

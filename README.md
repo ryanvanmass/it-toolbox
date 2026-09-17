@@ -62,13 +62,22 @@ connection manager for RDP, SSH, and Cloud Storage.
   GObject-Introspection SPICE client library — there's no PyPI-installable
   equivalent, so it has to come from the system package manager (Fedora:
   `python3-gobject` + `spice-glib`; Debian/Ubuntu: `python3-gi` +
-  `gir1.2-spice-client-glib-2.0`). Since that's a system package, your
+  `gir1.2-spiceclientglib-2.0`). Since that's a system package, your
   venv needs `include-system-site-packages = true` in its `pyvenv.cfg` to
   see it — either create the venv with `python -m venv --system-site-packages
   .venv`, or flip that line in an existing `.venv/pyvenv.cfg`. See
   `docs/qemu-spice-status.md` for the full plan and status.
 
 ## Getting started
+
+**Linux**: download the `.deb` or `.rpm` from the
+[latest release](https://github.com/ryanvanmass/it-toolbox/releases/latest)
+and install it (`sudo dpkg -i it-toolbox_*.deb` or `sudo rpm -i
+it-toolbox-*.rpm`) — it bundles its own Python environment, so nothing
+beyond `python3` itself is required. See `docs/releasing.md` for how
+these are built.
+
+Otherwise, from a git checkout on any platform:
 
 ```powershell
 python -m venv .venv

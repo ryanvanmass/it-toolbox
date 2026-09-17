@@ -45,6 +45,7 @@ from it_toolbox.core.rdp._freerdp3_bindings import (
 from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_s_wPubSub as WPubSub,
 )
+from it_toolbox.core.rdp.cliprdr import CLIPRDR_FLAG_DEFAULT_MASK, ClipboardChannel, CliprdrClientContext
 from it_toolbox.core.rdp.disp import DispClientContext, DisplayChannel
 
 RDP_CLIENT_INTERFACE_VERSION = 1  # freerdp/client.h
@@ -62,6 +63,10 @@ SETTING_RDP_SECURITY = 1090  # FreeRDP_Settings_Keys_Bool
 SETTING_IGNORE_CERTIFICATE = 1408  # FreeRDP_Settings_Keys_Bool
 SETTING_DYNAMIC_RESOLUTION_UPDATE = 1558  # FreeRDP_Settings_Keys_Bool
 SETTING_SUPPORT_DISPLAY_CONTROL = 5185  # FreeRDP_Settings_Keys_Bool
+
+# freerdp/locale/locale.h's ENGLISH_UNITED_STATES -- see _configure_settings'
+# KeyboardLayout comment for why this is set unconditionally.
+KEYBOARD_LAYOUT_ENGLISH_US = 0x0409
 
 # freerdp/codec/color.h — FREERDP_PIXEL_FORMAT(32, TYPE_BGRA, a=0, r=8, g=8, b=8).
 # Computed rather than transcribed from a literal, since the header only
@@ -212,6 +217,15 @@ _core_lib.freerdp_settings_set_bool.restype = ctypes.c_int32
 _core_lib.gdi_init.argtypes = [ctypes.POINTER(RdpFreerdp), ctypes.c_uint32]
 _core_lib.gdi_init.restype = ctypes.c_int32
 
+# BOOL freerdp_client_load_channels(freerdp* instance);  (freerdp/client.h)
+# Required for cliprdr specifically — unlike disp (a Dynamic Virtual
+# Channel, which loads automatically once negotiated), cliprdr is a
+# static channel and is never added to the channel list without this
+# explicit call. Confirmed exported from libfreerdp-client3 (not
+# libfreerdp3) via `nm -D` against this project's real installed copy.
+_client_lib.freerdp_client_load_channels.argtypes = [ctypes.POINTER(RdpFreerdp)]
+_client_lib.freerdp_client_load_channels.restype = ctypes.c_int32
+
 # BOOL freerdp_check_event_handles(rdpContext* context);
 _core_lib.freerdp_check_event_handles.argtypes = [ctypes.POINTER(RdpContext)]
 _core_lib.freerdp_check_event_handles.restype = ctypes.c_int32
@@ -333,6 +347,7 @@ def _configure_settings(
     password: str,
     domain: str,
     ignore_certificate: bool,
+    keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
 ) -> None:
     settings = context.contents.settings  # c_void_p, opaque — accessed via accessors only
     _core_lib.freerdp_settings_set_string(settings, SETTING_SERVER_HOSTNAME, host.encode())
@@ -347,6 +362,41 @@ def _configure_settings(
     _core_lib.freerdp_settings_set_bool(settings, SETTING_RDP_SECURITY, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_SUPPORT_DISPLAY_CONTROL, 1)
     _core_lib.freerdp_settings_set_bool(settings, SETTING_DYNAMIC_RESOLUTION_UPDATE, 1)
+    # RedirectClipboard/ClipboardFeatureMask have no stable literal in a
+    # checked-in header (same situation as DesktopWidth/DesktopHeight
+    # below — FreeRDP's settings-key enum is CMake-template-generated, not
+    # a static file), so resolve both by name at runtime like those are.
+    # ClipboardFeatureMask is already FreeRDP's own compiled-in default
+    # for a fresh settings object; set explicitly anyway rather than rely
+    # on that being unstated.
+    redirect_clipboard_key = _settings_key_for_name("FreeRDP_RedirectClipboard")
+    clipboard_feature_mask_key = _settings_key_for_name("FreeRDP_ClipboardFeatureMask")
+    _core_lib.freerdp_settings_set_bool(settings, redirect_clipboard_key, 1)
+    _core_lib.freerdp_settings_set_uint32(settings, clipboard_feature_mask_key, CLIPRDR_FLAG_DEFAULT_MASK)
+    # KeyboardLayout defaults to 0 on a fresh settings object (confirmed
+    # against FreeRDP's own libfreerdp/core/settings.c) -- an invalid
+    # Windows LCID, unlike every other keyboard-related setting
+    # (KeyboardType/SubType/FunctionKey), which already get sane compiled-
+    # in defaults. Left unset, the server has no declared layout to
+    # interpret our scancodes against, which is exactly the kind of thing
+    # that would work for plain letters/numbers (broadly consistent across
+    # layouts) while silently breaking punctuation that varies more
+    # between them -- confirmed as a real, live, previously-unexplained
+    # bug (Shift+key producing wrong or no characters for symbols like
+    # `"`/`:`), not just a hypothetical gap. The real reference client
+    # (client/X11/xf_keyboard.c's xf_keyboard_init) auto-detects a layout
+    # from XKB/system locale and only falls back to English (US) if that
+    # fails; scancodes.py's table is a fixed US QWERTY Set-1 mapping (not
+    # layout-adaptive), so English (US) is the correct default for what we
+    # actually send, not a placeholder. It's still only a default, though:
+    # the server must have the *declared* layout installed to interpret
+    # scancodes with it at all, and a non-English-language Windows image
+    # may not have English (US) installed -- reproducing the exact same
+    # symptom on that VM despite a validly-declared layout. Overridable via
+    # Settings (core/settings.py's load_rdp_keyboard_layout) for exactly
+    # that case.
+    keyboard_layout_key = _settings_key_for_name("FreeRDP_KeyboardLayout")
+    _core_lib.freerdp_settings_set_uint32(settings, keyboard_layout_key, keyboard_layout)
 
 
 def _settings_key_for_name(name: str) -> int:
@@ -433,6 +483,7 @@ class FreeRdpSession:
         self._context: ctypes.POINTER(RdpContext) | None = None
         self.on_frame: callable | None = None  # called with no args after each EndPaint
         self.display = DisplayChannel()
+        self.clipboard = ClipboardChannel()
         # Kept alive for the lifetime of the session — ctypes does not keep
         # a reference to a CFUNCTYPE instance on its own, and libfreerdp
         # holds these pointers for as long as the connection is open.
@@ -464,6 +515,11 @@ class FreeRdpSession:
         if name in (b"disp", b"Microsoft::Windows::RDS::DisplayControl"):
             disp_context = ctypes.cast(event_args.contents.pInterface, ctypes.POINTER(DispClientContext))
             self.display.bind(disp_context)
+        elif name == b"cliprdr":
+            clip_context = ctypes.cast(
+                event_args.contents.pInterface, ctypes.POINTER(CliprdrClientContext)
+            )
+            self.clipboard.bind(clip_context)
 
     def request_resize(self, width: int, height: int) -> None:
         """Ask the server to resize the remote desktop, and resize the
@@ -480,6 +536,16 @@ class FreeRdpSession:
         _core_lib.gdi_resize(gdi, width, height)
         self.display.request_resize(width, height)
 
+    def announce_clipboard_text(self, text: str | None) -> None:
+        """Announce (or re-announce) the local clipboard's text content to
+        the remote session — call whenever the local clipboard changes.
+        Call only from the thread driving the connection (see
+        rdp_session_worker.py's _drain_input_queue). No-ops (just caches)
+        until the cliprdr channel has finished its own readiness
+        handshake — see ClipboardChannel.announce_text.
+        """
+        self.clipboard.announce_text(text)
+
     def connect(
         self,
         host: str,
@@ -489,11 +555,14 @@ class FreeRdpSession:
         domain: str = "",
         ignore_certificate: bool = True,
         desktop_size: tuple[int, int] | None = None,
+        keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
     ) -> None:
         context = _new_context()
         self._context = context
         try:
-            _configure_settings(context, host, port, username, password, domain, ignore_certificate)
+            _configure_settings(
+                context, host, port, username, password, domain, ignore_certificate, keyboard_layout
+            )
             if desktop_size is not None:
                 _apply_desktop_size(context, *desktop_size)
         except Exception:
@@ -509,6 +578,16 @@ class FreeRdpSession:
             b"ChannelConnected",
             ctypes.cast(self._channel_connected_cb, ctypes.c_void_p),
         )
+        # Required for cliprdr specifically (a static channel) — see the
+        # freerdp_client_load_channels binding's comment above. Must run
+        # after settings are configured, before freerdp_connect().
+        if not _client_lib.freerdp_client_load_channels(context.contents.instance):
+            self._context = None
+            error = context
+            try:
+                _raise_last_error(error, "freerdp_client_load_channels failed")
+            finally:
+                _client_lib.freerdp_client_context_free(context)
         if not _core_lib.freerdp_connect(context.contents.instance):
             self._context = None
             error = context  # capture before freeing, for the error message

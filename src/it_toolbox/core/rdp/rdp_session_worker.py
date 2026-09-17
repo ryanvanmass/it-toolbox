@@ -17,7 +17,7 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
-from it_toolbox.core.rdp.freerdp_client import FreeRdpSession
+from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US, FreeRdpSession
 
 
 class RdpSessionSignals(QObject):
@@ -40,6 +40,7 @@ class RdpSessionWorker:
         password: str,
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
+        keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
     ) -> None:
         self._host = host
         self._port = port
@@ -47,6 +48,7 @@ class RdpSessionWorker:
         self._password = password
         self._domain = domain
         self._desktop_size = desktop_size
+        self._keyboard_layout = keyboard_layout
         self.signals = RdpSessionSignals()
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
@@ -90,6 +92,12 @@ class RdpSessionWorker:
         call with no coalescing of its own."""
         self._input_queue.put(("resize", width, height))
 
+    def send_clipboard_text(self, text: str | None) -> None:
+        """Safe to call from the Qt thread. Announces the local
+        clipboard's text content to the remote session — call whenever the
+        local clipboard changes."""
+        self._input_queue.put(("clipboard_text", text))
+
     def _drain_input_queue(self) -> None:
         while True:
             try:
@@ -109,6 +117,8 @@ class RdpSessionWorker:
                 self._session.send_key_unicode(*args)
             elif kind == "resize":
                 self._session.request_resize(*args)
+            elif kind == "clipboard_text":
+                self._session.announce_clipboard_text(*args)
 
     def _run(self) -> None:
         self._session.on_frame = self._on_frame
@@ -120,6 +130,7 @@ class RdpSessionWorker:
                 self._password,
                 domain=self._domain,
                 desktop_size=self._desktop_size,
+                keyboard_layout=self._keyboard_layout,
             )
         except Exception as exc:  # noqa: BLE001 - see comment below
             # Deliberately broader than FreeRdpError: an uncaught exception

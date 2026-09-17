@@ -38,6 +38,18 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     assert window._module_list.item(2).text() == "Cloud Storage"
     assert window._module_list.item(3).text() == "Identity Management"
     assert window._module_list.item(4).text() == "Settings"
+
+
+def test_main_window_has_a_real_window_icon(qtbot, monkeypatch):
+    # Regression test: setWindowIcon was never called at all until this
+    # was added, so every window/taskbar entry fell back to Qt/the OS's
+    # generic placeholder icon instead of the app's actual logo.
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert not window.windowIcon().isNull()
     assert window._module_list.currentRow() == 0
 
     # The GCP browser tree is nested under the module in the sidebar now,

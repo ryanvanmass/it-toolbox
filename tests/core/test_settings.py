@@ -202,6 +202,63 @@ def test_default_ssh_key_path_none_when_neither_exists(monkeypatch, tmp_path):
     assert settings.default_ssh_key_path() is None
 
 
+def test_gcp_ssh_key_path_override_round_trips(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_gcp_ssh_key_path() is None
+
+    settings.save_gcp_ssh_key_path(str(tmp_path / "custom_key"))
+    assert settings.load_gcp_ssh_key_path() == tmp_path / "custom_key"
+
+    settings.save_gcp_ssh_key_path(None)
+    assert settings.load_gcp_ssh_key_path() is None
+
+
+def test_resolve_gcp_ssh_public_key_uses_explicit_override(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, name="custom_key")
+    settings.save_gcp_ssh_key_path(str(key_path))
+
+    public_key = settings.resolve_gcp_ssh_public_key()
+
+    assert public_key == (tmp_path / "custom_key.pub").read_text().strip()
+
+
+def test_resolve_gcp_ssh_public_key_accepts_a_pub_file_directly(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    _write_ssh_keypair(tmp_path, name="custom_key")
+    settings.save_gcp_ssh_key_path(str(tmp_path / "custom_key.pub"))
+
+    public_key = settings.resolve_gcp_ssh_public_key()
+
+    assert public_key == (tmp_path / "custom_key.pub").read_text().strip()
+
+
+def test_resolve_gcp_ssh_public_key_falls_back_to_default_ssh_key_path(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, name="id_ed25519")
+    monkeypatch.setattr(settings, "default_ssh_key_path", lambda: key_path)
+
+    public_key = settings.resolve_gcp_ssh_public_key()
+
+    assert public_key == (tmp_path / "id_ed25519.pub").read_text().strip()
+
+
+def test_resolve_gcp_ssh_public_key_is_none_when_nothing_resolves(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "default_ssh_key_path", lambda: None)
+
+    assert settings.resolve_gcp_ssh_public_key() is None
+
+
+def test_resolve_gcp_ssh_public_key_is_none_when_pub_file_missing(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    private_only = tmp_path / "no_pub_key"
+    private_only.write_text("not a real key, just needs to exist")
+    settings.save_gcp_ssh_key_path(str(private_only))
+
+    assert settings.resolve_gcp_ssh_public_key() is None
+
+
 def test_default_rdp_resolution_is_none_when_never_set(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     assert settings.load_default_rdp_resolution() is None
@@ -300,3 +357,108 @@ def test_encrypt_glinet_password_no_ssh_key_found_raises(monkeypatch, tmp_path):
 
     with pytest.raises(settings.SecretDecryptionError):
         settings.encrypt_glinet_password("routerpassword")
+
+
+def test_rdp_keyboard_layout_defaults_to_english_us_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_rdp_keyboard_layout() == 0x0409
+
+
+def test_save_and_load_rdp_keyboard_layout(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_rdp_keyboard_layout(0x040C)
+    assert settings.load_rdp_keyboard_layout() == 0x040C
+
+
+def test_rdp_keyboard_layout_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.rdp_keyboard_layout_path().write_text("not-a-layout")
+    assert settings.load_rdp_keyboard_layout() == 0x0409
+
+
+def test_instance_ssh_username_overrides_is_empty_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_instance_ssh_username_overrides() == {}
+
+
+def test_save_and_load_instance_ssh_username_overrides(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    overrides = {("p1", "us-central1-a", "vm-1"): "alice", ("p2", "europe-west1-b", "vm-2"): "bob"}
+
+    settings.save_instance_ssh_username_overrides(overrides)
+
+    assert settings.load_instance_ssh_username_overrides() == overrides
+
+
+def test_instance_ssh_username_overrides_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.instance_ssh_username_overrides_path().write_text("not-json")
+    assert settings.load_instance_ssh_username_overrides() == {}
+
+
+def test_instance_ssh_username_overrides_skips_malformed_entries(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.instance_ssh_username_overrides_path().write_text(
+        '[{"project_id": "p1", "zone": "us-central1-a", "name": "vm-1", "username": "alice"}, '
+        '{"project_id": "p2"}]'
+    )
+
+    overrides = settings.load_instance_ssh_username_overrides()
+
+    assert overrides == {("p1", "us-central1-a", "vm-1"): "alice"}
+
+
+def test_terminal_font_size_is_none_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_terminal_font_size() is None
+
+
+def test_save_and_load_terminal_font_size(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_terminal_font_size(14)
+    assert settings.load_terminal_font_size() == 14
+
+
+def test_save_terminal_font_size_none_clears_it(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_terminal_font_size(14)
+    settings.save_terminal_font_size(None)
+    assert settings.load_terminal_font_size() is None
+
+
+def test_terminal_font_size_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.terminal_font_size_path().write_text("not-a-number")
+    assert settings.load_terminal_font_size() is None
+
+
+def test_default_double_click_action_is_ask_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_default_double_click_action() == "ask"
+
+
+def test_save_and_load_default_double_click_action(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_default_double_click_action("rdp")
+    assert settings.load_default_double_click_action() == "rdp"
+    settings.save_default_double_click_action("ssh")
+    assert settings.load_default_double_click_action() == "ssh"
+
+
+def test_default_double_click_action_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.default_double_click_action_path().write_text("not-a-real-action")
+    assert settings.load_default_double_click_action() == "ask"
+
+
+def test_include_prerelease_updates_defaults_to_false(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_include_prerelease_updates() is False
+
+
+def test_save_and_load_include_prerelease_updates(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_include_prerelease_updates(True)
+    assert settings.load_include_prerelease_updates() is True
+    settings.save_include_prerelease_updates(False)
+    assert settings.load_include_prerelease_updates() is False

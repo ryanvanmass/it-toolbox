@@ -14,12 +14,17 @@ clamped, for clicks that land in the letterbox bars) from widget-space
 to the remote desktop's native resolution before being sent.
 """
 
-from PySide6.QtCore import QPoint, QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QImage, QPainter
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+import logging
 
+from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
+from PySide6.QtGui import QImage, QPainter
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QWidget
+
+from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
+
+logger = logging.getLogger(__name__)
 
 _BUTTON_NAMES = {
     Qt.MouseButton.LeftButton: "left",
@@ -46,6 +51,7 @@ class RdpWidget(QWidget):
         password: str,
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
+        keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -78,15 +84,31 @@ class RdpWidget(QWidget):
         self._resize_debounce.setInterval(250)
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
-        self._worker = RdpSessionWorker(host, port, username, password, domain, desktop_size)
+        self._worker = RdpSessionWorker(
+            host, port, username, password, domain, desktop_size, keyboard_layout
+        )
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
         self._worker.signals.error.connect(self._on_error)
         self._worker.signals.disconnected.connect(self._on_disconnected)
         self._worker.start()
 
+        # QApplication.clipboard() is a process-wide singleton, not scoped
+        # to this widget/tab — with multiple RDP tabs open, every local
+        # copy is announced to every open session, not just the focused
+        # one. No existing precedent in this codebase scopes clipboard by
+        # tab/focus; accepted as-is for this first iteration.
+        QApplication.clipboard().dataChanged.connect(self._on_local_clipboard_changed)
+
     def _on_connected(self) -> None:
         self._status_label.hide()
+        # Push whatever's already on the local clipboard once, so a
+        # session that connects with existing clipboard content doesn't
+        # have to wait for the *next* copy before paste-into-remote works.
+        self._worker.send_clipboard_text(QApplication.clipboard().text() or None)
+
+    def _on_local_clipboard_changed(self) -> None:
+        self._worker.send_clipboard_text(QApplication.clipboard().text() or None)
 
     def _on_frame_ready(self, pixels: bytes, width: int, height: int, stride: int) -> None:
         self._frame_bytes = pixels  # QImage below wraps this buffer without copying it
@@ -102,6 +124,13 @@ class RdpWidget(QWidget):
         if not self._closing:
             self._status_label.setText(f"Connection failed: {message}")
             self._status_label.show()
+            # main_view.py tears this tab down as soon as `finished` fires
+            # below (same teardown path a clean disconnect uses) — often
+            # too fast for the status label above to ever actually be
+            # read. A blocking dialog guarantees the user sees why the
+            # connection failed instead of just watching a tab flash open
+            # and close.
+            QMessageBox.warning(self, "RDP Connection Failed", message)
         self._emit_finished_once()
 
     def _on_disconnected(self) -> None:
@@ -173,6 +202,15 @@ class RdpWidget(QWidget):
         """Matches the close_session() convention main_view uses to tear
         down any session tab (terminal, bucket browser, ...) uniformly."""
         self._closing = True
+        # QApplication.clipboard() outlives this widget (process-wide
+        # singleton) -- unlike every other signal source this widget
+        # listens to, which dies with its own RdpSessionWorker, a dangling
+        # connection here would leak and could call into a half-destroyed
+        # widget on the next local copy.
+        try:
+            QApplication.clipboard().dataChanged.disconnect(self._on_local_clipboard_changed)
+        except (TypeError, RuntimeError):
+            pass
         self._worker.stop()
 
     # --- input: widget-space -> remote desktop-space, then forwarded ----
@@ -219,6 +257,23 @@ class RdpWidget(QWidget):
         if steps:
             self._worker.send_mouse_wheel(x, y, steps)
 
+    def event(self, e) -> bool:  # noqa: N802 - Qt override signature
+        # Qt's default QWidget::event() intercepts Tab/Shift+Tab
+        # (Key_Backtab) at this level to cycle keyboard focus between
+        # widgets *before* keyPressEvent() ever sees them -- StrongFocus
+        # alone doesn't disable that. Left unhandled, pressing Tab in the
+        # remote session can silently move local focus away from this
+        # widget instead of forwarding the keystroke, and once that
+        # happens every subsequent keystroke (Shift+key combos included)
+        # goes to whatever local widget focus landed on instead of the
+        # remote session -- until a click brings focus back here. Forward
+        # these directly and report the event as handled so Qt's own
+        # focus-traversal never runs.
+        if e.type() == QEvent.Type.KeyPress and e.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(e)
+            return True
+        return super().event(e)
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         self._forward_key_event(event, down=True)
 
@@ -227,12 +282,33 @@ class RdpWidget(QWidget):
 
     def _forward_key_event(self, event, down: bool) -> None:
         key = Qt.Key(event.key())
+        modifiers = event.modifiers()
+
+        # REVERTED: routing printable keys through send_key_unicode (RDP's
+        # "Unicode" keyboard input, which Windows synthesizes as a
+        # VK_PACKET key event) broke typing in PowerShell/cmd *entirely* --
+        # not just Shift+symbol. Windows console input is built around real
+        # scancode events; VK_PACKET is a documented weak spot for raw
+        # console input specifically (unlike GUI controls, which handle it
+        # fine via WM_CHAR). So scancode has to stay the primary path for
+        # everything with a SCANCODES entry, unicode only as the true
+        # fallback for characters with no dedicated Qt key constant at all
+        # -- back to this file's original shape. The actual Shift+symbol-
+        # in-console bug (confirmed real, and still open) needs a different
+        # fix than swapping the transport.
         scancode = SCANCODES.get(key)
         if scancode is not None:
             code, extended = scancode
+            logger.debug(
+                "key %s modifiers=%s -> scancode=0x%02X extended=%s down=%s",
+                key, modifiers, code, extended, down,
+            )
             self._worker.send_key_scancode(code, extended, down)
             return
         text = event.text()
         for char in text:
             if char.isprintable():
+                logger.debug(
+                    "key %s modifiers=%s -> unicode=%r down=%s", key, modifiers, char, down
+                )
                 self._worker.send_key_unicode(ord(char), down)

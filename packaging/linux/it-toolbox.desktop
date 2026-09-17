@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=IT Toolbox
+Comment=Cross-platform IT tooling desktop app
+Exec=it-toolbox
+Icon=it-toolbox
+Terminal=false
+Categories=Utility;System;Network;

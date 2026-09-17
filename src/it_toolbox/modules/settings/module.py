@@ -16,3 +16,6 @@ class SettingsModule(ToolModule):
         if self._widget is None:
             self._widget = SettingsView()
         return self._widget
+
+    def create_sidebar_widget(self) -> QWidget | None:
+        return self.create_widget().sidebar_widget
