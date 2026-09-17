@@ -1,5 +1,7 @@
-"""One-off diagnostic: dumps the raw system.get_status() and
-wifi.get_config() responses from a real GL.iNet router.
+"""One-off diagnostic: dumps raw responses from a real GL.iNet router
+for every call glinet_client.py makes, plus a few VPN-related calls it
+doesn't yet make (group/config lists, vpn_policy) for investigating
+routers using GL.iNet's newer multi-tunnel "VPN Policy" feature.
 
 `glinet_client.py`'s field-name assumptions were originally best-effort
 from `python-glinet`'s own README/bundled api_description.json example
@@ -37,11 +39,34 @@ def main() -> int:
     glinet.login()
     try:
         api = glinet.get_api_client()
-        print("=== system.get_status() ===")
-        print(json.dumps(api.system.get_status(), indent=2))
-        print()
-        print("=== wifi.get_config() ===")
-        print(json.dumps(api.wifi.get_config(), indent=2))
+        calls = [
+            ("system.get_status()", lambda: api.system.get_status()),
+            ("wifi.get_config()", lambda: api.wifi.get_config()),
+            # wg_client.get_status()/wg_server.get_status() report a
+            # single "active" tunnel's status in pyglinet's documented
+            # (single-tunnel) model. Routers with GL.iNet's newer
+            # multi-tunnel "VPN Policy" feature (named tunnels, each its
+            # own client/server config) may not surface a policy-routed
+            # tunnel through this single-status call at all -- the
+            # group/config-list and vpn_policy calls below exist to see
+            # the real shape of that case.
+            ("wg_client.get_status()", lambda: api.wg_client.get_status()),
+            ("wg_client.get_group_list()", lambda: api.wg_client.get_group_list()),
+            ("wg_client.get_all_config_list()", lambda: api.wg_client.get_all_config_list()),
+            ("wg_server.get_status()", lambda: api.wg_server.get_status()),
+            ("wg_server.get_peer_list()", lambda: api.wg_server.get_peer_list()),
+            ("ovpn_client.get_status()", lambda: api.ovpn_client.get_status()),
+            ("ovpn_client.get_group_list()", lambda: api.ovpn_client.get_group_list()),
+            ("ovpn_server.get_status()", lambda: api.ovpn_server.get_status()),
+            ("vpn_policy.get_global_policy()", lambda: api.vpn_policy.get_global_policy()),
+        ]
+        for label, call in calls:
+            print(f"=== {label} ===")
+            try:
+                print(json.dumps(call(), indent=2))
+            except Exception as exc:  # noqa: BLE001 - want to see every call's outcome, errors included
+                print(f"<raised {type(exc).__name__}: {exc}>")
+            print()
     finally:
         glinet.logout()
     return 0
