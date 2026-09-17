@@ -11,8 +11,9 @@ own GlInet session per call — nothing here holds a live connection open.
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -33,6 +34,43 @@ from it_toolbox.modules.connection_manager.models import (
     GlinetVpnTunnel,
     GlinetWifiRadio,
 )
+
+
+class _WifiNetworkEditDialog(QDialog):
+    """Edit one WiFi network's SSID/password -- opened via the WiFi
+    tab's table (double-click a row, or select + "Edit…"), since the
+    table itself is read-only like the VPN tab's."""
+
+    def __init__(self, radio: GlinetWifiRadio, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit {radio.ssid or radio.iface_name}")
+
+        self._ssid_edit = QLineEdit(radio.ssid)
+        self._password_edit = QLineEdit()
+        self._password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._password_edit.setPlaceholderText("Leave blank to keep the existing password")
+        status_label = QLabel("Enabled" if radio.enabled else "Disabled")
+
+        form = QFormLayout()
+        form.addRow("SSID:", self._ssid_edit)
+        form.addRow("Password:", self._password_edit)
+        form.addRow("Status:", status_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def ssid(self) -> str:
+        return self._ssid_edit.text().strip()
+
+    def password(self) -> str:
+        return self._password_edit.text()
 
 
 class GlinetDashboardWidget(QWidget):
@@ -153,11 +191,31 @@ class GlinetDashboardWidget(QWidget):
     # -- WiFi -----------------------------------------------------------------
 
     def _build_wifi_tab(self) -> QWidget:
-        self._wifi_container = QWidget()
-        self._wifi_layout = QVBoxLayout(self._wifi_container)
-        self._wifi_layout.addWidget(QLabel("Loading…"))
-        self._wifi_layout.addStretch(1)
-        return self._wifi_container
+        widget = QWidget()
+        self._wifi_radios: list[GlinetWifiRadio] = []
+        self._wifi_table = QTableWidget(0, 5)
+        self._wifi_table.setHorizontalHeaderLabels(["Network", "Device", "Band", "SSID", "Status"])
+        self._wifi_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._wifi_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._wifi_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._wifi_table.itemDoubleClicked.connect(lambda _item: self._on_edit_wifi_clicked())
+
+        edit_button = QPushButton("Edit…")
+        edit_button.clicked.connect(self._on_edit_wifi_clicked)
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self._reload_wifi)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(edit_button)
+        button_row.addWidget(refresh_button)
+        button_row.addStretch(1)
+
+        layout = QVBoxLayout(widget)
+        layout.addWidget(self._wifi_table)
+        layout.addLayout(button_row)
+        return widget
 
     def _reload_wifi(self) -> None:
         async_utils.run_in_background(
@@ -167,65 +225,30 @@ class GlinetDashboardWidget(QWidget):
         )
 
     def _on_wifi_loaded(self, radios: list[GlinetWifiRadio]) -> None:
-        while self._wifi_layout.count():
-            item = self._wifi_layout.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
-
-        if not radios:
-            self._wifi_layout.addWidget(QLabel("No WiFi radios reported."))
-        for label, network_radios in self._group_radios_by_network_type(radios):
-            self._wifi_layout.addWidget(self._build_network_type_group(label, network_radios))
-        self._wifi_layout.addStretch(1)
-
-    @staticmethod
-    def _group_radios_by_network_type(
-        radios: list[GlinetWifiRadio],
-    ) -> list[tuple[str, list[GlinetWifiRadio]]]:
-        """Groups all Main networks together (2.4G, 5G, ... one after
-        another) and all Guest networks together, Main first -- rather
-        than by physical radio, so the two purposes aren't interleaved."""
-        grouped: dict[bool, list[GlinetWifiRadio]] = {False: [], True: []}
-        for radio in radios:
-            grouped[radio.guest].append(radio)
-        return [
-            ("Guest" if is_guest else "Main", group)
-            for is_guest, group in grouped.items()
-            if group
+        # All Main networks (2.4G, 5G, ...) together, then all Guest
+        # networks together -- rather than interleaved by physical radio.
+        self._wifi_radios = [
+            radio for is_guest in (False, True) for radio in radios if radio.guest is is_guest
         ]
+        self._wifi_table.setRowCount(len(self._wifi_radios))
+        for row, radio in enumerate(self._wifi_radios):
+            band_label = "2.4G" if radio.band == "2G" else radio.band
+            self._wifi_table.setItem(row, 0, QTableWidgetItem("Guest" if radio.guest else "Main"))
+            self._wifi_table.setItem(row, 1, QTableWidgetItem(radio.device))
+            self._wifi_table.setItem(row, 2, QTableWidgetItem(band_label))
+            self._wifi_table.setItem(row, 3, QTableWidgetItem(radio.ssid))
+            self._wifi_table.setItem(
+                row, 4, QTableWidgetItem("Enabled" if radio.enabled else "Disabled")
+            )
 
-    def _build_network_type_group(self, label: str, radios: list[GlinetWifiRadio]) -> QGroupBox:
-        box = QGroupBox(label)
-        layout = QVBoxLayout(box)
-        for radio in radios:
-            layout.addWidget(self._build_band_section(radio))
-        return box
-
-    def _build_band_section(self, radio: GlinetWifiRadio) -> QGroupBox:
-        band_label = "2.4G" if radio.band == "2G" else radio.band
-        title = f"{radio.device} ({band_label})" if band_label else radio.device
-        section = QGroupBox(title)
-        form = QFormLayout()
-
-        ssid_edit = QLineEdit(radio.ssid)
-        password_edit = QLineEdit()
-        password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        password_edit.setPlaceholderText("Leave blank to keep the existing password")
-        enabled_label = QLabel("Enabled" if radio.enabled else "Disabled")
-
-        form.addRow("SSID:", ssid_edit)
-        form.addRow("Password:", password_edit)
-        form.addRow("Status:", enabled_label)
-
-        save_button = QPushButton("Save")
-        save_button.clicked.connect(
-            lambda: self._save_wifi_config(radio, ssid_edit.text().strip(), password_edit.text())
-        )
-
-        layout = QVBoxLayout(section)
-        layout.addLayout(form)
-        layout.addWidget(save_button)
-        return section
+    def _on_edit_wifi_clicked(self) -> None:
+        row = self._wifi_table.currentRow()
+        if row < 0 or row >= len(self._wifi_radios):
+            return
+        radio = self._wifi_radios[row]
+        dialog = _WifiNetworkEditDialog(radio, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save_wifi_config(radio, dialog.ssid(), dialog.password())
 
     def _save_wifi_config(self, radio: GlinetWifiRadio, ssid: str, password: str) -> None:
         async_utils.run_in_background(

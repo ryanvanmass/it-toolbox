@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QGroupBox, QLabel, QMessageBox
+from PySide6.QtWidgets import QLabel, QMessageBox
 
 from it_toolbox.modules.connection_manager.models import (
     GlinetClientInfo,
@@ -107,84 +107,41 @@ def test_clients_tab_populates_from_list_clients(qtbot, monkeypatch):
     assert dashboard._clients_table.item(0, 3).text() == "Yes"
 
 
-def _wifi_tab_loaded(dashboard) -> bool:
-    """True once the WiFi tab's async load has actually replaced the
-    initial "Loading…" QLabel placeholder with real content.
-    count() > 1 alone is NOT a safe wait condition here -- the
-    placeholder state (QLabel + trailing stretch) already satisfies it,
-    and for some radio counts even matches the final count exactly,
-    letting a test read stale placeholder content as if it were loaded
-    (found the hard way: a device_box.title() AttributeError against
-    what turned out to still be the QLabel).
-    """
-    first_item = dashboard._wifi_layout.itemAt(0)
-    return first_item is not None and isinstance(first_item.widget(), QGroupBox)
-
-
-def test_wifi_tab_builds_a_group_per_radio(qtbot, monkeypatch):
+def test_wifi_tab_populates_from_get_wifi_config(qtbot, monkeypatch):
     radios = [
-        GlinetWifiRadio(device="radio0", iface_name="default_radio0", band="2.4G",
+        GlinetWifiRadio(device="radio0", iface_name="default_radio0", band="2G",
                           ssid="MyWifi", enabled=True)
     ]
     dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
-    qtbot.waitUntil(lambda: _wifi_tab_loaded(dashboard), timeout=2000)
+    qtbot.waitUntil(lambda: dashboard._wifi_table.rowCount() == 1, timeout=2000)
 
-    assert dashboard._wifi_layout.count() == 2  # one QGroupBox + the trailing stretch
+    assert dashboard._wifi_table.item(0, 0).text() == "Main"
+    assert dashboard._wifi_table.item(0, 1).text() == "radio0"
+    assert dashboard._wifi_table.item(0, 2).text() == "2.4G"
+    assert dashboard._wifi_table.item(0, 3).text() == "MyWifi"
+    assert dashboard._wifi_table.item(0, 4).text() == "Enabled"
 
 
-def test_wifi_tab_groups_main_and_guest_into_separate_boxes(qtbot, monkeypatch):
-    # Regression test: main and guest networks otherwise render as flat,
-    # unlabeled-as-a-set sibling boxes -- group all Main networks
-    # together and all Guest networks together instead, Main first,
-    # rather than by physical radio.
+def test_wifi_tab_lists_main_networks_before_guest(qtbot, monkeypatch):
+    # Regression test: main and guest networks otherwise interleave in
+    # whatever order the router happens to report them -- list all Main
+    # networks first, then all Guest networks.
     radios = [
-        GlinetWifiRadio(device="radio0", iface_name="wifi2g", band="2G",
-                          ssid="MyWifi", enabled=True, guest=False),
         GlinetWifiRadio(device="radio0", iface_name="guest2g", band="2G",
-                          ssid="MyWifi-Guest", enabled=True, guest=True),
-    ]
-    dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
-    qtbot.waitUntil(lambda: _wifi_tab_loaded(dashboard), timeout=2000)
-
-    # Two top-level boxes (Main, Guest) + the trailing stretch.
-    assert dashboard._wifi_layout.count() == 3
-    titles = [
-        dashboard._wifi_layout.itemAt(i).widget().title()
-        for i in range(dashboard._wifi_layout.count())
-        if dashboard._wifi_layout.itemAt(i).widget() is not None
-    ]
-    assert titles == ["Main", "Guest"]
-
-    main_box = dashboard._wifi_layout.itemAt(0).widget()
-    assert main_box.layout().itemAt(0).widget().title() == "radio0 (2.4G)"
-
-
-def test_wifi_tab_groups_all_bands_of_the_same_network_type_together(qtbot, monkeypatch):
-    # The main request this shape exists for: 2.4G and 5G Main networks
-    # (different physical radios) should appear one after another under
-    # a single "Main" box, not split into separate per-radio boxes.
-    radios = [
+                          ssid="Guest-2G", enabled=True, guest=True),
         GlinetWifiRadio(device="radio0", iface_name="wifi2g", band="2G",
-                          ssid="MyWifi", enabled=True, guest=False),
+                          ssid="Main-2G", enabled=True, guest=False),
         GlinetWifiRadio(device="radio1", iface_name="wifi5g", band="5G",
-                          ssid="MyWifi", enabled=True, guest=False),
+                          ssid="Main-5G", enabled=True, guest=False),
     ]
     dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
-    qtbot.waitUntil(lambda: _wifi_tab_loaded(dashboard), timeout=2000)
+    qtbot.waitUntil(lambda: dashboard._wifi_table.rowCount() == 3, timeout=2000)
 
-    # Only Main networks exist here -- one top-level box + the stretch.
-    assert dashboard._wifi_layout.count() == 2
-    main_box = dashboard._wifi_layout.itemAt(0).widget()
-    assert main_box.title() == "Main"
-
-    nested_titles = [
-        main_box.layout().itemAt(i).widget().title()
-        for i in range(main_box.layout().count())
-    ]
-    assert nested_titles == ["radio0 (2.4G)", "radio1 (5G)"]
+    ssids = [dashboard._wifi_table.item(row, 3).text() for row in range(3)]
+    assert ssids == ["Main-2G", "Main-5G", "Guest-2G"]
 
 
-def test_wifi_save_calls_set_wifi_config_with_expected_params(qtbot, monkeypatch):
+def test_edit_wifi_network_opens_dialog_and_saves(qtbot, monkeypatch):
     import it_toolbox.widgets.glinet_dashboard_widget as module
 
     radios = [
@@ -192,7 +149,8 @@ def test_wifi_save_calls_set_wifi_config_with_expected_params(qtbot, monkeypatch
                           ssid="MyWifi", enabled=True)
     ]
     dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
-    qtbot.waitUntil(lambda: _wifi_tab_loaded(dashboard), timeout=2000)
+    qtbot.waitUntil(lambda: dashboard._wifi_table.rowCount() == 1, timeout=2000)
+    dashboard._wifi_table.selectRow(0)
 
     calls = []
     monkeypatch.setattr(
@@ -200,14 +158,32 @@ def test_wifi_save_calls_set_wifi_config_with_expected_params(qtbot, monkeypatch
         "set_wifi_config",
         lambda host, password, **kwargs: calls.append(kwargs),
     )
+    monkeypatch.setattr(
+        module._WifiNetworkEditDialog, "exec",
+        lambda self: module.QDialog.DialogCode.Accepted,
+    )
+    monkeypatch.setattr(module._WifiNetworkEditDialog, "ssid", lambda self: "NewName")
+    monkeypatch.setattr(module._WifiNetworkEditDialog, "password", lambda self: "newpass")
 
-    dashboard._save_wifi_config(radios[0], "NewName", "newpass")
+    dashboard._on_edit_wifi_clicked()
 
     qtbot.waitUntil(lambda: len(calls) == 1, timeout=2000)
     assert calls == [
         {"device": "radio0", "iface_name": "default_radio0", "ssid": "NewName",
          "key": "newpass", "enabled": True}
     ]
+
+
+def test_edit_wifi_network_does_nothing_without_a_selected_row(qtbot, monkeypatch):
+    radios = [
+        GlinetWifiRadio(device="radio0", iface_name="default_radio0", band="2.4G",
+                          ssid="MyWifi", enabled=True)
+    ]
+    dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
+    qtbot.waitUntil(lambda: dashboard._wifi_table.rowCount() == 1, timeout=2000)
+    dashboard._wifi_table.clearSelection()
+
+    dashboard._on_edit_wifi_clicked()  # should not raise
 
 
 def test_reboot_confirms_before_calling_reboot(qtbot, monkeypatch):

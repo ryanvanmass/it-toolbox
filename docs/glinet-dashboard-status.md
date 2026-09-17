@@ -37,8 +37,10 @@ pip install python-glinet
   client counts (from a single `system.get_status()` call).
 - **Clients** — connected devices (name, MAC, IP, online) from
   `clients.get_list()`.
-- **WiFi** — view and edit SSID/password/enabled per radio/interface via
-  `wifi.get_config()`/`wifi.set_config()`.
+- **WiFi** — a flat table (Network/Device/Band/SSID/Status, Main
+  networks listed before Guest) matching the VPN tab's own format;
+  double-click a row (or select + "Edit…") to change its SSID/password
+  in a small dialog, via `wifi.get_config()`/`wifi.set_config()`.
 - **VPN** — **read-only** list of configured tunnels (name, type,
   enabled/up status, routing criteria from/to/via, kill switch) via
   `list_vpn_tunnels()`. Adding, editing, or toggling VPN tunnels is out
