@@ -52,14 +52,33 @@ thread to manage).
 
 ## Field-mapping caveat
 
-Exact JSON field names in `glinet_client.py` (the nested shape of
-`system.get_status()`, `wifi.get_config()`'s per-band/iface structure,
-etc.) are best-effort from `python-glinet`'s own README and bundled
-`api_description.json` example output — not verified against a live
-router. If a field comes back missing or differently shaped than
-expected, that's the file to check first; it exists specifically so a
-correction stays isolated there rather than rippling into `models.py` or
-the UI.
+Exact JSON field names in `glinet_client.py` were originally best-effort
+from `python-glinet`'s own README and bundled `api_description.json`
+example output, then corrected against a real router (a GL-MT3000
+"Berl AX") during manual testing:
+
+- `system.get_status()`'s `wifi`, `service`, and `client` fields are
+  **lists**, not dicts keyed by name (a service's status is looked up
+  by its own `"name"` field) — the original dict assumption crashed
+  outright (`'list' object has no attribute 'items'`).
+- `wifi.get_config()`'s per-band configs live under a top-level `"res"`
+  list, not directly on the result object; each band has *separate*
+  `"band"` ("2G"/"5G") and `"hwmode"` ("11ac/ax") fields — easy to
+  mix up, and a first fix did (showing hwmode as the WiFi tab's band
+  label instead of "2G"/"5G").
+- `system.get_status()`'s `uptime` is a raw (and, live, fractional)
+  seconds count, not a display string — rendered via `_format_uptime()`.
+
+Still not fully verified against a live router: WiFi tab SSID/status
+accuracy and VPN client/server up/down status both looked questionable
+in testing (as of this writing) but the exact real field shape hadn't
+been captured yet — see `scripts/glinet_dump.py`, a one-off diagnostic
+that logs into a real router and prints the raw `system.get_status()`/
+`wifi.get_config()` JSON, written specifically to ground the next round
+of fixes instead of guessing a third time. If a field comes back missing
+or differently shaped than expected, `glinet_client.py` is the file to
+check first; corrections should stay isolated there rather than
+rippling into `models.py` or the UI.
 
 ## Host passwords
 
