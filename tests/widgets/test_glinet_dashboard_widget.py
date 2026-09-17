@@ -64,7 +64,9 @@ def test_overview_tab_populates_from_get_overview(qtbot, monkeypatch):
 def test_vpn_tab_populates_from_list_vpn_tunnels(qtbot, monkeypatch):
     tunnels = [
         GlinetVpnTunnel(name="Bonkcloud", type="wireguard", enabled=True, up=True,
-                         from_summary="1 connection type", to_summary="3 addresses",
+                         from_summary="1 connection type", from_detail="lan",
+                         to_summary="3 addresses",
+                         to_detail="192.168.2.0/24\n172.16.42.0/24\n192.168.50.0/24",
                          via_summary="Bonkcloud / WireGuard-Server-GLINet", killswitch=True),
         GlinetVpnTunnel(name="Guest Wifi", type="wireguard", enabled=True, up=True,
                          from_summary="All clients", to_summary="All targets",
@@ -77,8 +79,12 @@ def test_vpn_tab_populates_from_list_vpn_tunnels(qtbot, monkeypatch):
     assert dashboard._vpn_table.item(0, 0).text() == "Bonkcloud (Kill Switch)"
     assert dashboard._vpn_table.item(0, 1).text() == "wireguard"
     assert dashboard._vpn_table.item(0, 2).text() == "1 connection type"
+    assert dashboard._vpn_table.item(0, 2).toolTip() == "lan"
     assert dashboard._vpn_table.item(0, 3).text() == "3 addresses"
+    assert dashboard._vpn_table.item(0, 3).toolTip() == "192.168.2.0/24\n172.16.42.0/24\n192.168.50.0/24"
     assert dashboard._vpn_table.item(0, 4).text() == "Bonkcloud / WireGuard-Server-GLINet"
+    # "All clients"/"All targets" already say everything -- no tooltip.
+    assert dashboard._vpn_table.item(1, 2).toolTip() == ""
     assert dashboard._vpn_table.item(0, 5).text() == "Up"
     assert dashboard._vpn_table.item(2, 0).text() == "Backup Tunnel"
     assert dashboard._vpn_table.item(2, 5).text() == "Disabled"

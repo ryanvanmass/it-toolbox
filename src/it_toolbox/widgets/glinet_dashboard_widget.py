@@ -284,8 +284,17 @@ class GlinetDashboardWidget(QWidget):
             name_text = f"{tunnel.name} (Kill Switch)" if tunnel.killswitch else tunnel.name
             self._vpn_table.setItem(row, 0, QTableWidgetItem(name_text))
             self._vpn_table.setItem(row, 1, QTableWidgetItem(tunnel.type))
-            self._vpn_table.setItem(row, 2, QTableWidgetItem(tunnel.from_summary))
-            self._vpn_table.setItem(row, 3, QTableWidgetItem(tunnel.to_summary))
+
+            from_item = QTableWidgetItem(tunnel.from_summary)
+            if tunnel.from_detail:
+                from_item.setToolTip(tunnel.from_detail)
+            self._vpn_table.setItem(row, 2, from_item)
+
+            to_item = QTableWidgetItem(tunnel.to_summary)
+            if tunnel.to_detail:
+                to_item.setToolTip(tunnel.to_detail)
+            self._vpn_table.setItem(row, 3, to_item)
+
             self._vpn_table.setItem(row, 4, QTableWidgetItem(tunnel.via_summary))
             self._vpn_table.setItem(row, 5, QTableWidgetItem(status_text))
 

@@ -178,25 +178,27 @@ def list_vpn_tunnels(host: GlinetHost, password: str) -> list[GlinetVpnTunnel]:
             status_by_tunnel_id = {
                 entry.get("tunnel_id"): entry for entry in status_result.get("status_list") or []
             }
-            return [
-                GlinetVpnTunnel(
+            tunnels = []
+            # "tunnels" only -- "default_tunnels" is the router's own
+            # built-in fallback policy (e.g. "last sort default
+            # policy"), not a real named VPN tunnel an admin created.
+            for policy in tunnel_result.get("tunnels") or []:
+                status_entry = status_by_tunnel_id.get(policy.get("tunnel_id"), {})
+                from_summary, from_detail = _format_vpn_from(policy.get("from") or {})
+                to_summary, to_detail = _format_vpn_to(policy.get("to") or {})
+                tunnels.append(GlinetVpnTunnel(
                     name=policy.get("name", ""),
                     type=(policy.get("via") or {}).get("type", ""),
                     enabled=bool(policy.get("enabled", False)),
-                    up=status_by_tunnel_id.get(policy.get("tunnel_id"), {}).get("status") == 1,
-                    from_summary=_format_vpn_from(policy.get("from") or {}),
-                    to_summary=_format_vpn_to(policy.get("to") or {}),
-                    via_summary=_vpn_via_summary(
-                        api_client, policy.get("via") or {},
-                        status_by_tunnel_id.get(policy.get("tunnel_id"), {}),
-                    ),
+                    up=status_entry.get("status") == 1,
+                    from_summary=from_summary,
+                    from_detail=from_detail,
+                    to_summary=to_summary,
+                    to_detail=to_detail,
+                    via_summary=_vpn_via_summary(api_client, policy.get("via") or {}, status_entry),
                     killswitch=bool(policy.get("killswitch", False)),
-                )
-                # "tunnels" only -- "default_tunnels" is the router's own
-                # built-in fallback policy (e.g. "last sort default
-                # policy"), not a real named VPN tunnel an admin created.
-                for policy in tunnel_result.get("tunnels") or []
-            ]
+                ))
+            return tunnels
         except Exception:  # noqa: BLE001 - fall back below; not every router has this module
             pass
 
@@ -217,22 +219,31 @@ def list_vpn_tunnels(host: GlinetHost, password: str) -> list[GlinetVpnTunnel]:
     return _call(host, password, fetch)
 
 
-def _format_vpn_from(from_obj: dict) -> str:
+def _format_vpn_from(from_obj: dict) -> tuple[str, str]:
     """Matches the router's own web UI wording ("All Clients" / "1
-    Connection Type") for a policy's traffic-source criteria."""
+    Connection Type") for a policy's traffic-source criteria. The
+    second value is a longer-form detail (the actual interface names)
+    for display as a tooltip, empty when the summary already says it
+    all ("All clients")."""
     if from_obj.get("type") == "interface":
-        count = len(from_obj.get("interface_list") or [])
-        return f"{count} connection type" + ("" if count == 1 else "s")
-    return "All clients"
+        interfaces = [i for i in (from_obj.get("interface_list") or []) if i]
+        count = len(interfaces)
+        summary = f"{count} connection type" + ("" if count == 1 else "s")
+        return summary, ", ".join(interfaces)
+    return "All clients", ""
 
 
-def _format_vpn_to(to_obj: dict) -> str:
+def _format_vpn_to(to_obj: dict) -> tuple[str, str]:
     """Matches the router's own web UI wording ("All targets" / "3
-    Addresses") for a policy's traffic-destination criteria."""
+    Addresses") for a policy's traffic-destination criteria. The second
+    value is a longer-form detail (the actual address list) for display
+    as a tooltip, empty when the summary already says it all ("All
+    targets")."""
     if to_obj.get("type") == "domain":
-        count = len([line for line in (to_obj.get("domain_list") or "").splitlines() if line.strip()])
-        return f"{count} address" + ("" if count == 1 else "es")
-    return "All targets"
+        addresses = [line.strip() for line in (to_obj.get("domain_list") or "").splitlines() if line.strip()]
+        summary = f"{len(addresses)} address" + ("" if len(addresses) == 1 else "es")
+        return summary, "\n".join(addresses)
+    return "All targets", ""
 
 
 def _vpn_via_summary(api_client, via: dict, status_entry: dict) -> str:

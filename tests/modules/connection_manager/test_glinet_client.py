@@ -287,13 +287,17 @@ def test_list_vpn_tunnels_uses_the_vpn_client_module_when_available(monkeypatch)
     assert bonkcloud.enabled is True
     assert bonkcloud.up is True
     assert bonkcloud.from_summary == "1 connection type"
+    assert bonkcloud.from_detail == "lan"
     assert bonkcloud.to_summary == "3 addresses"
+    assert bonkcloud.to_detail == "192.168.2.0/24\n172.16.42.0/24\n192.168.50.0/24"
     assert bonkcloud.via_summary == "Bonkcloud / WireGuard-Server-GLINet"
     assert bonkcloud.killswitch is True
 
     guest_wifi = tunnels[1]
     assert guest_wifi.from_summary == "All clients"
+    assert guest_wifi.from_detail == ""
     assert guest_wifi.to_summary == "All targets"
+    assert guest_wifi.to_detail == ""
     assert guest_wifi.via_summary == "Bonkcloud / Privacy-VPN-Client-1"
     assert guest_wifi.up is False  # status: 0 in this fixture
 
@@ -317,6 +321,34 @@ def test_vpn_via_summary_falls_back_to_peer_name_when_group_lookup_fails(monkeyp
     tunnels = glinet_client.list_vpn_tunnels(HOST, "secret")
 
     assert tunnels[0].via_summary == "SomePeer"
+
+
+def test_format_vpn_from_interface_gives_summary_and_detail():
+    summary, detail = glinet_client._format_vpn_from(
+        {"type": "interface", "interface_list": ["lan", "guest"]}
+    )
+    assert summary == "2 connection types"
+    assert detail == "lan, guest"
+
+
+def test_format_vpn_from_default_has_no_detail():
+    summary, detail = glinet_client._format_vpn_from({"type": "default"})
+    assert summary == "All clients"
+    assert detail == ""
+
+
+def test_format_vpn_to_domain_gives_summary_and_detail():
+    summary, detail = glinet_client._format_vpn_to(
+        {"type": "domain", "domain_list": "10.0.0.0/8\n192.168.0.0/16"}
+    )
+    assert summary == "2 addresses"
+    assert detail == "10.0.0.0/8\n192.168.0.0/16"
+
+
+def test_format_vpn_to_default_has_no_detail():
+    summary, detail = glinet_client._format_vpn_to({"type": "default"})
+    assert summary == "All targets"
+    assert detail == ""
 
 
 def test_list_vpn_tunnels_falls_back_to_classic_endpoints(monkeypatch):

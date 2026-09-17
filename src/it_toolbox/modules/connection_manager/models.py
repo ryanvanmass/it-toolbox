@@ -122,6 +122,13 @@ class GlinetVpnTunnel:
     to_summary: str = ""
     via_summary: str = ""
     killswitch: bool = False
+    # Longer-form detail for from_summary/to_summary (e.g. the actual
+    # interface names or address list a count summarizes) -- shown as a
+    # tooltip rather than in the table cell itself, since a raw address
+    # list is too long to sit in a column. Empty when the criteria is
+    # already fully expressed by the summary (e.g. "All clients").
+    from_detail: str = ""
+    to_detail: str = ""
 
 
 @dataclass(frozen=True)
