@@ -232,7 +232,13 @@ def test_get_wifi_config_parses_bands_and_ifaces(monkeypatch):
         "res": [
             {
                 "device": "radio0",
-                "hwmode": "2.4G",
+                # "band" and "hwmode" are deliberately given different
+                # values here -- a prior version of this parser read
+                # "hwmode" for the radio's band by mistake, which this
+                # test would not have caught if both fields held the
+                # same value.
+                "band": "2.4G",
+                "hwmode": "11ac/ax",
                 "ifaces": [{"name": "default_radio0", "ssid": "MyWifi", "enabled": True}],
             }
         ]

@@ -242,7 +242,12 @@ def get_wifi_config(host: GlinetHost, password: str) -> list[GlinetWifiRadio]:
                         # The iface's own identifier is "name" (e.g.
                         # "default_radio0"), not "iface_name".
                         iface_name=iface.get("name", ""),
-                        band=band_config.get("hwmode", ""),
+                        # "band" ("2G"/"5G") is a separate field from
+                        # "hwmode" ("11ac/ax", the PHY standard) -- easy
+                        # to mix up since they sit right next to each
+                        # other in the response; this is the one meant
+                        # for display as the radio's band.
+                        band=band_config.get("band", ""),
                         ssid=iface.get("ssid", ""),
                         enabled=bool(iface.get("enabled", False)),
                     )
