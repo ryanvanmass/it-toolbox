@@ -104,11 +104,11 @@ def test_wifi_tab_builds_a_group_per_radio(qtbot, monkeypatch):
     assert dashboard._wifi_layout.count() == 2  # one QGroupBox + the trailing stretch
 
 
-def test_wifi_tab_groups_main_and_guest_under_one_device_box(qtbot, monkeypatch):
-    # Regression test: a radio's main and guest networks otherwise render
-    # as two flat, unrelated-looking sibling boxes with nothing tying
-    # them together as the same physical radio's two networks --
-    # confirmed live against a real router.
+def test_wifi_tab_groups_main_and_guest_into_separate_boxes(qtbot, monkeypatch):
+    # Regression test: main and guest networks otherwise render as flat,
+    # unlabeled-as-a-set sibling boxes -- group all Main networks
+    # together and all Guest networks together instead, Main first,
+    # rather than by physical radio.
     radios = [
         GlinetWifiRadio(device="radio0", iface_name="wifi2g", band="2G",
                           ssid="MyWifi", enabled=True, guest=False),
@@ -118,19 +118,23 @@ def test_wifi_tab_groups_main_and_guest_under_one_device_box(qtbot, monkeypatch)
     dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
     qtbot.waitUntil(lambda: _wifi_tab_loaded(dashboard), timeout=2000)
 
-    # One outer device box (+ the trailing stretch) -- not two flat boxes.
-    assert dashboard._wifi_layout.count() == 2
-    device_box = dashboard._wifi_layout.itemAt(0).widget()
-    assert device_box.title() == "radio0 (2.4G)"
-
-    nested_titles = [
-        device_box.layout().itemAt(i).widget().title()
-        for i in range(device_box.layout().count())
+    # Two top-level boxes (Main, Guest) + the trailing stretch.
+    assert dashboard._wifi_layout.count() == 3
+    titles = [
+        dashboard._wifi_layout.itemAt(i).widget().title()
+        for i in range(dashboard._wifi_layout.count())
+        if dashboard._wifi_layout.itemAt(i).widget() is not None
     ]
-    assert nested_titles == ["Main", "Guest"]
+    assert titles == ["Main", "Guest"]
+
+    main_box = dashboard._wifi_layout.itemAt(0).widget()
+    assert main_box.layout().itemAt(0).widget().title() == "radio0 (2.4G)"
 
 
-def test_wifi_tab_keeps_different_devices_in_separate_boxes(qtbot, monkeypatch):
+def test_wifi_tab_groups_all_bands_of_the_same_network_type_together(qtbot, monkeypatch):
+    # The main request this shape exists for: 2.4G and 5G Main networks
+    # (different physical radios) should appear one after another under
+    # a single "Main" box, not split into separate per-radio boxes.
     radios = [
         GlinetWifiRadio(device="radio0", iface_name="wifi2g", band="2G",
                           ssid="MyWifi", enabled=True, guest=False),
@@ -140,14 +144,16 @@ def test_wifi_tab_keeps_different_devices_in_separate_boxes(qtbot, monkeypatch):
     dashboard = _make_dashboard(qtbot, monkeypatch, wifi_radios=radios)
     qtbot.waitUntil(lambda: _wifi_tab_loaded(dashboard), timeout=2000)
 
-    # Two separate devices -- two outer boxes (+ the trailing stretch).
-    assert dashboard._wifi_layout.count() == 3
-    titles = [
-        dashboard._wifi_layout.itemAt(i).widget().title()
-        for i in range(dashboard._wifi_layout.count())
-        if dashboard._wifi_layout.itemAt(i).widget() is not None
+    # Only Main networks exist here -- one top-level box + the stretch.
+    assert dashboard._wifi_layout.count() == 2
+    main_box = dashboard._wifi_layout.itemAt(0).widget()
+    assert main_box.title() == "Main"
+
+    nested_titles = [
+        main_box.layout().itemAt(i).widget().title()
+        for i in range(main_box.layout().count())
     ]
-    assert titles == ["radio0 (2.4G)", "radio1 (5G)"]
+    assert nested_titles == ["radio0 (2.4G)", "radio1 (5G)"]
 
 
 def test_wifi_save_calls_set_wifi_config_with_expected_params(qtbot, monkeypatch):

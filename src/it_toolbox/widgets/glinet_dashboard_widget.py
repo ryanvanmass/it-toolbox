@@ -170,34 +170,37 @@ class GlinetDashboardWidget(QWidget):
 
         if not radios:
             self._wifi_layout.addWidget(QLabel("No WiFi radios reported."))
-        for device, band, device_radios in self._group_radios_by_device(radios):
-            self._wifi_layout.addWidget(self._build_device_group(device, band, device_radios))
+        for label, network_radios in self._group_radios_by_network_type(radios):
+            self._wifi_layout.addWidget(self._build_network_type_group(label, network_radios))
         self._wifi_layout.addStretch(1)
 
     @staticmethod
-    def _group_radios_by_device(
+    def _group_radios_by_network_type(
         radios: list[GlinetWifiRadio],
-    ) -> list[tuple[str, str, list[GlinetWifiRadio]]]:
-        """Groups radios sharing the same physical device+band together
-        (its Main and Guest networks), preserving first-seen order --
-        these otherwise rendered as flat, unrelated-looking sibling boxes
-        even though a device's own networks belong together."""
-        grouped: dict[tuple[str, str], list[GlinetWifiRadio]] = {}
+    ) -> list[tuple[str, list[GlinetWifiRadio]]]:
+        """Groups all Main networks together (2.4G, 5G, ... one after
+        another) and all Guest networks together, Main first -- rather
+        than by physical radio, so the two purposes aren't interleaved."""
+        grouped: dict[bool, list[GlinetWifiRadio]] = {False: [], True: []}
         for radio in radios:
-            grouped.setdefault((radio.device, radio.band), []).append(radio)
-        return [(device, band, group) for (device, band), group in grouped.items()]
+            grouped[radio.guest].append(radio)
+        return [
+            ("Guest" if is_guest else "Main", group)
+            for is_guest, group in grouped.items()
+            if group
+        ]
 
-    def _build_device_group(self, device: str, band: str, radios: list[GlinetWifiRadio]) -> QGroupBox:
-        band_label = "2.4G" if band == "2G" else band
-        title = f"{device} ({band_label})" if band_label else device
-        box = QGroupBox(title)
+    def _build_network_type_group(self, label: str, radios: list[GlinetWifiRadio]) -> QGroupBox:
+        box = QGroupBox(label)
         layout = QVBoxLayout(box)
         for radio in radios:
-            layout.addWidget(self._build_network_section(radio))
+            layout.addWidget(self._build_band_section(radio))
         return box
 
-    def _build_network_section(self, radio: GlinetWifiRadio) -> QGroupBox:
-        section = QGroupBox("Guest" if radio.guest else "Main")
+    def _build_band_section(self, radio: GlinetWifiRadio) -> QGroupBox:
+        band_label = "2.4G" if radio.band == "2G" else radio.band
+        title = f"{radio.device} ({band_label})" if band_label else radio.device
+        section = QGroupBox(title)
         form = QFormLayout()
 
         ssid_edit = QLineEdit(radio.ssid)
