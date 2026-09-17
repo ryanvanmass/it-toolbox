@@ -108,7 +108,6 @@ def get_overview(host: GlinetHost, password: str) -> GlinetOverview:
         status = api_client.system.get_status()
         system = status.get("system", {})
         wifi_list = status.get("wifi") or []
-        service_list = status.get("service") or []
         client = _as_single_dict(status.get("client"))
 
         radios = tuple(
@@ -129,12 +128,6 @@ def get_overview(host: GlinetHost, password: str) -> GlinetOverview:
             for radio in wifi_list
         )
 
-        def service_up(name: str) -> bool:
-            # service.status: 0 not enabled | 1 connected successfully |
-            # 2 enabled but connection not successful -- only 1 counts
-            # as "up" for this at-a-glance overview.
-            return _find_by_name(service_list, name).get("status") == 1
-
         return GlinetOverview(
             uptime=_format_uptime(system.get("uptime")),
             lan_ip=system.get("lan_ip", ""),
@@ -143,13 +136,41 @@ def get_overview(host: GlinetHost, password: str) -> GlinetOverview:
             wireless_client_count=int(client.get("wireless_total", 0) or 0),
             cable_client_count=int(client.get("cable_total", 0) or 0),
             wifi_radios=radios,
-            wg_client_up=service_up("wgclient"),
-            wg_server_up=service_up("wgserver"),
-            ovpn_client_up=service_up("ovpnclient"),
-            ovpn_server_up=service_up("ovpnserver"),
+            wg_client_up=_vpn_status_up(api_client, "wg_client"),
+            wg_server_up=_vpn_status_up(api_client, "wg_server"),
+            ovpn_client_up=_vpn_status_up(api_client, "ovpn_client"),
+            ovpn_server_up=_vpn_status_up(api_client, "ovpn_server"),
         )
 
     return _call(host, password, fetch)
+
+
+def _vpn_status_up(api_client, module_name: str) -> bool:
+    """Real per-tunnel VPN status, from that VPN type's own dedicated
+    get_status() call (wg_client/wg_server/ovpn_client/ovpn_server each
+    have one, per pyglinet's bundled api_description.json) -- confirmed
+    against a real router that system.get_status()'s generic "service"
+    list is NOT a substitute for this: it only reports whether a global
+    service feature is present/enabled at all, and omitted "wgclient"/
+    "ovpnclient" entirely even with an active, connected WireGuard
+    client tunnel configured.
+
+    wg_server's status lives one level deeper, under "server", unlike
+    the other three. Calling get_status() for a VPN type with no
+    tunnel/config set up at all raises rather than returning a clean
+    "not configured" result (per pyglinet's own exception types) --
+    treated the same as "not up" here rather than failing the whole
+    overview over one unconfigured VPN type.
+    """
+    try:
+        result = getattr(api_client, module_name).get_status()
+    except Exception:  # noqa: BLE001 - "not configured" is expected and common, not a real failure
+        return False
+    if module_name == "wg_server":
+        result = result.get("server") or {}
+    # status: 0 not enabled | 1 connected successfully | 2 enabled but
+    # connection not successful -- only 1 counts as "up".
+    return result.get("status") == 1
 
 
 def _as_single_dict(value) -> dict:
@@ -160,12 +181,6 @@ def _as_single_dict(value) -> dict:
     if isinstance(value, list):
         return value[0] if value else {}
     return value or {}
-
-
-def _find_by_name(items, name: str) -> dict:
-    if not isinstance(items, list):
-        return {}
-    return next((item for item in items if item.get("name") == name), {})
 
 
 def _percent_used(total, free) -> float | None:
