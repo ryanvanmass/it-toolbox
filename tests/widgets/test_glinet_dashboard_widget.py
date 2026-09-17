@@ -4,6 +4,7 @@ from it_toolbox.modules.connection_manager.models import (
     GlinetClientInfo,
     GlinetHost,
     GlinetOverview,
+    GlinetVpnTunnel,
     GlinetWifiRadio,
 )
 from it_toolbox.widgets.glinet_dashboard_widget import GlinetDashboardWidget
@@ -18,15 +19,11 @@ OVERVIEW = GlinetOverview(
     wireless_client_count=2,
     cable_client_count=1,
     wifi_radios=(),
-    wg_client_up=True,
-    wg_server_up=False,
-    ovpn_client_up=False,
-    ovpn_server_up=True,
 )
 
 
 def _make_dashboard(qtbot, monkeypatch, glinet_available=True, overview=OVERVIEW, clients=(),
-                     wifi_radios=()):
+                     wifi_radios=(), vpn_tunnels=()):
     import it_toolbox.widgets.glinet_dashboard_widget as module
 
     monkeypatch.setattr(module.glinet_client, "GlInet", object() if glinet_available else None)
@@ -34,6 +31,9 @@ def _make_dashboard(qtbot, monkeypatch, glinet_available=True, overview=OVERVIEW
     monkeypatch.setattr(module.glinet_client, "list_clients", lambda host, password: list(clients))
     monkeypatch.setattr(
         module.glinet_client, "get_wifi_config", lambda host, password: list(wifi_radios)
+    )
+    monkeypatch.setattr(
+        module.glinet_client, "list_vpn_tunnels", lambda host, password: list(vpn_tunnels)
     )
     dashboard = GlinetDashboardWidget(HOST, "secret")
     qtbot.addWidget(dashboard)
@@ -61,13 +61,28 @@ def test_overview_tab_populates_from_get_overview(qtbot, monkeypatch):
     assert dashboard._overview_fields["cable_client_count"].text() == "1"
 
 
-def test_vpn_tab_populates_from_overview(qtbot, monkeypatch):
-    dashboard = _make_dashboard(qtbot, monkeypatch)
-    qtbot.waitUntil(lambda: dashboard._vpn_fields["wg_client"].text() == "Up", timeout=2000)
+def test_vpn_tab_populates_from_list_vpn_tunnels(qtbot, monkeypatch):
+    tunnels = [
+        GlinetVpnTunnel(name="Bonkcloud", type="wireguard", enabled=True, up=True),
+        GlinetVpnTunnel(name="Guest Wifi", type="wireguard", enabled=True, up=True),
+        GlinetVpnTunnel(name="Backup Tunnel", type="openvpn", enabled=False, up=False),
+    ]
+    dashboard = _make_dashboard(qtbot, monkeypatch, vpn_tunnels=tunnels)
+    qtbot.waitUntil(lambda: dashboard._vpn_table.rowCount() == 3, timeout=2000)
 
-    assert dashboard._vpn_fields["wg_server"].text() == "Down"
-    assert dashboard._vpn_fields["ovpn_client"].text() == "Down"
-    assert dashboard._vpn_fields["ovpn_server"].text() == "Up"
+    assert dashboard._vpn_table.item(0, 0).text() == "Bonkcloud"
+    assert dashboard._vpn_table.item(0, 1).text() == "wireguard"
+    assert dashboard._vpn_table.item(0, 2).text() == "Up"
+    assert dashboard._vpn_table.item(2, 0).text() == "Backup Tunnel"
+    assert dashboard._vpn_table.item(2, 2).text() == "Disabled"
+
+
+def test_vpn_tab_shows_enabled_but_not_connected(qtbot, monkeypatch):
+    tunnels = [GlinetVpnTunnel(name="Flaky", type="wireguard", enabled=True, up=False)]
+    dashboard = _make_dashboard(qtbot, monkeypatch, vpn_tunnels=tunnels)
+    qtbot.waitUntil(lambda: dashboard._vpn_table.rowCount() == 1, timeout=2000)
+
+    assert dashboard._vpn_table.item(0, 2).text() == "Enabled"
 
 
 def test_clients_tab_populates_from_list_clients(qtbot, monkeypatch):
@@ -223,6 +238,7 @@ def test_fetch_error_surfaces_via_message_box_not_a_crash(qtbot, monkeypatch):
     monkeypatch.setattr(module.glinet_client, "get_overview", raise_error)
     monkeypatch.setattr(module.glinet_client, "list_clients", lambda host, password: [])
     monkeypatch.setattr(module.glinet_client, "get_wifi_config", lambda host, password: [])
+    monkeypatch.setattr(module.glinet_client, "list_vpn_tunnels", lambda host, password: [])
 
     warnings = []
     monkeypatch.setattr(

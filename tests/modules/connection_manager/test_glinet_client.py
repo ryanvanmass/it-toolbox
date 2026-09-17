@@ -25,10 +25,27 @@ def _status_or_raise(value):
     return fn
 
 
+class _FakeSession:
+    """Stands in for api_client._session (the real GlInet instance) --
+    only its request() method is needed, for the "vpn-client" module
+    that has no api_client.* wrapper at all (see glinet_client.py's
+    list_vpn_tunnels docstring)."""
+
+    def __init__(self, vpn_client_result=None, vpn_client_raises=None):
+        self._vpn_client_result = vpn_client_result
+        self._vpn_client_raises = vpn_client_raises
+
+    def request(self, method, params):
+        if self._vpn_client_raises is not None:
+            raise self._vpn_client_raises
+        return _FakeApiGroup(result=self._vpn_client_result or {})
+
+
 class _FakeApiClient:
     def __init__(self, status=None, clients=None, wifi_config=None, set_config_calls=None,
                  reboot_calls=None, wg_client_status=None, wg_server_status=None,
-                 ovpn_client_status=None, ovpn_server_status=None):
+                 ovpn_client_status=None, ovpn_server_status=None,
+                 vpn_client_result=None, vpn_client_raises=None):
         self.system = _FakeApiGroup(
             get_status=lambda: status or {},
             reboot=lambda params=None: (reboot_calls if reboot_calls is not None else []).append(
@@ -46,6 +63,7 @@ class _FakeApiClient:
         self.wg_server = _FakeApiGroup(get_status=_status_or_raise(wg_server_status))
         self.ovpn_client = _FakeApiGroup(get_status=_status_or_raise(ovpn_client_status))
         self.ovpn_server = _FakeApiGroup(get_status=_status_or_raise(ovpn_server_status))
+        self._session = _FakeSession(vpn_client_result, vpn_client_raises)
 
 
 class _FakeGlInet:
@@ -165,9 +183,9 @@ def test_get_overview_parses_status_response(monkeypatch):
     # Shape grounded in pyglinet's own bundled api_description.json
     # out_example for system.get_status -- wifi/client are lists, not
     # dicts keyed by name (see glinet_client.py's module docstring for
-    # how this was discovered against a real router). VPN up/down comes
-    # from each type's own dedicated get_status() (see
-    # test_vpn_status_up_* below), not this generic status blob.
+    # how this was discovered against a real router). VPN status is no
+    # longer part of GlinetOverview at all -- see list_vpn_tunnels and
+    # its own tests below.
     status = {
         "system": {"uptime": 111, "lan_ip": "192.168.8.1",
                     "cpu": {"temperature": 45.5},
@@ -175,13 +193,7 @@ def test_get_overview_parses_status_response(monkeypatch):
         "wifi": [{"name": "default_radio0", "band": "2.4G", "ssid": "MyWifi", "up": True}],
         "client": [{"wireless_total": 3, "cable_total": 1}],
     }
-    _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(
-        status=status,
-        wg_client_status={"status": 1},
-        wg_server_status={"server": {"status": 0}},
-        ovpn_client_status={"status": 0},
-        ovpn_server_status={"status": 1},
-    ))
+    _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(status=status))
 
     overview = glinet_client.get_overview(HOST, "secret")
 
@@ -193,38 +205,76 @@ def test_get_overview_parses_status_response(monkeypatch):
     assert overview.cable_client_count == 1
     assert overview.wifi_radios[0].ssid == "MyWifi"
     assert overview.wifi_radios[0].enabled is True
-    assert overview.wg_client_up is True
-    assert overview.wg_server_up is False
-    assert overview.ovpn_client_up is False
-    assert overview.ovpn_server_up is True
 
 
-def test_vpn_status_up_true_when_connected():
-    api_client = _FakeApiClient(wg_client_status={"status": 1})
-    assert glinet_client._vpn_status_up(api_client, "wg_client") is True
+def test_list_vpn_tunnels_uses_the_vpn_client_module_when_available(monkeypatch):
+    # Real shape, captured from a real router's own web UI network
+    # traffic (a HAR file) -- "vpn-client" (hyphenated) is GL.iNet's
+    # newer multi-tunnel "VPN Policy" feature and isn't in pyglinet's
+    # bundled api_description.json at all, so this goes through
+    # api_client._session.request() directly rather than a normal
+    # api_client.<module>.<method>() wrapper call.
+    vpn_client_result = {
+        "status_list": [
+            {"enabled": True, "type": "wireguard", "name": "Bonkcloud", "status": 1},
+            {"enabled": True, "type": "wireguard", "name": "Guest Wifi", "status": 1},
+            {"enabled": False, "type": "openvpn", "name": "Backup Tunnel", "status": 0},
+        ],
+        "mode": 1,
+    }
+    _install_fake_glinet(
+        monkeypatch, api_client=_FakeApiClient(vpn_client_result=vpn_client_result)
+    )
+
+    tunnels = glinet_client.list_vpn_tunnels(HOST, "secret")
+
+    assert len(tunnels) == 3
+    assert tunnels[0].name == "Bonkcloud"
+    assert tunnels[0].type == "wireguard"
+    assert tunnels[0].enabled is True
+    assert tunnels[0].up is True
+    assert tunnels[2].name == "Backup Tunnel"
+    assert tunnels[2].enabled is False
+    assert tunnels[2].up is False
 
 
-@pytest.mark.parametrize("status", [0, 2])
-def test_vpn_status_up_false_when_not_connected(status):
-    api_client = _FakeApiClient(ovpn_client_status={"status": status})
-    assert glinet_client._vpn_status_up(api_client, "ovpn_client") is False
+def test_list_vpn_tunnels_falls_back_to_classic_endpoints(monkeypatch):
+    # A router without GL.iNet's newer "vpn-client" module raises for
+    # the whole module (confirmed live), not just one missing tunnel
+    # type -- falls back to the four classic single-tunnel endpoints,
+    # each surfaced as one fixed-name tunnel.
+    _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(
+        vpn_client_raises=RuntimeError("Method not found"),
+        wg_client_status={"status": 1},
+        wg_server_status={"server": {"status": 0}},
+        ovpn_client_status={"status": 0},
+        ovpn_server_status={"status": 1},
+    ))
+
+    tunnels = glinet_client.list_vpn_tunnels(HOST, "secret")
+
+    assert [(t.name, t.type, t.enabled, t.up) for t in tunnels] == [
+        ("WireGuard Client", "wireguard", True, True),
+        ("WireGuard Server", "wireguard", False, False),
+        ("OpenVPN Client", "openvpn", False, False),
+        ("OpenVPN Server", "openvpn", True, True),
+    ]
 
 
-def test_vpn_status_up_reads_wg_server_nested_status():
+def test_classic_vpn_status_code_reads_wg_server_nested_status():
     # wg_server.get_status()'s status lives under "server", unlike the
     # other three VPN types' get_status(), which put it at the top level.
     api_client = _FakeApiClient(wg_server_status={"server": {"status": 1}})
-    assert glinet_client._vpn_status_up(api_client, "wg_server") is True
+    assert glinet_client._classic_vpn_status_code(api_client, "wg_server") == 1
 
 
-def test_vpn_status_up_false_when_type_is_not_configured_at_all():
-    # get_status() raises for a VPN type with no tunnel/config at all --
-    # confirmed against a real router that a client tunnel not present
-    # in the generic system.get_status() service list doesn't mean the
-    # dedicated endpoint fails the same way, so this is a defensive
-    # fallback, not the expected path for a configured-but-down tunnel.
+def test_classic_vpn_status_code_none_when_type_is_not_configured_at_all():
+    # get_status() raises for a VPN type with no tunnel/config at all,
+    # or not supported by this firmware at all (confirmed live: a real
+    # MethodNotFoundError) -- treated as unknown, not "down", by the
+    # caller (list_vpn_tunnels' fallback path).
     api_client = _FakeApiClient()
-    assert glinet_client._vpn_status_up(api_client, "wg_client") is False
+    assert glinet_client._classic_vpn_status_code(api_client, "wg_client") is None
 
 
 def test_get_overview_handles_client_as_a_bare_dict_too(monkeypatch):

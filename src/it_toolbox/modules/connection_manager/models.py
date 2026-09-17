@@ -102,10 +102,19 @@ class GlinetOverview:
     wireless_client_count: int
     cable_client_count: int
     wifi_radios: tuple[GlinetWifiRadio, ...]
-    wg_client_up: bool
-    wg_server_up: bool
-    ovpn_client_up: bool
-    ovpn_server_up: bool
+
+
+@dataclass(frozen=True)
+class GlinetVpnTunnel:
+    """One configured VPN tunnel. On routers with GL.iNet's newer
+    multi-tunnel "VPN Policy" feature, there can be any number of these,
+    each independently named/enabled -- name is then the policy's own
+    name (e.g. "Bonkcloud"), not a fixed "WireGuard Client" label."""
+
+    name: str
+    type: str  # "wireguard" or "openvpn"
+    enabled: bool  # the tunnel/policy's own on/off toggle
+    up: bool  # actually connected right now
 
 
 @dataclass(frozen=True)

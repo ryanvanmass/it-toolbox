@@ -28,7 +28,11 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.modules.connection_manager import glinet_client
-from it_toolbox.modules.connection_manager.models import GlinetHost, GlinetWifiRadio
+from it_toolbox.modules.connection_manager.models import (
+    GlinetHost,
+    GlinetVpnTunnel,
+    GlinetWifiRadio,
+)
 
 
 class GlinetDashboardWidget(QWidget):
@@ -61,6 +65,7 @@ class GlinetDashboardWidget(QWidget):
         self._reload_overview()
         self._reload_clients()
         self._reload_wifi()
+        self._reload_vpn()
 
     # -- Overview -----------------------------------------------------------
 
@@ -110,7 +115,6 @@ class GlinetDashboardWidget(QWidget):
         )
         self._overview_fields["wireless_client_count"].setText(str(overview.wireless_client_count))
         self._overview_fields["cable_client_count"].setText(str(overview.cable_client_count))
-        self._update_vpn_labels(overview)
 
     # -- Clients --------------------------------------------------------------
 
@@ -242,38 +246,42 @@ class GlinetDashboardWidget(QWidget):
 
     def _build_vpn_tab(self) -> QWidget:
         widget = QWidget()
-        form = QFormLayout()
-        self._vpn_fields = {
-            "wg_client": QLabel("Loading…"),
-            "wg_server": QLabel("Loading…"),
-            "ovpn_client": QLabel("Loading…"),
-            "ovpn_server": QLabel("Loading…"),
-        }
-        form.addRow("WireGuard client:", self._vpn_fields["wg_client"])
-        form.addRow("WireGuard server:", self._vpn_fields["wg_server"])
-        form.addRow("OpenVPN client:", self._vpn_fields["ovpn_client"])
-        form.addRow("OpenVPN server:", self._vpn_fields["ovpn_server"])
+        self._vpn_table = QTableWidget(0, 3)
+        self._vpn_table.setHorizontalHeaderLabels(["Name", "Type", "Status"])
+        self._vpn_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._vpn_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self._reload_vpn)
 
         note = QLabel(
-            "Status only — this dashboard doesn't yet support adding or editing VPN "
-            "tunnel configs."
+            "Status only — this dashboard doesn't yet support adding, editing, or "
+            "toggling VPN tunnels."
         )
         note.setWordWrap(True)
 
         layout = QVBoxLayout(widget)
-        layout.addLayout(form)
+        layout.addWidget(self._vpn_table)
+        layout.addWidget(refresh_button)
         layout.addWidget(note)
-        layout.addStretch(1)
         return widget
 
-    def _update_vpn_labels(self, overview) -> None:
-        def status_text(up: bool) -> str:
-            return "Up" if up else "Down"
+    def _reload_vpn(self) -> None:
+        async_utils.run_in_background(
+            lambda: glinet_client.list_vpn_tunnels(self._host, self._password),
+            on_result=self._on_vpn_loaded,
+            on_error=self._on_error,
+        )
 
-        self._vpn_fields["wg_client"].setText(status_text(overview.wg_client_up))
-        self._vpn_fields["wg_server"].setText(status_text(overview.wg_server_up))
-        self._vpn_fields["ovpn_client"].setText(status_text(overview.ovpn_client_up))
-        self._vpn_fields["ovpn_server"].setText(status_text(overview.ovpn_server_up))
+    def _on_vpn_loaded(self, tunnels: list[GlinetVpnTunnel]) -> None:
+        self._vpn_table.setRowCount(len(tunnels))
+        for row, tunnel in enumerate(tunnels):
+            status_text = "Up" if tunnel.up else ("Enabled" if tunnel.enabled else "Disabled")
+            self._vpn_table.setItem(row, 0, QTableWidgetItem(tunnel.name))
+            self._vpn_table.setItem(row, 1, QTableWidgetItem(tunnel.type))
+            self._vpn_table.setItem(row, 2, QTableWidgetItem(status_text))
 
     # -- Reboot -----------------------------------------------------------
 

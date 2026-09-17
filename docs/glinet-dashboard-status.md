@@ -39,9 +39,9 @@ pip install python-glinet
   `clients.get_list()`.
 - **WiFi** — view and edit SSID/password/enabled per radio/interface via
   `wifi.get_config()`/`wifi.set_config()`.
-- **VPN** — **read-only** WireGuard/OpenVPN client+server up/down status
-  (from the same `get_status()` call). Adding or editing VPN tunnel
-  configs is out of scope for v1.
+- **VPN** — **read-only** list of configured tunnels (name, type,
+  enabled, up/down) via `list_vpn_tunnels()`. Adding, editing, or
+  toggling VPN tunnels is out of scope for v1.
 - **Reboot** — immediate reboot with a confirmation prompt.
 
 Not in scope for v1: VPN tunnel configuration, full WiFi parameter
@@ -68,17 +68,39 @@ example output, then corrected against a real router (a GL-MT3000
   label instead of "2G"/"5G").
 - `system.get_status()`'s `uptime` is a raw (and, live, fractional)
   seconds count, not a display string — rendered via `_format_uptime()`.
+- A WiFi radio's main and guest networks render as two separate
+  `GlinetWifiRadio` entries with a `guest` field distinguishing them
+  (present on both `system.get_status()`'s `wifi` list and
+  `wifi.get_config()`'s per-iface objects) — the dashboard groups all
+  Main networks together and all Guest networks together (not by
+  physical radio), Main first.
+- **VPN status needed a completely different module than the one
+  first assumed.** `wg_client.get_status()`/`ovpn_client.get_status()`
+  raise `MethodNotFoundError` outright on a router using GL.iNet's
+  newer multi-tunnel "VPN Policy" feature — that firmware exposes VPN
+  status through a `"vpn-client"` (**hyphenated**) module instead,
+  confirmed via a HAR capture of the router's own web UI network
+  traffic. `"vpn-client"` isn't in `pyglinet`'s bundled
+  `api_description.json` at all, so there's no `api_client.*` wrapper
+  for it — `list_vpn_tunnels()` reaches `api_client`'s private
+  `_session` attribute (the real `GlInet` instance) to call
+  `.request("call", ["vpn-client", "get_status", {}])` directly. Its
+  response is a flat list of independently-named tunnels (e.g.
+  "Bonkcloud"), each with its own `enabled`/`status` — a genuinely
+  different shape from the classic single-tunnel model, which is why
+  `GlinetOverview`'s four fixed `wg_client_up`/`wg_server_up`/
+  `ovpn_client_up`/`ovpn_server_up` booleans were replaced with a
+  `GlinetVpnTunnel` list from its own `list_vpn_tunnels()` call. The
+  classic `wg_client`/`wg_server`/`ovpn_client`/`ovpn_server`
+  `get_status()` endpoints are kept as a fallback (each surfaced as one
+  fixed-name tunnel) for routers without the newer module.
 
-Still not fully verified against a live router: WiFi tab SSID/status
-accuracy and VPN client/server up/down status both looked questionable
-in testing (as of this writing) but the exact real field shape hadn't
-been captured yet — see `scripts/glinet_dump.py`, a one-off diagnostic
-that logs into a real router and prints the raw `system.get_status()`/
-`wifi.get_config()` JSON, written specifically to ground the next round
-of fixes instead of guessing a third time. If a field comes back missing
-or differently shaped than expected, `glinet_client.py` is the file to
-check first; corrections should stay isolated there rather than
-rippling into `models.py` or the UI.
+If a field comes back missing or differently shaped than expected,
+`glinet_client.py` is the file to check first; corrections should stay
+isolated there rather than rippling into `models.py` or the UI.
+`scripts/glinet_dump.py` is the diagnostic tool used to ground each of
+the fixes above against a real router rather than guessing — reuse it
+for the next one, extending it with more calls first if needed.
 
 ## Host passwords
 

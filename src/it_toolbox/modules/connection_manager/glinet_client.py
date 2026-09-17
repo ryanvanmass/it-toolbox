@@ -37,6 +37,7 @@ from it_toolbox.modules.connection_manager.models import (
     GlinetClientInfo,
     GlinetHost,
     GlinetOverview,
+    GlinetVpnTunnel,
     GlinetWifiRadio,
 )
 
@@ -136,41 +137,92 @@ def get_overview(host: GlinetHost, password: str) -> GlinetOverview:
             wireless_client_count=int(client.get("wireless_total", 0) or 0),
             cable_client_count=int(client.get("cable_total", 0) or 0),
             wifi_radios=radios,
-            wg_client_up=_vpn_status_up(api_client, "wg_client"),
-            wg_server_up=_vpn_status_up(api_client, "wg_server"),
-            ovpn_client_up=_vpn_status_up(api_client, "ovpn_client"),
-            ovpn_server_up=_vpn_status_up(api_client, "ovpn_server"),
         )
 
     return _call(host, password, fetch)
 
 
-def _vpn_status_up(api_client, module_name: str) -> bool:
-    """Real per-tunnel VPN status, from that VPN type's own dedicated
-    get_status() call (wg_client/wg_server/ovpn_client/ovpn_server each
-    have one, per pyglinet's bundled api_description.json) -- confirmed
-    against a real router that system.get_status()'s generic "service"
-    list is NOT a substitute for this: it only reports whether a global
-    service feature is present/enabled at all, and omitted "wgclient"/
+def list_vpn_tunnels(host: GlinetHost, password: str) -> list[GlinetVpnTunnel]:
+    """VPN tunnels configured on this router.
+
+    GL.iNet's newer firmware has a "VPN Policy" feature: any number of
+    independently named tunnels (e.g. "Bonkcloud"), each wrapping a
+    WireGuard/OpenVPN client or server config, each with its own
+    on/off toggle. This lives behind a "vpn-client" (hyphenated) RPC
+    module confirmed via a real router's own web UI network capture --
+    it isn't in pyglinet's bundled api_description.json at all, so
+    there's no api_client.vpn_client wrapper for it; reaching the
+    session's own request() through api_client's private _session
+    attribute is the only way to call it through this library.
+
+    Falls back to the classic single-tunnel wg_client/wg_server/
+    ovpn_client/ovpn_server endpoints (each surfaced as one fixed-name
+    tunnel) for a router without this newer module -- get_status() for
+    the whole "vpn-client" module raises outright (confirmed live) when
+    it's absent, not just for one missing tunnel type.
+    """
+
+    def fetch(api_client) -> list[GlinetVpnTunnel]:
+        try:
+            result = api_client._session.request(
+                "call", ["vpn-client", "get_status", {}]
+            ).result
+            return [
+                GlinetVpnTunnel(
+                    name=entry.get("name", ""),
+                    type=entry.get("type", ""),
+                    enabled=bool(entry.get("enabled", False)),
+                    up=entry.get("status") == 1,
+                )
+                for entry in result.get("status_list") or []
+            ]
+        except Exception:  # noqa: BLE001 - fall back below; not every router has this module
+            pass
+
+        return [
+            GlinetVpnTunnel(
+                name=name, type=vpn_type,
+                enabled=code not in (None, 0),
+                up=code == 1,
+            )
+            for name, vpn_type, code in (
+                ("WireGuard Client", "wireguard", _classic_vpn_status_code(api_client, "wg_client")),
+                ("WireGuard Server", "wireguard", _classic_vpn_status_code(api_client, "wg_server")),
+                ("OpenVPN Client", "openvpn", _classic_vpn_status_code(api_client, "ovpn_client")),
+                ("OpenVPN Server", "openvpn", _classic_vpn_status_code(api_client, "ovpn_server")),
+            )
+        ]
+
+    return _call(host, password, fetch)
+
+
+def _classic_vpn_status_code(api_client, module_name: str) -> int | None:
+    """Real per-tunnel VPN status code, from that VPN type's own
+    dedicated get_status() call (wg_client/wg_server/ovpn_client/
+    ovpn_server each have one, per pyglinet's bundled
+    api_description.json) -- fallback path for a router without the
+    newer "vpn-client" module (see list_vpn_tunnels). Confirmed against
+    a real router that system.get_status()'s generic "service" list is
+    NOT a substitute for this: it only reports whether a global service
+    feature is present/enabled at all, and omitted "wgclient"/
     "ovpnclient" entirely even with an active, connected WireGuard
     client tunnel configured.
 
     wg_server's status lives one level deeper, under "server", unlike
-    the other three. Calling get_status() for a VPN type with no
-    tunnel/config set up at all raises rather than returning a clean
-    "not configured" result (per pyglinet's own exception types) --
-    treated the same as "not up" here rather than failing the whole
-    overview over one unconfigured VPN type.
+    the other three. Calling get_status() for a VPN type not supported
+    by this firmware, or with no tunnel/config set up, raises rather
+    than returning a clean "not configured" result.
+
+    status: 0 not enabled | 1 connected successfully | 2 enabled but
+    connection not successful.
     """
     try:
         result = getattr(api_client, module_name).get_status()
-    except Exception:  # noqa: BLE001 - "not configured" is expected and common, not a real failure
-        return False
+    except Exception:  # noqa: BLE001 - "not configured"/"not supported" is expected, not a failure
+        return None
     if module_name == "wg_server":
         result = result.get("server") or {}
-    # status: 0 not enabled | 1 connected successfully | 2 enabled but
-    # connection not successful -- only 1 counts as "up".
-    return result.get("status") == 1
+    return result.get("status")
 
 
 def _as_single_dict(value) -> dict:
