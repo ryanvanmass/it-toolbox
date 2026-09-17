@@ -145,21 +145,26 @@ def test_requests_exception_wraps_into_glinet_api_error(monkeypatch):
 
 
 def test_get_overview_parses_status_response(monkeypatch):
+    # Shape grounded in pyglinet's own bundled api_description.json
+    # out_example for system.get_status -- wifi/service/client are all
+    # lists, not dicts keyed by name (see glinet_client.py's module
+    # docstring for how this was discovered against a real router).
     status = {
-        "system": {"uptime": "1d", "lan_ip": "192.168.8.1", "cpu_temp": 45.5,
-                    "memory": {"total": 1000, "free": 250}},
-        "wifi": {"radio0": {"iface_name": "wifi0", "band": "2.4G", "ssid": "MyWifi", "up": True}},
-        "service": {
-            "wg_client": {"up": True}, "wg_server": {"up": False},
-            "ovpn_client": {"up": False}, "ovpn_server": {"up": True},
-        },
-        "client": {"wireless_total": 3, "cable_total": 1},
+        "system": {"uptime": 111, "lan_ip": "192.168.8.1",
+                    "cpu": {"temperature": 45.5},
+                    "memory_total": 1000, "memory_free": 250},
+        "wifi": [{"name": "default_radio0", "band": "2.4G", "ssid": "MyWifi", "up": True}],
+        "service": [
+            {"name": "wgclient", "status": 1}, {"name": "wgserver", "status": 0},
+            {"name": "ovpnclient", "status": 0}, {"name": "ovpnserver", "status": 1},
+        ],
+        "client": [{"wireless_total": 3, "cable_total": 1}],
     }
     _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(status=status))
 
     overview = glinet_client.get_overview(HOST, "secret")
 
-    assert overview.uptime == "1d"
+    assert overview.uptime == "111"
     assert overview.lan_ip == "192.168.8.1"
     assert overview.cpu_temp == 45.5
     assert overview.memory_used_pct == 75.0
@@ -171,6 +176,22 @@ def test_get_overview_parses_status_response(monkeypatch):
     assert overview.wg_server_up is False
     assert overview.ovpn_client_up is False
     assert overview.ovpn_server_up is True
+
+
+def test_get_overview_handles_client_as_a_bare_dict_too(monkeypatch):
+    # The API's own schema docs describe "client" as a single object even
+    # though the concrete example wraps it in a list -- accept either.
+    status = {
+        "system": {},
+        "wifi": [], "service": [],
+        "client": {"wireless_total": 2, "cable_total": 0},
+    }
+    _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(status=status))
+
+    overview = glinet_client.get_overview(HOST, "secret")
+
+    assert overview.wireless_client_count == 2
+    assert overview.cable_client_count == 0
 
 
 def test_list_clients_parses_and_sorts(monkeypatch):
@@ -189,11 +210,18 @@ def test_list_clients_parses_and_sorts(monkeypatch):
 
 
 def test_get_wifi_config_parses_bands_and_ifaces(monkeypatch):
+    # Shape grounded in pyglinet's bundled api_description.json
+    # out_example for wifi.get_config -- band configs live under a
+    # top-level "res" list, and each iface's identifier is "name", not
+    # "iface_name" (see glinet_client.py's module docstring).
     config = {
-        "radio0": {
-            "hwmode": "2.4G",
-            "ifaces": [{"iface_name": "default_radio0", "ssid": "MyWifi", "enabled": True}],
-        }
+        "res": [
+            {
+                "device": "radio0",
+                "hwmode": "2.4G",
+                "ifaces": [{"name": "default_radio0", "ssid": "MyWifi", "enabled": True}],
+            }
+        ]
     }
     _install_fake_glinet(monkeypatch, api_client=_FakeApiClient(wifi_config=config))
 

@@ -16,12 +16,19 @@ a long-lived client object — every call opens its own GlInet session
 (keep_alive=False) and always logs out afterward, so we never have to
 manage GlInet's background keep-alive thread lifecycle.
 
-Exact response field names below (system.get_status()'s nested shape,
-wifi.get_config()'s per-band/iface structure, etc.) are best-effort from
-pyglinet's own README/bundled api_description.json example output, not
-verified against a live router — see the small parsing helpers in each
-function here, which exist specifically so a later field-name correction
-stays isolated to this file.
+Response field names below are grounded in pyglinet's own bundled
+`api_description.json` (its `out_example`/`results` entries for
+system.get_status, wifi.get_config, and clients.get_list) — installed
+alongside the library at `pyglinet/api/api_description.json`. That file
+corrected several wrong assumptions found only by testing against a
+real router (see git history): `wifi`, `service`, and `client` in
+system.get_status()'s result are lists, not dicts keyed by name (a
+service's status is looked up by its own "name" field instead), and
+wifi.get_config()'s per-band configs live under a top-level "res" list,
+not directly on the result object. Still not exhaustively verified
+against every router/firmware version — see the small parsing helpers
+in each function here, which exist specifically so a later field-name
+correction stays isolated to this file.
 """
 
 import requests
@@ -100,46 +107,70 @@ def get_overview(host: GlinetHost, password: str) -> GlinetOverview:
     def fetch(api_client) -> GlinetOverview:
         status = api_client.system.get_status()
         system = status.get("system", {})
-        wifi = status.get("wifi", {})
-        service = status.get("service", {})
-        client = status.get("client", {})
+        wifi_list = status.get("wifi") or []
+        service_list = status.get("service") or []
+        client = _as_single_dict(status.get("client"))
 
         radios = tuple(
             GlinetWifiRadio(
-                device=name,
-                iface_name=radio.get("iface_name", name),
+                # This endpoint's wifi entries have no separate
+                # device/iface distinction the way wifi.get_config()'s
+                # do -- "name" (e.g. "default_radio0") is the only
+                # identifier available. Not used as a set_wifi_config()
+                # param (only get_wifi_config()'s richer output is), so
+                # reusing it for both fields here is harmless.
+                device=radio.get("name", ""),
+                iface_name=radio.get("name", ""),
                 band=radio.get("band", ""),
                 ssid=radio.get("ssid", ""),
                 enabled=bool(radio.get("up", False)),
             )
-            for name, radio in wifi.items()
+            for radio in wifi_list
         )
+
+        def service_up(name: str) -> bool:
+            # service.status: 0 not enabled | 1 connected successfully |
+            # 2 enabled but connection not successful -- only 1 counts
+            # as "up" for this at-a-glance overview.
+            return _find_by_name(service_list, name).get("status") == 1
 
         return GlinetOverview(
             uptime=str(system.get("uptime", "")),
             lan_ip=system.get("lan_ip", ""),
-            memory_used_pct=_percent_used(system.get("memory")),
-            cpu_temp=_as_float(system.get("cpu_temp")),
+            memory_used_pct=_percent_used(system.get("memory_total"), system.get("memory_free")),
+            cpu_temp=_as_float((system.get("cpu") or {}).get("temperature")),
             wireless_client_count=int(client.get("wireless_total", 0) or 0),
             cable_client_count=int(client.get("cable_total", 0) or 0),
             wifi_radios=radios,
-            wg_client_up=bool((service.get("wg_client") or {}).get("up", False)),
-            wg_server_up=bool((service.get("wg_server") or {}).get("up", False)),
-            ovpn_client_up=bool((service.get("ovpn_client") or {}).get("up", False)),
-            ovpn_server_up=bool((service.get("ovpn_server") or {}).get("up", False)),
+            wg_client_up=service_up("wgclient"),
+            wg_server_up=service_up("wgserver"),
+            ovpn_client_up=service_up("ovpnclient"),
+            ovpn_server_up=service_up("ovpnserver"),
         )
 
     return _call(host, password, fetch)
 
 
-def _percent_used(memory: dict | None) -> float | None:
-    if not memory:
+def _as_single_dict(value) -> dict:
+    """system.get_status()'s "client" field is documented as a single
+    object but the API's own bundled example response wraps it in a
+    one-item list -- handle either shape rather than trust one over the
+    other."""
+    if isinstance(value, list):
+        return value[0] if value else {}
+    return value or {}
+
+
+def _find_by_name(items, name: str) -> dict:
+    if not isinstance(items, list):
+        return {}
+    return next((item for item in items if item.get("name") == name), {})
+
+
+def _percent_used(total, free) -> float | None:
+    if not total or free is None:
         return None
-    total = memory.get("total")
-    free = memory.get("free")
-    if not total:
-        return None
-    return round((1 - free / total) * 100, 1) if free is not None else None
+    return round((1 - free / total) * 100, 1)
 
 
 def _as_float(value) -> float | None:
@@ -176,12 +207,17 @@ def get_wifi_config(host: GlinetHost, password: str) -> list[GlinetWifiRadio]:
     def fetch(api_client) -> list[GlinetWifiRadio]:
         config = api_client.wifi.get_config()
         radios: list[GlinetWifiRadio] = []
-        for device, band_config in config.items():
+        # Per-band configs live under a top-level "res" list, each with
+        # its own "device" field -- not a dict keyed by device.
+        for band_config in config.get("res") or []:
+            device = band_config.get("device", "")
             for iface in band_config.get("ifaces", []) or []:
                 radios.append(
                     GlinetWifiRadio(
                         device=device,
-                        iface_name=iface.get("iface_name", ""),
+                        # The iface's own identifier is "name" (e.g.
+                        # "default_radio0"), not "iface_name".
+                        iface_name=iface.get("name", ""),
                         band=band_config.get("hwmode", ""),
                         ssid=iface.get("ssid", ""),
                         enabled=bool(iface.get("enabled", False)),
