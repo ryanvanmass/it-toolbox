@@ -418,6 +418,108 @@ def test_change_cdrom_media_insert_tolerates_drive_already_being_empty(monkeypat
     assert "--insert" in calls[1]
 
 
+_REAL_DUMPXML_SPICE_GRAPHICS = """<domain type='kvm'>
+  <name>myvm</name>
+  <devices>
+    <graphics type='spice' port='5900' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+  </devices>
+</domain>"""
+
+_REAL_DUMPXML_VNC_GRAPHICS = """<domain type='kvm'>
+  <name>myvm</name>
+  <devices>
+    <graphics type='vnc' port='5900' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+  </devices>
+</domain>"""
+
+_REAL_DUMPXML_NO_GRAPHICS = """<domain type='kvm'>
+  <name>myvm</name>
+  <devices></devices>
+</domain>"""
+
+
+def test_get_vm_display_device_parses_spice(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run", lambda *a, **k: _completed(stdout=_REAL_DUMPXML_SPICE_GRAPHICS)
+    )
+    assert qemu_provisioning.get_vm_display_device(HOST, "myvm") == "spice"
+
+
+def test_get_vm_display_device_parses_vnc(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run", lambda *a, **k: _completed(stdout=_REAL_DUMPXML_VNC_GRAPHICS)
+    )
+    assert qemu_provisioning.get_vm_display_device(HOST, "myvm") == "vnc"
+
+
+def test_get_vm_display_device_returns_none_without_graphics(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run", lambda *a, **k: _completed(stdout=_REAL_DUMPXML_NO_GRAPHICS)
+    )
+    assert qemu_provisioning.get_vm_display_device(HOST, "myvm") is None
+
+
+def test_set_display_device_rejects_unsupported_type(monkeypatch):
+    with pytest.raises(qemu_provisioning.QemuApiError, match="Unsupported display device"):
+        qemu_provisioning.set_display_device(HOST, "myvm", "rdp")
+
+
+def test_set_display_device_switches_vnc_to_spice(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    calls = []
+    defined_xml = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        if cmd[3] == "dumpxml":
+            return _completed(stdout=_REAL_DUMPXML_VNC_GRAPHICS)
+        if cmd[3] == "define":
+            with open(cmd[4]) as f:
+                defined_xml["text"] = f.read()
+            return _completed()
+        return _completed()
+
+    monkeypatch.setattr(qemu_provisioning.subprocess, "run", fake_run)
+
+    qemu_provisioning.set_display_device(HOST, "myvm", "spice")
+
+    assert [c[3] for c in calls] == ["dumpxml", "define"]
+    root = ET.fromstring(defined_xml["text"])
+    graphics = root.find(".//graphics")
+    assert graphics.get("type") == "spice"
+    assert graphics.get("port") is None  # old VNC port dropped, not carried over
+    assert graphics.get("autoport") == "yes"
+    assert graphics.get("listen") == "127.0.0.1"
+    assert graphics.find("listen") is None  # stale nested <listen> child dropped too
+
+
+def test_set_display_device_adds_graphics_when_vm_has_none(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    defined_xml = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        if cmd[3] == "dumpxml":
+            return _completed(stdout=_REAL_DUMPXML_NO_GRAPHICS)
+        if cmd[3] == "define":
+            with open(cmd[4]) as f:
+                defined_xml["text"] = f.read()
+        return _completed()
+
+    monkeypatch.setattr(qemu_provisioning.subprocess, "run", fake_run)
+
+    qemu_provisioning.set_display_device(HOST, "myvm", "spice")
+
+    root = ET.fromstring(defined_xml["text"])
+    graphics = root.find(".//graphics")
+    assert graphics.get("type") == "spice"
+
+
 def test_change_cdrom_media_eject_only(monkeypatch):
     calls = []
     monkeypatch.setattr(

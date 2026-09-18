@@ -30,9 +30,11 @@ worth knowing before touching this file:
    trailing letter, rather than assuming a fixed prefix.
 """
 
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 
 from it_toolbox.modules.connection_manager.models import (
@@ -370,6 +372,79 @@ def change_network(host: QemuHost, vm_name: str, *, old_mac: str, new_network: s
     attach_flags = ["--model", "virtio", "--config", "--live"] if live else ["--model", "virtio", "--config"]
     run_virsh(host, "detach-interface", vm_name, "network", "--mac", old_mac, *detach_flags)
     run_virsh(host, "attach-interface", vm_name, "network", new_network, *attach_flags)
+
+
+_DISPLAY_DEVICES = ("spice", "vnc")
+
+
+def get_vm_display_device(host: QemuHost, vm_name: str) -> str | None:
+    """The VM's currently configured display/graphics device type
+    ("spice", "vnc", ...), or None if it has no graphics device at all.
+    Feeds ConfigureVmDialog's Display section, so a VM that ended up with
+    VNC graphics instead of SPICE (see qemu_client.diagnose_missing_spice_port,
+    which is exactly the "no SPICE port" symptom that causes) can be
+    switched back without hand-editing XML.
+    """
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
+    graphics = root.find(".//graphics")
+    return graphics.get("type") if graphics is not None else None
+
+
+def set_display_device(host: QemuHost, vm_name: str, graphics_type: str) -> None:
+    """Changes the VM's display device type -- e.g. recovering a VM that
+    ended up with VNC graphics instead of SPICE. Not a live/hot-pluggable
+    change -- there's no attach-graphics/detach-graphics the way there is
+    for disks and interfaces, and libvirt doesn't support changing a
+    graphics device's type on a running domain at all -- like resize_vm,
+    this only rewrites the VM's persistent definition; it takes effect
+    the next time the VM (re)starts, regardless of whether it's running
+    right now.
+
+    The only way to change a device's *type* (as opposed to a property of
+    the same device) is to redefine the whole domain: read the current
+    XML, replace the <graphics> element outright (dropping whatever
+    port/tlsPort/passwd attributes the old type had -- they don't apply
+    to the new one; autoport="yes" lets libvirt assign a fresh port), and
+    `virsh define` the result back.
+    """
+    if graphics_type not in _DISPLAY_DEVICES:
+        raise QemuApiError(f"Unsupported display device: {graphics_type!r}")
+
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
+    devices = root.find("devices")
+    if devices is None:
+        raise QemuApiError(f"{vm_name} has no <devices> section to configure a display device on.")
+
+    graphics = devices.find("graphics")
+    if graphics is None:
+        graphics = ET.SubElement(devices, "graphics")
+    else:
+        # Drop any nested <listen> child along with the old type's
+        # attributes -- it may disagree with the listen="..." attribute
+        # set below, which modern libvirt treats as an error rather than
+        # silently preferring one over the other.
+        for listen_el in list(graphics):
+            if listen_el.tag == "listen":
+                graphics.remove(listen_el)
+        graphics.attrib.clear()
+    graphics.set("type", graphics_type)
+    graphics.set("autoport", "yes")
+    # This app's whole QEMU/SPICE connection model (see qemu_tunnel.py)
+    # assumes every graphics server is bound to localhost only, reached
+    # through an SSH tunnel rather than exposed on the network -- keep
+    # that restriction explicitly rather than letting a freshly-redefined
+    # device fall back to libvirt's own (public) default listen address.
+    graphics.set("listen", "127.0.0.1")
+
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
+        f.write(ET.tostring(root, encoding="unicode"))
+        temp_path = f.name
+    try:
+        run_virsh(host, "define", temp_path)
+    finally:
+        os.unlink(temp_path)
 
 
 def change_cdrom_media(host: QemuHost, vm_name: str, target: str, iso_path: str | None, *, live: bool = False) -> None:

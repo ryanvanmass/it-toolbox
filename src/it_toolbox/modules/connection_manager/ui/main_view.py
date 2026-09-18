@@ -944,16 +944,23 @@ class ConnectionManagerView(QWidget):
 
     def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:
         async_utils.run_in_background(
-            lambda: qemu_provisioning.get_vm_resources(host, vm.name),
-            on_result=lambda resources: self._open_configure_vm_dialog(item, host, vm, resources),
+            lambda: (
+                qemu_provisioning.get_vm_resources(host, vm.name),
+                qemu_provisioning.get_vm_display_device(host, vm.name),
+            ),
+            on_result=lambda result: self._open_configure_vm_dialog(item, host, vm, result),
             on_error=lambda error: QMessageBox.warning(self, "Failed to read VM resources", str(error)),
         )
 
     def _open_configure_vm_dialog(
-        self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm, resources: tuple[int, int]
+        self,
+        item: QTreeWidgetItem,
+        host: QemuHost,
+        vm: QemuVm,
+        result: tuple[tuple[int, int], str | None],
     ) -> None:
-        vcpus, memory_mib = resources
-        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, parent=self)
+        (vcpus, memory_mib), display_device = result
+        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, display_device, parent=self)
         if dialog.exec() == ConfigureVmDialog.DialogCode.Accepted:
             host_item = item.parent()
             if host_item is not None:
