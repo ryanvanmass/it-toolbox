@@ -1463,7 +1463,7 @@ class ConnectionManagerView(QWidget):
         directly reachable on this same machine)."""
         spice_port = qemu_client.get_vm_spice_port(host, vm.name)
         if spice_port is None:
-            raise QemuApiError(f"{vm.name} has no SPICE port available — is it running?")
+            raise QemuApiError(qemu_client.diagnose_missing_spice_port(host, vm.name, vm.state))
         if is_local_uri(host.uri):
             return None, spice_port
         tunnel = QemuTunnel(host.uri, spice_port)

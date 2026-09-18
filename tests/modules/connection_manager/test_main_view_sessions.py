@@ -1517,10 +1517,15 @@ def test_prepare_qemu_spice_connection_raises_when_no_spice_port(qtbot, monkeypa
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
     monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: None)
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "diagnose_missing_spice_port",
+        lambda host, name, state: f"{name} is not running (state: {state}).",
+    )
     host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
     vm = QemuVm(id="1", name="myvm", state="shut off")
 
-    with pytest.raises(main_view_module.QemuApiError, match="no SPICE port"):
+    with pytest.raises(main_view_module.QemuApiError, match="not running"):
         ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
 
 
