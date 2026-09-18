@@ -2,7 +2,11 @@ import subprocess
 
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.auth import gcp_auth
-from it_toolbox.modules.connection_manager import qemu_client, qemu_provisioning
+from it_toolbox.modules.connection_manager import (
+    glinet_client,
+    qemu_client,
+    qemu_provisioning,
+)
 from it_toolbox.modules.settings.ui import main_view as settings_main_view
 from it_toolbox.modules.settings.ui.main_view import SettingsView
 
@@ -24,6 +28,7 @@ def _make_view(
     gcloud_available=False,
     platform_system="Linux",
     qemu_available=False,
+    glinet_available=False,
     virt_install_available=False,
     default_rdp_resolution=None,
     rdp_keyboard_layout=0x0409,
@@ -60,6 +65,7 @@ def _make_view(
     monkeypatch.setattr(settings, "resolve_gcp_ssh_public_key", lambda: gcp_ssh_public_key)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
     monkeypatch.setattr(qemu_client, "is_available", lambda: qemu_available)
+    monkeypatch.setattr(glinet_client, "is_available", lambda: glinet_available)
     monkeypatch.setattr(qemu_provisioning, "is_available", lambda: virt_install_available)
     monkeypatch.setattr(settings_main_view.platform, "system", lambda: platform_system)
     view = SettingsView()
@@ -623,6 +629,19 @@ def test_qemu_section_shows_install_instructions_when_missing(qtbot, monkeypatch
 
     assert "virsh not found" in view._qemu_status_label.text()
     assert "apt install libvirt-clients" in view._qemu_status_label.text()
+
+
+def test_glinet_section_shows_found_when_pyglinet_available(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, glinet_available=True)
+
+    assert "python-glinet found" in view._glinet_status_label.text()
+
+
+def test_glinet_section_shows_install_instructions_when_missing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, glinet_available=False)
+
+    assert "not installed" in view._glinet_status_label.text()
+    assert "pip install python-glinet" in view._glinet_status_label.text()
 
 
 def test_qemu_section_shows_virt_install_found(qtbot, monkeypatch):
