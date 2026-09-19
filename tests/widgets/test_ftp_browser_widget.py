@@ -1,3 +1,6 @@
+import threading
+import time
+
 from it_toolbox.core import ftp_client
 from it_toolbox.widgets.ftp_browser_widget import FtpBrowserWidget
 
@@ -76,6 +79,43 @@ def _make_browser(qtbot, entries_by_path, home="/home/alice"):
     browser = FtpBrowserWidget(session, "my-box")
     qtbot.addWidget(browser)
     return browser, session
+
+
+class _ConcurrencySensingSession(_FakeSession):
+    """Detects if any two of its methods ever run concurrently on
+    different threads -- proves the recursive-download queue never lets
+    the remote-tree scan run in parallel with another job touching the
+    same session (a real SFTP/FTP connection isn't safe for that)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._busy = False
+        self._guard_lock = threading.Lock()
+        self.concurrent_access_detected = False
+
+    def _guarded(self, fn, *args, **kwargs):
+        with self._guard_lock:
+            if self._busy:
+                self.concurrent_access_detected = True
+            self._busy = True
+        try:
+            time.sleep(0.02)  # widen the window so a real race would be caught
+            return fn(*args, **kwargs)
+        finally:
+            with self._guard_lock:
+                self._busy = False
+
+    def list_dir(self, path):
+        return self._guarded(super().list_dir, path)
+
+    def download(self, remote_path, local_path, progress=None):
+        return self._guarded(super().download, remote_path, local_path, progress=progress)
+
+    def upload(self, local_path, remote_path, progress=None):
+        return self._guarded(super().upload, local_path, remote_path, progress=progress)
+
+    def mkdir(self, path):
+        return self._guarded(super().mkdir, path)
 
 
 def test_browser_connects_and_loads_home_directory(qtbot):
@@ -206,6 +246,107 @@ def test_delete_remote_recursive_removes_children_then_directory(qtbot):
 
     assert session.removed == ["/home/alice/docs/a.txt"]
     assert session.rmdirs == ["/home/alice/docs"]
+
+
+def test_uploading_a_folder_recursively_creates_remote_dirs_and_uploads_files(qtbot, tmp_path):
+    (tmp_path / "folder" / "sub").mkdir(parents=True)
+    (tmp_path / "folder" / "a.txt").write_text("a")
+    (tmp_path / "folder" / "sub" / "b.txt").write_text("b")
+
+    browser, session = _make_browser(qtbot, {"/home/alice": []})
+    qtbot.waitUntil(lambda: browser._remote_path == "/home/alice", timeout=2000)
+
+    browser._upload_paths([str(tmp_path / "folder")])
+
+    qtbot.waitUntil(
+        lambda: not browser._pending_transfers and not browser._transfer_in_progress, timeout=3000
+    )
+
+    # The subdirectory's create-folder job must land in the queue before
+    # its own contents get uploaded into it.
+    assert session.mkdirs == ["/home/alice/folder", "/home/alice/folder/sub"]
+    assert (str(tmp_path / "folder" / "a.txt"), "/home/alice/folder/a.txt") in session.uploaded
+    assert (
+        str(tmp_path / "folder" / "sub" / "b.txt"),
+        "/home/alice/folder/sub/b.txt",
+    ) in session.uploaded
+
+
+def test_downloading_a_folder_recursively_creates_local_dirs_and_downloads_files(qtbot, tmp_path):
+    entries = {
+        "/home/alice": [ftp_client.FileEntry(name="folder", is_dir=True)],
+        "/home/alice/folder": [
+            ftp_client.FileEntry(name="sub", is_dir=True),
+            ftp_client.FileEntry(name="a.txt", is_dir=False, size=1),
+        ],
+        "/home/alice/folder/sub": [ftp_client.FileEntry(name="b.txt", is_dir=False, size=1)],
+    }
+    browser, session = _make_browser(qtbot, entries)
+    qtbot.waitUntil(lambda: browser._remote_pane._table.rowCount() == 1, timeout=2000)
+    browser._local_path = str(tmp_path)
+
+    folder_entry = browser._remote_pane.entry_at(0)
+    browser._download_entries([folder_entry])
+
+    qtbot.waitUntil(
+        lambda: not browser._pending_transfers and not browser._transfer_in_progress, timeout=3000
+    )
+
+    assert (tmp_path / "folder").is_dir()
+    assert (tmp_path / "folder" / "sub").is_dir()
+    assert (tmp_path / "folder" / "a.txt").read_bytes() == b"data"
+    assert (tmp_path / "folder" / "sub" / "b.txt").read_bytes() == b"data"
+
+
+def test_downloading_a_folder_and_a_file_together_never_touches_the_session_concurrently(qtbot):
+    entries = {
+        "/home/alice": [
+            ftp_client.FileEntry(name="folder", is_dir=True),
+            ftp_client.FileEntry(name="other.txt", is_dir=False, size=1),
+        ],
+        "/home/alice/folder": [ftp_client.FileEntry(name="a.txt", is_dir=False, size=1)],
+    }
+    session = _ConcurrencySensingSession(entries)
+    browser = FtpBrowserWidget(session, "my-box")
+    qtbot.addWidget(browser)
+    qtbot.waitUntil(lambda: browser._remote_pane._table.rowCount() == 2, timeout=2000)
+
+    row_entries = [browser._remote_pane.entry_at(r) for r in range(2)]
+    folder_entry = next(e for e in row_entries if e.is_dir)
+    file_entry = next(e for e in row_entries if not e.is_dir)
+
+    browser._download_entries([folder_entry, file_entry])
+
+    qtbot.waitUntil(
+        lambda: not browser._pending_transfers and not browser._transfer_in_progress, timeout=3000
+    )
+    assert session.concurrent_access_detected is False
+
+
+def test_uploading_a_folder_with_multiple_files_never_touches_the_session_concurrently(qtbot, tmp_path):
+    # Regression test: a completed job used to trigger _reload_remote()
+    # (a fresh session.list_dir call) and dispatch the *next* queued
+    # job's own session call back to back, with nothing ordering them --
+    # for a single manually-triggered transfer nothing was ever still
+    # queued by the time it finished, so this was invisible, but a
+    # multi-file recursive upload enqueues jobs up front and hits it for
+    # real (confirmed live against a real sshd before this fix).
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "folder" / "a.txt").write_text("a")
+    (tmp_path / "folder" / "b.txt").write_text("b")
+
+    session = _ConcurrencySensingSession({"/home/alice": []})
+    browser = FtpBrowserWidget(session, "my-box")
+    qtbot.addWidget(browser)
+    qtbot.waitUntil(lambda: browser._remote_path == "/home/alice", timeout=2000)
+
+    browser._upload_paths([str(tmp_path / "folder")])
+
+    qtbot.waitUntil(
+        lambda: not browser._pending_transfers and not browser._transfer_in_progress, timeout=3000
+    )
+    assert session.concurrent_access_detected is False
+    assert len(session.uploaded) == 2
 
 
 def test_close_session_closes_the_underlying_connection(qtbot):

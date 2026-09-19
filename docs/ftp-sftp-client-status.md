@@ -103,16 +103,74 @@ place "Connect via SSH"/"Connect via RDP" already live:
    like `manage_glinet_hosts_dialog.py`'s own "blank = keep existing"
    password field.
 
+## Recursive folder transfers
+
+Uploading or downloading a folder (context menu's Upload/Download, now
+offered for a selected folder as well as files — double-click still
+only ever transfers a single file, folders always navigate) walks it
+and enqueues one "create folder" job per directory plus one transfer
+job per file, all through the *same* sequential transfer queue a
+single-file transfer already used. Local walking is `os.walk`, done
+synchronously since it's just local filesystem I/O; the remote walk
+(`_walk_remote_tree`) is itself a queued `"scan_remote"` job — not an
+independently-dispatched background task — specifically so it can never
+run concurrently with anything else touching the session (see below).
+
+**Building this surfaced a real concurrency bug, confirmed live against
+a real sshd, not just in mocked unit tests:** `_on_transfer_done` used
+to call `self._reload_remote()`/`self._reload_local()` (a fresh
+`session.list_dir` call) immediately after a job finished, and then
+also dispatch the *next* queued job's own session call in the same
+call — two independent `async_utils.run_in_background` calls with
+nothing ordering them, both touching the same non-thread-safe SFTP/FTP
+session. For a single manually-triggered transfer this was invisible
+(nothing was ever still queued by the time it finished), but a
+multi-file recursive upload enqueues several jobs up front, so the next
+one really is waiting — uploading a folder with more than one file
+reliably hung forever (not an error — paramiko/ftplib don't fail
+cleanly on concurrent access, they just hang) until this was found and
+fixed. There was a second, narrower instance of the same root cause: a
+transfer fired immediately after opening a tab (before the initial
+connect's first directory listing had actually finished) could race
+that listing too.
+
+The fix: `_on_transfer_done` now only reloads once `_pending_transfers`
+is truly empty (checked *after* dispatching the next job, not before),
+and a new `_session_ready` flag defers the transfer queue itself from
+dispatching anything until the initial connect+first-listing has fully
+completed (success or failure). `tests/widgets/test_ftp_browser_widget.py`
+has two regression tests for this (folder-download and folder-upload,
+each using a session double that detects any overlapping method calls
+across threads) — both were confirmed to fail without the fix and pass
+with it. Live: a folder with a nested subfolder and three files
+uploaded and downloaded correctly end-to-end against a real sshd, both
+in the normal case and firing the transfer immediately at tab
+construction (the tightest version of the race window); both temporary
+servers used for this were torn down afterward, same as the other live
+verification in this document.
+
+**Not closed by this fix** (see "What's NOT done" below): New Folder,
+Rename, Delete, and Change Permissions still each dispatch their own
+one-off session call outside the transfer queue, so they can still race
+an *actively running* transfer the same way — this is a pre-existing
+gap (it already existed for a single plain-file transfer) that a full
+fix would need to route through the same queue.
+
 ## What's done and verified
 
 Every new/changed unit is covered:
 
-- `tests/core/test_ftp_client.py` (15 tests) — `SftpSession`/`FtpSession`
-  against mocked `paramiko`/`ftplib`, plus `list_local_dir`.
-- `tests/widgets/test_ftp_browser_widget.py` (8 tests) — connect, folder
-  navigation, download-on-double-click, upload-on-double-click, new
-  folder, recursive remote delete, `close_session`, FTP-hides-
-  permissions-column.
+- `tests/core/test_ftp_client.py` (20 tests) — `SftpSession`/`FtpSession`
+  against mocked `paramiko`/`ftplib`, `list_local_dir`, and the
+  unknown-host-key/trust flow (below).
+- `tests/widgets/test_ftp_browser_widget.py` (20 tests) — connect,
+  folder navigation, download-on-double-click, upload-on-double-click,
+  new folder, recursive remote delete, `close_session`,
+  FTP-hides-permissions-column, the unknown-host-key confirm/decline
+  flow, recursive folder upload/download, and the two concurrency
+  regression tests described above (folder download and folder upload,
+  each with a session double that fails the test if any two of its
+  methods are ever called from different threads at the same time).
 - `tests/modules/connection_manager/test_main_view_sessions.py` — new
   tests covering manual SFTP/FTP connect (including the stored-password
   path, the fall-back-to-prompt-on-decrypt-failure path, and
@@ -182,11 +240,22 @@ this sandbox for reasons unrelated to this change — see below).
   `virsh domifaddr` output (all three sources, plus the "nothing found"
   case) — not against a real running QEMU guest, since none was
   available in this sandbox.
-- **No recursive folder transfers** — uploading/downloading a directory
-  isn't implemented; only individual files. Recursive *delete* of a
-  remote directory is implemented (walks and removes children first).
+- **Recursive folder upload/download is implemented** (this used to say
+  it wasn't) — see "Recursive folder transfers" below for the details
+  and the concurrency bug it surfaced and fixed along the way.
 - **No drag-and-drop** between panes or from the OS file manager — only
-  double-click and the context menu's Download/Upload actions.
+  double-click (files only — double-clicking a folder navigates into
+  it) and the context menu's Download/Upload actions (which do accept
+  folders).
+- **New Folder/Rename/Delete/Change Permissions can still race an
+  active transfer** — each dispatches its own one-off session call
+  directly rather than going through the transfer queue, so clicking
+  one of them while a transfer is running touches the session from two
+  threads at once (the same class of bug described below, just not
+  closed for these four actions). This predates recursive transfers —
+  it was already possible with a single plain-file transfer — and
+  wasn't fixed here; a real fix would route all four through the same
+  queue that already serializes transfers.
 - **FTP has no `chmod`** — plain FTP has no standardized permissions
   primitive (`SITE CHMOD` is a common but non-universal extension), so
   "Change Permissions…" is only offered for SFTP.

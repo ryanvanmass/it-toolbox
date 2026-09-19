@@ -15,10 +15,44 @@ single SFTP/FTP connection isn't safe for concurrent calls; a
 _TransferSignals bridge marshals each transfer's progress callback
 (invoked on that background thread) back onto the Qt main thread.
 
+Uploading/downloading a folder recursively walks it (locally via
+os.walk, remotely via a "scan_remote" job that itself goes through the
+same queue -- see _enqueue_recursive_download's comment) and enqueues a
+"create the folder" job for each directory plus a transfer job for each
+file, all through the same sequential queue as a single-file transfer —
+os.walk/the remote walk visits a directory before its contents, so a
+directory's own create-folder job is always enqueued before any job
+that needs it to exist.
+
+Every entry point that touches self._session (a queued job, the initial
+connect+first listing, and — should new ones ever get added — anything
+else) must never run concurrently with another one: a single SFTP/FTP
+connection corrupts under concurrent use from two threads, which
+doesn't raise cleanly, it just hangs forever (confirmed live against a
+real sshd while building the recursive-transfer feature above — a
+completed job used to trigger a pane reload and dispatch the next
+queued job's own session call back to back, with nothing ordering them,
+and a fresh connection's first listing could race the very first
+transfer fired immediately after it). _session_ready and the "only
+reload once _pending_transfers is truly empty" check in
+_on_transfer_done exist specifically to close those two windows —
+don't reintroduce a bare async_utils.run_in_background call touching
+self._session outside of _process_transfer_queue without re-checking
+this reasoning.
+
 Known v1 limitations, tracked in docs/ftp-sftp-client-status.md: no
-recursive folder transfers (only individual files), and no drag-and-drop
-between panes or from the OS file manager — only double-click and the
-context menu's Download/Upload actions.
+drag-and-drop between panes or from the OS file manager — only
+double-click (single files only; double-clicking a folder navigates
+into it, in either pane) and the context menu's Download/Upload
+actions (which do accept folders). Also, New Folder/Rename/Delete/
+Change Permissions each still dispatch their own one-off
+async_utils.run_in_background session call directly, bypassing the
+transfer queue entirely -- clicking one of those while a transfer is
+actively running races it the same way described above. This predates
+recursive transfers (it was already possible to race a plain single-
+file transfer this way) and is out of scope here; a real fix would
+route every one of these through the same queue _process_transfer_queue
+already serializes.
 """
 
 from __future__ import annotations
@@ -144,10 +178,23 @@ class _TransferSignals(QObject):
     progress = Signal(int, int, int)
 
 
+# A recursive folder upload/download enqueues one of these per directory
+# (see _enqueue_recursive_upload/_enqueue_remote_tree) alongside the
+# regular "upload"/"download" file jobs, so the whole tree runs through
+# the same one-at-a-time queue in the right order.
+_DIRECTION_LABELS = {
+    "upload": "upload",
+    "download": "download",
+    "mkdir_remote": "create folder",
+    "mkdir_local": "create folder",
+    "scan_remote": "scan folder",
+}
+
+
 @dataclass
 class _TransferJob:
     id: int
-    direction: str  # "upload" or "download"
+    direction: str  # "upload", "download", "mkdir_remote", or "mkdir_local"
     name: str
     local_path: str
     remote_path: str
@@ -168,6 +215,15 @@ class FtpBrowserWidget(QWidget):
         self._pending_transfers: list[_TransferJob] = []
         self._transfer_in_progress = False
         self._transfer_rows: dict[int, int] = {}
+        # Guards against a transfer job being dispatched while the
+        # initial connect()+first listing is still in flight -- both
+        # would independently touch self._session, and a single SFTP/FTP
+        # connection isn't safe for concurrent use from two threads at
+        # once (see _on_transfer_done's note on the equivalent hazard
+        # between a completed job's reload and the next queued job).
+        # Enqueued jobs just wait harmlessly in _pending_transfers until
+        # _on_connected flips this and kicks the queue.
+        self._session_ready = False
 
         self._transfer_signals = _TransferSignals()
         self._transfer_signals.progress.connect(self._on_transfer_progress)
@@ -251,7 +307,26 @@ class FtpBrowserWidget(QWidget):
             self._status_label.setText(f"Connected to {self._display_name}")
         except RuntimeError:
             return  # tab was closed before the connection finished
-        self._reload_remote()
+
+        def mark_ready_and_finish(entries: list[ftp_client.FileEntry] | None, error: Exception | None) -> None:
+            # Runs whether the first listing succeeded or failed --
+            # either way the in-flight session.list_dir call this
+            # dispatched is done, so it's safe to let a queued transfer
+            # (see __init__'s _session_ready) start now.
+            if entries is not None:
+                self._remote_pane.set_entries(entries)
+            else:
+                self._on_error(error)
+            self._session_ready = True
+            self._process_transfer_queue()
+
+        self._remote_pane.set_path(self._remote_path)
+        path = self._remote_path
+        async_utils.run_in_background(
+            lambda: self._session.list_dir(path),
+            on_result=lambda entries: mark_ready_and_finish(entries, None),
+            on_error=lambda exc: mark_ready_and_finish(None, exc),
+        )
 
     # -- Local pane -----------------------------------------------------
 
@@ -290,16 +365,14 @@ class FtpBrowserWidget(QWidget):
     def _on_local_context_menu(self, pos) -> None:
         entries = self._local_pane.selected_entries()
         menu = QMenu(self)
-        upload_action = menu.addAction("Upload") if any(not e.is_dir for e in entries) else None
+        upload_action = menu.addAction("Upload") if entries else None
         menu.addSeparator()
         new_folder_action = menu.addAction("New Folder…")
         rename_action = menu.addAction("Rename…") if len(entries) == 1 else None
         delete_action = menu.addAction("Delete") if entries else None
         chosen = menu.exec(self._local_pane.map_to_global(pos))
         if upload_action is not None and chosen is upload_action:
-            self._upload_paths(
-                [os.path.join(self._local_path, e.name) for e in entries if not e.is_dir]
-            )
+            self._upload_paths([os.path.join(self._local_path, e.name) for e in entries])
         elif chosen is new_folder_action:
             self._new_local_folder()
         elif rename_action is not None and chosen is rename_action:
@@ -381,9 +454,8 @@ class FtpBrowserWidget(QWidget):
 
     def _on_remote_context_menu(self, pos) -> None:
         entries = self._remote_pane.selected_entries()
-        files = [e for e in entries if not e.is_dir]
         menu = QMenu(self)
-        download_action = menu.addAction("Download") if files else None
+        download_action = menu.addAction("Download") if entries else None
         menu.addSeparator()
         new_folder_action = menu.addAction("New Folder…")
         rename_action = menu.addAction("Rename…") if len(entries) == 1 else None
@@ -393,7 +465,7 @@ class FtpBrowserWidget(QWidget):
             chmod_action = menu.addAction("Change Permissions…")
         chosen = menu.exec(self._remote_pane.map_to_global(pos))
         if download_action is not None and chosen is download_action:
-            self._download_entries(files)
+            self._download_entries(entries)
         elif chosen is new_folder_action:
             self._new_remote_folder()
         elif rename_action is not None and chosen is rename_action:
@@ -475,23 +547,90 @@ class FtpBrowserWidget(QWidget):
 
     def _upload_paths(self, local_paths: list[str]) -> None:
         for local_path in local_paths:
-            if os.path.isdir(local_path):
-                continue  # recursive folder upload isn't supported in v1
-            name = os.path.basename(local_path)
+            name = os.path.basename(local_path.rstrip(os.sep))
             remote_path = self._session.join(self._remote_path, name)
-            try:
-                size = os.path.getsize(local_path)
-            except OSError:
-                size = 0
-            self._enqueue_transfer("upload", name, local_path, remote_path, size)
+            if os.path.isdir(local_path):
+                self._enqueue_recursive_upload(local_path, remote_path)
+            else:
+                try:
+                    size = os.path.getsize(local_path)
+                except OSError:
+                    size = 0
+                self._enqueue_transfer("upload", name, local_path, remote_path, size)
+
+    def _enqueue_recursive_upload(self, local_dir: str, remote_dir: str) -> None:
+        self._enqueue_transfer("mkdir_remote", os.path.basename(local_dir), local_dir, remote_dir, 0)
+        for root, dirs, files in os.walk(local_dir):
+            rel = os.path.relpath(root, local_dir)
+            current_remote = remote_dir if rel == "." else self._session.join(remote_dir, rel.replace(os.sep, "/"))
+            # os.walk visits `root` (and so enqueues each of its immediate
+            # subdirectories' own create-folder jobs, right here) before
+            # ever recursing into them, so by the time a subdirectory
+            # becomes `root` itself, its create-folder job is already
+            # ahead of it in the queue.
+            for name in sorted(dirs):
+                self._enqueue_transfer(
+                    "mkdir_remote", name, os.path.join(root, name), self._session.join(current_remote, name), 0
+                )
+            for name in sorted(files):
+                full_path = os.path.join(root, name)
+                try:
+                    size = os.path.getsize(full_path)
+                except OSError:
+                    size = 0
+                self._enqueue_transfer(
+                    "upload", name, full_path, self._session.join(current_remote, name), size
+                )
 
     def _download_entries(self, entries: list[ftp_client.FileEntry]) -> None:
         for entry in entries:
-            if entry.is_dir:
-                continue  # recursive folder download isn't supported in v1
             remote_path = self._session.join(self._remote_path, entry.name)
             local_path = os.path.join(self._local_path, entry.name)
-            self._enqueue_transfer("download", entry.name, local_path, remote_path, entry.size)
+            if entry.is_dir:
+                self._enqueue_recursive_download(remote_path, local_path)
+            else:
+                self._enqueue_transfer("download", entry.name, local_path, remote_path, entry.size)
+
+    def _enqueue_recursive_download(self, remote_dir: str, local_dir: str) -> None:
+        self._enqueue_transfer("mkdir_local", os.path.basename(local_dir), local_dir, remote_dir, 0)
+        # The remote tree walk itself goes through the same one-job-at-a-
+        # time queue as everything else ("scan_remote", below), rather
+        # than firing off its own independent background thread right
+        # here -- otherwise it could run concurrently with another
+        # already-queued job (e.g. a plain file selected alongside this
+        # folder in the same Download click) touching the same session
+        # from a second thread at the same time, which paramiko/ftplib
+        # don't support.
+        self._enqueue_transfer("scan_remote", os.path.basename(local_dir), local_dir, remote_dir, 0)
+
+    def _walk_remote_tree(self, remote_dir: str) -> list[tuple[str, bool, int]]:
+        """Runs on a background thread: returns a flat list of
+        (path_relative_to_remote_dir, is_dir, size) for every descendant
+        of remote_dir, a directory always listed before its own contents
+        (matches os.walk's top-down default, which _enqueue_recursive_upload
+        relies on the same way).
+        """
+        results: list[tuple[str, bool, int]] = []
+
+        def walk(path: str, rel: str) -> None:
+            for entry in self._session.list_dir(path):
+                entry_rel = f"{rel}/{entry.name}" if rel else entry.name
+                results.append((entry_rel, entry.is_dir, entry.size))
+                if entry.is_dir:
+                    walk(self._session.join(path, entry.name), entry_rel)
+
+        walk(remote_dir, "")
+        return results
+
+    def _enqueue_remote_tree(self, tree: list[tuple[str, bool, int]], remote_dir: str, local_dir: str) -> None:
+        for rel_path, is_dir, size in tree:
+            local_path = os.path.join(local_dir, *rel_path.split("/"))
+            remote_path = self._session.join(remote_dir, rel_path)
+            name = rel_path.rsplit("/", 1)[-1]
+            if is_dir:
+                self._enqueue_transfer("mkdir_local", name, local_path, remote_path, 0)
+            else:
+                self._enqueue_transfer("download", name, local_path, remote_path, size)
 
     def _enqueue_transfer(self, direction: str, name: str, local_path: str, remote_path: str, size: int) -> None:
         transfer_id = self._next_transfer_id
@@ -499,8 +638,8 @@ class FtpBrowserWidget(QWidget):
         row = self._queue_table.rowCount()
         self._queue_table.insertRow(row)
         self._queue_table.setItem(row, 0, QTableWidgetItem(name))
-        self._queue_table.setItem(row, 1, QTableWidgetItem(direction))
-        self._queue_table.setItem(row, 2, QTableWidgetItem("0%"))
+        self._queue_table.setItem(row, 1, QTableWidgetItem(_DIRECTION_LABELS.get(direction, direction)))
+        self._queue_table.setItem(row, 2, QTableWidgetItem("0%" if direction in ("upload", "download") else "—"))
         self._queue_table.setItem(row, 3, QTableWidgetItem("Queued"))
         self._transfer_rows[transfer_id] = row
         self._pending_transfers.append(
@@ -509,7 +648,7 @@ class FtpBrowserWidget(QWidget):
         self._process_transfer_queue()
 
     def _process_transfer_queue(self) -> None:
-        if self._transfer_in_progress or not self._pending_transfers:
+        if not self._session_ready or self._transfer_in_progress or not self._pending_transfers:
             return
         job = self._pending_transfers.pop(0)
         self._transfer_in_progress = True
@@ -518,15 +657,25 @@ class FtpBrowserWidget(QWidget):
         def progress(transferred: int, total: int) -> None:
             self._transfer_signals.progress.emit(job.id, transferred, total or job.size)
 
-        def run() -> None:
+        def run():
             if job.direction == "upload":
                 self._session.upload(job.local_path, job.remote_path, progress=progress)
-            else:
+            elif job.direction == "download":
                 self._session.download(job.remote_path, job.local_path, progress=progress)
+            elif job.direction == "mkdir_remote":
+                try:
+                    self._session.mkdir(job.remote_path)
+                except Exception:  # noqa: BLE001 - best-effort: fine if it already exists
+                    pass
+            elif job.direction == "mkdir_local":
+                os.makedirs(job.local_path, exist_ok=True)
+            else:  # "scan_remote"
+                return self._walk_remote_tree(job.remote_path)
+            return None
 
         async_utils.run_in_background(
             run,
-            on_result=lambda _: self._on_transfer_done(job),
+            on_result=lambda result: self._on_transfer_done(job, result),
             on_error=lambda exc: self._on_transfer_failed(job, exc),
         )
 
@@ -540,17 +689,34 @@ class FtpBrowserWidget(QWidget):
         except RuntimeError:
             pass  # tab was closed mid-transfer
 
-    def _on_transfer_done(self, job: _TransferJob) -> None:
+    def _on_transfer_done(self, job: _TransferJob, result=None) -> None:
         self._set_transfer_status(job.id, "Done")
         self._transfer_in_progress = False
         try:
-            if job.direction == "upload":
-                self._reload_remote()
-            else:
-                self._reload_local()
+            if job.direction == "scan_remote":
+                self._enqueue_remote_tree(result, job.remote_path, job.local_path)
         except RuntimeError:
             return  # tab was closed mid-transfer
+
         self._process_transfer_queue()
+
+        if not self._pending_transfers and not self._transfer_in_progress:
+            # The whole queue has just drained -- nothing else is about to
+            # touch the session, so it's safe to refresh both panes now.
+            # Reloading after *every* job instead (rather than once here,
+            # at the end) would race the next job's own session call --
+            # both would be background async_utils calls with no ordering
+            # between them, and a single SFTP/FTP connection isn't safe
+            # for concurrent use from two threads at once. This was
+            # latent but harmless for a single manually-triggered
+            # transfer (nothing was ever still queued by the time it
+            # finished); a recursive folder transfer enqueues many jobs
+            # up front, so the next one really is already waiting.
+            try:
+                self._reload_remote()
+                self._reload_local()
+            except RuntimeError:
+                pass  # tab was closed
 
     def _on_transfer_failed(self, job: _TransferJob, exc: Exception) -> None:
         self._set_transfer_status(job.id, f"Failed: {exc}")
