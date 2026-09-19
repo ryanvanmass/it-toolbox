@@ -91,6 +91,42 @@ def save_manual_connections(connections: list[dict]) -> None:
     manual_connections_path().write_text(json.dumps(connections))
 
 
+def qemu_vm_ip_overrides_path() -> Path:
+    return data_dir() / "qemu_vm_ip_overrides.json"
+
+
+def load_qemu_vm_ip_overrides() -> dict[tuple[str, str], str]:
+    """Manually-configured guest IPs for QEMU VMs, for when
+    qemu_client.get_vm_ip_address's virsh domifaddr discovery comes up
+    empty (e.g. a bridged network with no DHCP lease record and no guest
+    agent installed) -- keyed by (host_name, vm_name) since a VM name is
+    only unique within its own host. Stored as a list of
+    {"host", "vm", "ip"} dicts (JSON object keys must be strings, so the
+    natural tuple key can't be used directly) and returned keyed by that
+    tuple for the caller's convenience, same shape as
+    load_instance_ssh_username_overrides.
+    """
+    path = qemu_vm_ip_overrides_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    overrides: dict[tuple[str, str], str] = {}
+    for entry in raw:
+        try:
+            overrides[(entry["host"], entry["vm"])] = entry["ip"]
+        except (KeyError, TypeError):
+            continue
+    return overrides
+
+
+def save_qemu_vm_ip_overrides(overrides: dict[tuple[str, str], str]) -> None:
+    raw = [{"host": host, "vm": vm, "ip": ip} for (host, vm), ip in overrides.items()]
+    qemu_vm_ip_overrides_path().write_text(json.dumps(raw))
+
+
 def instance_ssh_username_overrides_path() -> Path:
     return data_dir() / "instance_ssh_username_overrides.json"
 

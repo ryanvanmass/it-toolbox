@@ -141,3 +141,68 @@ def test_is_available_true_when_virsh_on_path(monkeypatch):
 def test_is_available_false_when_virsh_missing(monkeypatch):
     monkeypatch.setattr(qemu_client.shutil, "which", lambda name: None)
     assert qemu_client.is_available() is False
+
+
+# -- get_vm_ip_address -------------------------------------------------------
+
+
+def test_get_vm_ip_address_parses_agent_source_output(monkeypatch):
+    output = (
+        " Name       MAC address          Protocol     Address\n"
+        "-------------------------------------------------------------------------------\n"
+        " lo         00:00:00:00:00:00    ipv4         127.0.0.1/8\n"
+        " -          -                    ipv6         ::1/128\n"
+        " eth0       52:54:00:6b:3c:58    ipv4         192.168.122.45/24\n"
+        " -          -                    ipv6         fe80::5054:ff:fe6b:3c58/64\n"
+    )
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        return _completed(stdout=output)
+
+    monkeypatch.setattr(qemu_client.subprocess, "run", fake_run)
+
+    ip = qemu_client.get_vm_ip_address(HOST, "myvm")
+
+    assert ip == "192.168.122.45"
+    # Tries the guest agent first -- succeeds immediately, no fallback needed.
+    assert calls == [["virsh", "-c", HOST.uri, "domifaddr", "myvm", "--source", "agent"]]
+
+
+def test_get_vm_ip_address_falls_back_through_lease_then_arp(monkeypatch):
+    empty = " Name       MAC address          Protocol     Address\n-------\n"
+    lease_output = (
+        " Name       MAC address          Protocol     Address\n"
+        "-------\n"
+        " vnet0      52:54:00:36:2f:c1    ipv4         192.168.122.150/24\n"
+    )
+
+    def fake_run_virsh(host, *args):
+        if args[-1] == "agent":
+            raise qemu_client.QemuApiError("guest agent is not connected")
+        return lease_output if args[-1] == "lease" else empty
+
+    monkeypatch.setattr(qemu_client, "run_virsh", fake_run_virsh)
+
+    ip = qemu_client.get_vm_ip_address(HOST, "myvm")
+
+    assert ip == "192.168.122.150"
+
+
+def test_get_vm_ip_address_returns_none_when_no_source_has_an_address(monkeypatch):
+    empty = " Name       MAC address          Protocol     Address\n-------\n"
+    monkeypatch.setattr(qemu_client, "run_virsh", lambda host, *args: empty)
+
+    assert qemu_client.get_vm_ip_address(HOST, "myvm") is None
+
+
+def test_get_vm_ip_address_ignores_loopback_only_output(monkeypatch):
+    output = (
+        " Name       MAC address          Protocol     Address\n"
+        "-------\n"
+        " lo         00:00:00:00:00:00    ipv4         127.0.0.1/8\n"
+    )
+    monkeypatch.setattr(qemu_client, "run_virsh", lambda host, *args: output)
+
+    assert qemu_client.get_vm_ip_address(HOST, "myvm") is None

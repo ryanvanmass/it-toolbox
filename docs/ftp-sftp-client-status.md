@@ -19,10 +19,20 @@ place "Connect via SSH"/"Connect via RDP" already live:
   action, tunneled through the same IAP/`BackgroundTunnel` machinery
   `_start_session_from_instance`'s SSH path already uses (SFTP is just
   an SSH subsystem, so it reuses the SSH port).
-- **QEMU/libvirt guest VMs do not get this** — `QemuVm` has no tracked
-  guest IP address anywhere in the codebase (SPICE is reached through
-  the libvirt host, not a guest IP), so there's no host to dial. Adding
-  that is future work; see "What's NOT done" below.
+- **QEMU/libvirt guest VMs** also get an explicit new "Connect via
+  SFTP" action. Unlike SPICE (reached through the libvirt host, not a
+  guest IP), this needed a guest IP that nothing in the codebase
+  tracked — added via `qemu_client.get_vm_ip_address` (best-effort
+  `virsh domifaddr`, tried against the "agent"/"lease"/"arp" sources in
+  that reliability order) plus a manually-configurable fallback (new
+  "Set IP Address…" VM context-menu action, persisted like the existing
+  `instance_ssh_username_overrides` pattern) for when none of those
+  three sources has anything (a bridged network with no guest agent and
+  no ARP history is the common case that needs this). Connects directly
+  to the discovered/overridden IP on port 22 with normal known_hosts
+  checking — a real address on the LAN, not an ephemeral tunnel port,
+  so it gets the same host-key protection a Manual SFTP connection
+  does, not the GCP-tunnel "skip and don't persist" treatment.
 
 ## Architecture
 
@@ -92,11 +102,17 @@ Every new/changed unit is covered:
   navigation, download-on-double-click, upload-on-double-click, new
   folder, recursive remote delete, `close_session`, FTP-hides-
   permissions-column.
-- `tests/modules/connection_manager/test_main_view_sessions.py` — 8 new
+- `tests/modules/connection_manager/test_main_view_sessions.py` — new
   tests covering manual SFTP/FTP connect (including the stored-password
   path, the fall-back-to-prompt-on-decrypt-failure path, and
-  remember-password persistence) and the GCP-instance SFTP path (tunnel
-  wiring, credentials dialog with the remember checkbox hidden).
+  remember-password persistence), the GCP-instance SFTP path (tunnel
+  wiring, credentials dialog with the remember checkbox hidden), and
+  the QEMU SFTP path (IP discovery, prompt-and-remember on discovery
+  failure, using a stored override without re-discovering, and the
+  "Set IP Address…" action itself).
+- `tests/modules/connection_manager/test_qemu_client.py` — 4 new tests
+  for `get_vm_ip_address` (agent-source parsing, falling back through
+  lease/arp, and the two "nothing found" cases).
 
 Beyond mocked unit tests, this was verified **live against two real
 local servers** stood up in the dev sandbox for exactly this purpose
@@ -125,10 +141,15 @@ this sandbox for reasons unrelated to this change — see below).
 
 ## What's NOT done / known limitations
 
-- **No QEMU/libvirt guest SFTP** — `QemuVm` has no guest IP anywhere in
-  this codebase (see the models.py comment on `QemuVm`); adding one
-  would need real discovery (e.g. via the guest agent's
-  `virsh domifaddr`) that's out of scope here.
+- **QEMU guest IP discovery is best-effort, not guaranteed** — it needs
+  the QEMU guest agent installed in the guest, a NAT/isolated libvirt
+  network with a DHCP lease record, or a live ARP cache entry. A guest
+  on a bridged network with none of those (common for a fresh VM) will
+  need its IP entered manually via "Set IP Address…" the first time.
+  This was verified against `qemu_client`'s parsing logic with mocked
+  `virsh domifaddr` output (all three sources, plus the "nothing found"
+  case) — not against a real running QEMU guest, since none was
+  available in this sandbox.
 - **No recursive folder transfers** — uploading/downloading a directory
   isn't implemented; only individual files. Recursive *delete* of a
   remote directory is implemented (walks and removes children first).
@@ -163,9 +184,15 @@ before this branch's changes:
 1. `git checkout claude/vm-ftp-sftp-client-u8kbkc`, `git pull`.
 2. `pip install -e ".[dev]"` (pulls in the new `paramiko` dependency).
 3. Right-click a Manual Connection with `kind="sftp"`/`"ftp"` (add one
-   via "Manage Connections…"), or a GCP instance's new "Connect via
-   SFTP" action, to try the real UI against a real server.
-4. If picking up "recursive folder transfers" or "drag-and-drop" next,
+   via "Manage Connections…"), a GCP instance's new "Connect via SFTP"
+   action, or a QEMU VM's new "Connect via SFTP" action, to try the real
+   UI against a real server.
+4. If picking this up with a real QEMU/libvirt host available: confirm
+   `virsh domifaddr` actually discovers a real guest's IP on that
+   specific network setup (NAT vs. bridged, agent installed or not) —
+   this was only verified against mocked `virsh` output so far, not a
+   real running guest.
+5. If picking up "recursive folder transfers" or "drag-and-drop" next,
    both are called out as deliberately out of scope above — they're the
    natural next milestones if this needs to get closer to FileZilla's
    full feature set.

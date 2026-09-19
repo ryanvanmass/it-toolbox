@@ -31,6 +31,7 @@ from it_toolbox.modules.connection_manager import (
 )
 from it_toolbox.modules.connection_manager.models import (
     RDP_PORT,
+    SFTP_PORT,
     SSH_PORT,
     GcpProject,
     GcsBucket,
@@ -170,6 +171,7 @@ class ConnectionManagerView(QWidget):
         # forgetting the account to connect as on every relaunch would
         # just reintroduce the same failure this override exists to fix.
         self._instance_ssh_username_overrides = settings.load_instance_ssh_username_overrides()
+        self._qemu_vm_ip_overrides = settings.load_qemu_vm_ip_overrides()
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
@@ -947,8 +949,8 @@ class ConnectionManagerView(QWidget):
         # at the top of this file. VM discovery/power actions below don't
         # need it and stay available regardless.
         connect_action = menu.addAction("Connect via SPICE") if SpiceWidget is not None else None
-        if connect_action is not None:
-            menu.addSeparator()
+        sftp_action = menu.addAction("Connect via SFTP")
+        menu.addSeparator()
         start_action = menu.addAction("Start")
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
@@ -961,9 +963,12 @@ class ConnectionManagerView(QWidget):
         # guaranteed while running.
         menu.addSeparator()
         configure_action = menu.addAction("Configure…")
+        set_ip_action = menu.addAction("Set IP Address…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if connect_action is not None and chosen is connect_action:
             self._connect_qemu(host, vm)
+        elif chosen is sftp_action:
+            self._start_qemu_sftp_session(host, vm)
         elif chosen is start_action:
             self._run_qemu_power_action(host, vm, "start")
         elif chosen is pause_action:
@@ -974,6 +979,8 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "shutdown")
         elif chosen is configure_action:
             self._on_configure_vm_clicked(item, host, vm)
+        elif chosen is set_ip_action:
+            self._on_set_qemu_vm_ip_clicked(host, vm)
 
     def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:
         async_utils.run_in_background(
@@ -991,6 +998,83 @@ class ConnectionManagerView(QWidget):
             host_item = item.parent()
             if host_item is not None:
                 self._load_qemu_vms(host_item, host)
+
+    def _start_qemu_sftp_session(self, host: QemuHost, vm: QemuVm) -> None:
+        override = self._qemu_vm_ip_overrides.get((host.name, vm.name))
+        if override:
+            self._prompt_qemu_sftp_credentials(vm, override)
+            return
+
+        async_utils.run_in_background(
+            lambda: qemu_client.get_vm_ip_address(host, vm.name),
+            on_result=lambda ip: self._on_qemu_vm_ip_resolved(host, vm, ip),
+            on_error=self._on_session_error,
+        )
+
+    def _on_qemu_vm_ip_resolved(self, host: QemuHost, vm: QemuVm, ip: str | None) -> None:
+        if ip is None:
+            # virsh domifaddr found nothing on any of its three sources
+            # (see qemu_client.get_vm_ip_address) -- ask once and remember
+            # the answer as an override so this VM never needs asking again.
+            ip, ok = QInputDialog.getText(
+                self,
+                "IP Address Needed",
+                f"Couldn't automatically discover {vm.name}'s IP address (this needs "
+                "either the QEMU guest agent installed in the guest, a DHCP lease from "
+                "libvirt's own network, or a live ARP cache entry on a bridged network). "
+                "Enter it manually:",
+            )
+            if not ok or not ip.strip():
+                return
+            ip = ip.strip()
+            self._qemu_vm_ip_overrides[(host.name, vm.name)] = ip
+            settings.save_qemu_vm_ip_overrides(self._qemu_vm_ip_overrides)
+        self._prompt_qemu_sftp_credentials(vm, ip)
+
+    def _prompt_qemu_sftp_credentials(self, vm: QemuVm, ip: str) -> None:
+        default_username = settings.load_default_username() or ""
+        # No ManualConnection record exists for a QEMU VM to persist a
+        # password onto (same reasoning as the GCP-instance SFTP path) --
+        # the credentials dialog's own "remember" checkbox is hidden.
+        dialog = FtpCredentialsDialog("sftp", vm.name, default_username=default_username, show_remember=False, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        username = dialog.username() or default_username
+        if not username:
+            QMessageBox.warning(self, "Username required", "A username is required to connect.")
+            return
+
+        session = ftp_client.SftpSession(
+            ip,
+            SFTP_PORT,
+            username,
+            password=dialog.password() or None,
+            key_path=dialog.key_path(),
+            key_passphrase=dialog.key_passphrase(),
+        )
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._embed_ftp(session_id, vm.name, session)
+
+        label = f"{vm.name} (SFTP) — {ip}:{SFTP_PORT}"
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    def _on_set_qemu_vm_ip_clicked(self, host: QemuHost, vm: QemuVm) -> None:
+        current = self._qemu_vm_ip_overrides.get((host.name, vm.name), "")
+        ip, ok = QInputDialog.getText(
+            self,
+            "Set IP Address",
+            f"IP address for {vm.name} (leave blank to go back to automatic discovery):",
+            text=current,
+        )
+        if not ok:
+            return
+        ip = ip.strip()
+        if ip:
+            self._qemu_vm_ip_overrides[(host.name, vm.name)] = ip
+        else:
+            self._qemu_vm_ip_overrides.pop((host.name, vm.name), None)
+        settings.save_qemu_vm_ip_overrides(self._qemu_vm_ip_overrides)
 
     def _show_manual_root_context_menu(self, pos) -> None:
         menu = QMenu(self)

@@ -2119,6 +2119,100 @@ def test_start_session_from_instance_sftp_shows_credentials_dialog_without_remem
     assert connect_calls[0]["kind"] == "sftp"
 
 
+def test_qemu_sftp_connect_discovers_ip_and_embeds_browser(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_ip_address", lambda host, name: "192.168.1.50")
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    widget = view._tabs.widget(0)
+    session = widget.session
+    assert isinstance(session, main_view_module.ftp_client.SftpSession)
+    assert session._host == "192.168.1.50"
+    assert session._port == main_view_module.SFTP_PORT
+    # A real external host (not an ephemeral IAP tunnel port) -- normal
+    # known_hosts checking must stay on, same as a Manual connection.
+    assert session._skip_host_key_check is False
+
+
+def test_qemu_sftp_connect_prompts_for_ip_when_discovery_fails_and_remembers_it(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_ip_address", lambda host, name: None)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("10.0.0.9", True))
+    )
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_qemu_vm_ip_overrides",
+        lambda overrides: saved.setdefault("overrides", dict(overrides)),
+    )
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    widget = view._tabs.widget(0)
+    assert widget.session._host == "10.0.0.9"
+    assert saved["overrides"][("lab", "myvm")] == "10.0.0.9"
+    assert view._qemu_vm_ip_overrides[("lab", "myvm")] == "10.0.0.9"
+
+
+def test_qemu_sftp_connect_uses_stored_ip_override_without_discovery(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+
+    def _fail_if_called(host, name):
+        raise AssertionError("should not attempt discovery when an override is stored")
+
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_ip_address", _fail_if_called)
+    view = _make_view(qtbot, monkeypatch)
+    view._qemu_vm_ip_overrides[("lab", "myvm")] = "10.0.0.5"
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.widget(0).session._host == "10.0.0.5"
+
+
+def test_set_qemu_vm_ip_stores_and_clears_override(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_qemu_vm_ip_overrides",
+        lambda overrides: saved.__setitem__("overrides", dict(overrides)),
+    )
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("10.0.0.5", True))
+    )
+    view._on_set_qemu_vm_ip_clicked(host, vm)
+    assert view._qemu_vm_ip_overrides[("lab", "myvm")] == "10.0.0.5"
+    assert saved["overrides"][("lab", "myvm")] == "10.0.0.5"
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("", True)))
+    view._on_set_qemu_vm_ip_clicked(host, vm)
+    assert ("lab", "myvm") not in view._qemu_vm_ip_overrides
+    assert ("lab", "myvm") not in saved["overrides"]
+
+
 # -- GL.iNet hosts / dashboard ------------------------------------------------
 
 
