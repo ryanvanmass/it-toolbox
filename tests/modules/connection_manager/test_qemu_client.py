@@ -105,6 +105,57 @@ def test_get_vm_spice_port_returns_none_when_port_unassigned(monkeypatch):
     assert qemu_client.get_vm_spice_port(HOST, "myvm") is None
 
 
+def test_diagnose_missing_spice_port_reports_not_running(monkeypatch):
+    xml = "<domain><devices><graphics type='spice' port='-1' autoport='yes'/></devices></domain>"
+    monkeypatch.setattr(qemu_client.subprocess, "run", lambda *a, **k: _completed(stdout=xml))
+
+    message = qemu_client.diagnose_missing_spice_port(HOST, "myvm", "shut off")
+
+    assert "not running" in message
+    assert "shut off" in message
+
+
+def test_diagnose_missing_spice_port_reports_generic_when_running_with_no_port(monkeypatch):
+    xml = "<domain><devices><graphics type='spice' port='-1' autoport='yes'/></devices></domain>"
+    monkeypatch.setattr(qemu_client.subprocess, "run", lambda *a, **k: _completed(stdout=xml))
+
+    message = qemu_client.diagnose_missing_spice_port(HOST, "myvm", "running")
+
+    assert message == "myvm has no SPICE port available — is it running?"
+
+
+def test_diagnose_missing_spice_port_reports_tls_only(monkeypatch):
+    xml = (
+        "<domain><devices>"
+        "<graphics type='spice' port='-1' tlsPort='5901' autoport='yes'/>"
+        "</devices></domain>"
+    )
+    monkeypatch.setattr(qemu_client.subprocess, "run", lambda *a, **k: _completed(stdout=xml))
+
+    message = qemu_client.diagnose_missing_spice_port(HOST, "myvm", "running")
+
+    assert "TLS-only" in message
+
+
+def test_diagnose_missing_spice_port_reports_other_graphics_type(monkeypatch):
+    xml = "<domain><devices><graphics type='vnc' port='5900' autoport='yes'/></devices></domain>"
+    monkeypatch.setattr(qemu_client.subprocess, "run", lambda *a, **k: _completed(stdout=xml))
+
+    message = qemu_client.diagnose_missing_spice_port(HOST, "myvm", "running")
+
+    assert "no SPICE graphics device" in message
+    assert "'vnc'" in message
+
+
+def test_diagnose_missing_spice_port_reports_no_graphics_at_all(monkeypatch):
+    xml = "<domain><devices></devices></domain>"
+    monkeypatch.setattr(qemu_client.subprocess, "run", lambda *a, **k: _completed(stdout=xml))
+
+    message = qemu_client.diagnose_missing_spice_port(HOST, "myvm", "running")
+
+    assert message == "myvm has no graphics device configured at all."
+
+
 @pytest.mark.parametrize(
     ("action", "expected_virsh_command"),
     [

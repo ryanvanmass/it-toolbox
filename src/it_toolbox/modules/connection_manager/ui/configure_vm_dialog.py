@@ -2,9 +2,14 @@
 vCPUs/memory, add or remove disks, change/eject CD-ROM media (only
 offered when the VM actually has a cdrom device -- confirmed live that
 a VM deployed without an ISO chosen at create time has none at all),
-and change its network (only offered when it has exactly one network
+change its network (only offered when it has exactly one network
 interface -- multiple-NIC VMs are a real, deliberately deferred case,
-see docs/qemu-vm-provisioning-status.md).
+see docs/qemu-vm-provisioning-status.md), and change its display device
+(SPICE/VNC) -- mainly a recovery path for a VM that ended up with VNC
+graphics instead of SPICE (see qemu_client.diagnose_missing_spice_port,
+the "no SPICE port available" connect error that causes), always shown
+regardless of the VM's current device since there's no discovery step
+needed for it, unlike CD-ROM/Network.
 
 Openable for a running VM too (not just a stopped one) -- confirmed
 live, per operation, what that actually means:
@@ -68,7 +73,7 @@ _NONE_ISO_LABEL = "(None — eject)"
 class ConfigureVmDialog(QDialog):
     def __init__(
         self, host: QemuHost, vm: QemuVm, current_vcpus: int, current_memory_mib: int,
-        parent: QWidget | None = None,
+        current_display_device: str | None, parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._host = host
@@ -76,6 +81,7 @@ class ConfigureVmDialog(QDialog):
         self._is_running = vm.state == "running"
         self._current_vcpus = current_vcpus
         self._current_memory_mib = current_memory_mib
+        self._current_display_device = current_display_device
         self._cdrom_target: str | None = None
         self._network_mac: str | None = None
         self._current_network: str | None = None
@@ -103,6 +109,38 @@ class ConfigureVmDialog(QDialog):
             resize_note.setWordWrap(True)
             resize_note.setStyleSheet("color: gray;")
             resource_form.addRow("", resize_note)
+
+        # -- Display device (SPICE/VNC) ------------------------------------
+        self._display_combo = QComboBox()
+        self._display_combo.addItem("SPICE", "spice")
+        self._display_combo.addItem("VNC", "vnc")
+        index = self._display_combo.findData(current_display_device)
+        # No matching item (no graphics device at all, or an unrecognized
+        # type) -- default the picker to SPICE rather than leaving it on
+        # whatever the combo's own first item happens to be, since SPICE
+        # is what this app can actually connect to.
+        self._display_combo.setCurrentIndex(index if index != -1 else 0)
+        # The baseline _on_accept compares against -- not current_display_device
+        # directly, since that can be None (no graphics device at all) while
+        # the combo itself always shows *some* selection (defaulted to SPICE
+        # above); comparing against the combo's own starting value means
+        # leaving that default untouched doesn't look like a deliberate
+        # change, matching every other optional section's "nothing happens
+        # unless you actually interact" behavior.
+        self._initial_display_value = self._display_combo.currentData()
+
+        display_form = QFormLayout()
+        display_form.addRow("Current:", QLabel(current_display_device or "(none)"))
+        display_form.addRow("Change to:", self._display_combo)
+        if self._is_running:
+            # Not a hot-pluggable change -- like vCPU/memory, this always
+            # just stages the new device for the VM's next restart.
+            display_note = QLabel("Display device changes apply the next time this VM restarts.")
+            display_note.setWordWrap(True)
+            display_note.setStyleSheet("color: gray;")
+            display_form.addRow("", display_note)
+        self._display_box = QGroupBox("Display")
+        self._display_box.setLayout(display_form)
 
         # -- Disks --------------------------------------------------------
         self._disks_list = QListWidget()
@@ -206,6 +244,7 @@ class ConfigureVmDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(resource_form)
+        layout.addWidget(self._display_box)
         layout.addWidget(self._disks_box)
         layout.addWidget(self._cdrom_box)
         layout.addWidget(self._network_box)
@@ -358,9 +397,12 @@ class ConfigureVmDialog(QDialog):
             return
         network_actually_changes = change_network and new_network != self._current_network
 
+        new_display_device = self._display_combo.currentData()
+        display_actually_changes = new_display_device != self._initial_display_value
+
         if (
             vcpus is None and memory_mib is None and not add_disk and not disks_to_remove
-            and not change_media and not network_actually_changes
+            and not change_media and not network_actually_changes and not display_actually_changes
         ):
             # Nothing actually changed -- close without making any call.
             self.accept()
@@ -369,6 +411,8 @@ class ConfigureVmDialog(QDialog):
         def do_work() -> None:
             if vcpus is not None or memory_mib is not None:
                 qemu_provisioning.resize_vm(self._host, self._vm.name, vcpus=vcpus, memory_mib=memory_mib)
+            if display_actually_changes:
+                qemu_provisioning.set_display_device(self._host, self._vm.name, new_display_device)
             for target in disks_to_remove:
                 qemu_provisioning.remove_disk(self._host, self._vm.name, target, live=self._is_running)
             if add_disk:

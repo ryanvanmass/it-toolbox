@@ -1517,10 +1517,15 @@ def test_prepare_qemu_spice_connection_raises_when_no_spice_port(qtbot, monkeypa
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
     monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: None)
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "diagnose_missing_spice_port",
+        lambda host, name, state: f"{name} is not running (state: {state}).",
+    )
     host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
     vm = QemuVm(id="1", name="myvm", state="shut off")
 
-    with pytest.raises(main_view_module.QemuApiError, match="no SPICE port"):
+    with pytest.raises(main_view_module.QemuApiError, match="not running"):
         ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
 
 
@@ -1757,14 +1762,17 @@ def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, mo
     class _FakeConfigureVmDialog:
         DialogCode = ConfigureVmDialog.DialogCode
 
-        def __init__(self, host, vm, vcpus, memory_mib, parent=None):
-            captured["args"] = (host, vm, vcpus, memory_mib)
+        def __init__(self, host, vm, vcpus, memory_mib, display_device, parent=None):
+            captured["args"] = (host, vm, vcpus, memory_mib, display_device)
 
         def exec(self):
             return self.DialogCode.Accepted
 
     monkeypatch.setattr(main_view_module, "ConfigureVmDialog", _FakeConfigureVmDialog)
     monkeypatch.setattr(main_view_module.qemu_provisioning, "get_vm_resources", lambda host, name: (4, 8192))
+    monkeypatch.setattr(
+        main_view_module.qemu_provisioning, "get_vm_display_device", lambda host, name: "spice"
+    )
     monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
 
     view = _make_view(qtbot, monkeypatch)
@@ -1780,7 +1788,7 @@ def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, mo
     view._on_configure_vm_clicked(vm_item, host, vm)
 
     qtbot.waitUntil(lambda: "args" in captured, timeout=2000)
-    assert captured["args"] == (host, vm, 4, 8192)
+    assert captured["args"] == (host, vm, 4, 8192, "spice")
     qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
     assert host_item.child(0).text(0) == "(no VMs)"
 

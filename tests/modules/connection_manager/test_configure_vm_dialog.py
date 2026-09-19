@@ -23,7 +23,7 @@ _ONE_NETWORK = (VirtualNetwork(name="default", state="active"),)
 
 
 def _make_dialog(
-    qtbot, monkeypatch, current_vcpus=2, current_memory_mib=2048,
+    qtbot, monkeypatch, current_vcpus=2, current_memory_mib=2048, current_display_device="spice",
     disks=_ONE_DISK, interfaces=_ONE_INTERFACE, pools=_ONE_POOL, networks=_ONE_NETWORK,
     volumes=(), vm=VM,
 ):
@@ -47,7 +47,7 @@ def _make_dialog(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.list_volumes",
         lambda host, pool_name: list(volumes),
     )
-    dialog = ConfigureVmDialog(HOST, vm, current_vcpus, current_memory_mib)
+    dialog = ConfigureVmDialog(HOST, vm, current_vcpus, current_memory_mib, current_display_device)
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitUntil(lambda: dialog._disk_pool_combo.count() == len(pools), timeout=1000)
@@ -130,7 +130,7 @@ def test_network_section_shows_and_preselects_current_network(qtbot, monkeypatch
 def test_accept_with_no_changes_closes_without_calling_anything(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch)
     calls = []
-    for fn in ("resize_vm", "add_disk", "remove_disk", "change_cdrom_media", "change_network"):
+    for fn in ("resize_vm", "add_disk", "remove_disk", "change_cdrom_media", "change_network", "set_display_device"):
         monkeypatch.setattr(
             f"it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.{fn}",
             lambda *a, **k: calls.append(fn),
@@ -310,6 +310,77 @@ def test_accept_with_change_network_left_on_same_network_is_a_no_op(qtbot, monke
     dialog._on_accept()
 
     assert change_calls == []
+    assert accepted == [True]
+
+
+def test_display_section_shows_current_device(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device="vnc")
+
+    assert dialog._display_combo.currentData() == "vnc"
+
+
+def test_display_section_defaults_to_spice_when_no_device_at_all(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device=None)
+
+    assert dialog._display_combo.currentData() == "spice"
+
+
+def test_accept_with_display_device_switched_to_spice(qtbot, monkeypatch):
+    # The main recovery scenario this section exists for: a VM that ended
+    # up with VNC graphics (so it can never get a SPICE port -- see
+    # qemu_client.diagnose_missing_spice_port) gets switched back.
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device="vnc")
+
+    index = dialog._display_combo.findData("spice")
+    dialog._display_combo.setCurrentIndex(index)
+
+    set_display_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_display_device",
+        lambda host, vm_name, graphics_type: set_display_calls.append((vm_name, graphics_type)),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: set_display_calls == [("myvm", "spice")], timeout=1000)
+    qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
+
+
+def test_accept_with_display_device_left_unchanged_is_a_no_op(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device="spice")
+    # Combo already preselected to "spice" -- nothing touched.
+
+    set_display_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_display_device",
+        lambda *a, **k: set_display_calls.append(True),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    assert set_display_calls == []
+    assert accepted == [True]
+
+
+def test_accept_with_no_device_left_on_default_spice_selection_is_a_no_op(qtbot, monkeypatch):
+    # Regression case: a VM with no graphics device at all defaults the
+    # combo to "spice" for display purposes, but leaving that default
+    # untouched must not look like a deliberate change -- only an actual
+    # interaction with the combo should trigger set_display_device.
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device=None)
+
+    set_display_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_display_device",
+        lambda *a, **k: set_display_calls.append(True),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    assert set_display_calls == []
     assert accepted == [True]
 
 
