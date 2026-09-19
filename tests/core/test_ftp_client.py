@@ -114,14 +114,93 @@ def test_sftp_session_connects_with_given_credentials(monkeypatch):
     assert client.connected_with["look_for_keys"] is True
 
 
-def test_sftp_session_uses_reject_policy_when_host_key_checking_enabled(monkeypatch):
+def test_sftp_session_uses_unknown_host_key_policy_when_host_key_checking_enabled(monkeypatch):
     monkeypatch.setattr(paramiko, "SSHClient", _FakeSshClient)
     session = ftp_client.SftpSession("example.com", 22, "alice", password="secret")
 
     session.connect()
 
     client = _FakeSshClient.instances[0]
-    assert isinstance(client.host_key_policy, paramiko.RejectPolicy)
+    assert isinstance(client.host_key_policy, ftp_client._RaiseUnknownHostKey)
+
+
+def test_sftp_session_raises_unknown_host_key_error_for_a_never_seen_host(monkeypatch):
+    key = paramiko.RSAKey.generate(1024)
+
+    class _RejectingClient(_FakeSshClient):
+        def connect(self, host, **kwargs):
+            self.host_key_policy.missing_host_key(self, "example.com", key)
+
+    monkeypatch.setattr(paramiko, "SSHClient", _RejectingClient)
+    session = ftp_client.SftpSession("example.com", 22, "alice", password="secret")
+
+    with pytest.raises(ftp_client.UnknownHostKeyError) as exc_info:
+        session.connect()
+
+    assert exc_info.value.hostname == "example.com"
+    assert exc_info.value.key is key
+    assert exc_info.value.fingerprint.startswith("SHA256:")
+
+
+def test_sftp_session_skip_host_key_check_never_raises_unknown_host_key_error(monkeypatch):
+    # The GCP/IAP-tunnel path always uses AutoAddPolicy -- it must never
+    # surface UnknownHostKeyError (there's no known_hosts prompt to show
+    # for an ephemeral local tunnel port with no meaningful host identity).
+    monkeypatch.setattr(paramiko, "SSHClient", _FakeSshClient)
+    session = ftp_client.SftpSession("127.0.0.1", 2222, "alice", skip_host_key_check=True)
+
+    session.connect()
+
+    client = _FakeSshClient.instances[0]
+    assert isinstance(client.host_key_policy, paramiko.AutoAddPolicy)
+
+
+def test_sftp_session_wraps_host_key_mismatch_as_a_hard_failure(monkeypatch):
+    class _MismatchClient(_FakeSshClient):
+        def connect(self, host, **kwargs):
+            raise paramiko.BadHostKeyException("example.com", paramiko.RSAKey.generate(1024), paramiko.RSAKey.generate(1024))
+
+    monkeypatch.setattr(paramiko, "SSHClient", _MismatchClient)
+    session = ftp_client.SftpSession("example.com", 22, "alice", password="secret")
+
+    # A mismatch is a potential MITM -- it must be a hard FtpClientError,
+    # never the "ask to trust it" UnknownHostKeyError path.
+    with pytest.raises(ftp_client.FtpClientError, match="doesn't match") as exc_info:
+        session.connect()
+    assert not isinstance(exc_info.value, ftp_client.UnknownHostKeyError)
+
+
+def test_trust_host_key_persists_to_known_hosts_and_allows_a_later_connection(monkeypatch, tmp_path):
+    monkeypatch.setattr(ftp_client.Path, "home", staticmethod(lambda: tmp_path))
+    key = paramiko.RSAKey.generate(1024)
+    session = ftp_client.SftpSession("example.com", 22, "alice")
+
+    session.trust_host_key("example.com", key)
+
+    known_hosts = tmp_path / ".ssh" / "known_hosts"
+    assert known_hosts.is_file()
+    saved = paramiko.HostKeys()
+    saved.load(str(known_hosts))
+    assert saved.lookup("example.com")[key.get_name()] == key
+
+
+def test_trust_host_key_preserves_existing_entries(monkeypatch, tmp_path):
+    monkeypatch.setattr(ftp_client.Path, "home", staticmethod(lambda: tmp_path))
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir()
+    existing_key = paramiko.RSAKey.generate(1024)
+    existing = paramiko.HostKeys()
+    existing.add("other-host.com", existing_key.get_name(), existing_key)
+    existing.save(str(ssh_dir / "known_hosts"))
+
+    new_key = paramiko.RSAKey.generate(1024)
+    session = ftp_client.SftpSession("example.com", 22, "alice")
+    session.trust_host_key("example.com", new_key)
+
+    saved = paramiko.HostKeys()
+    saved.load(str(ssh_dir / "known_hosts"))
+    assert saved.lookup("other-host.com")[existing_key.get_name()] == existing_key
+    assert saved.lookup("example.com")[new_key.get_name()] == new_key
 
 
 def test_sftp_session_wraps_authentication_failure(monkeypatch):

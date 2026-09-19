@@ -213,8 +213,34 @@ class FtpBrowserWidget(QWidget):
 
     def _connect_remote(self) -> None:
         async_utils.run_in_background(
-            self._session.connect, on_result=lambda _: self._on_connected(), on_error=self._on_error
+            self._session.connect, on_result=lambda _: self._on_connected(), on_error=self._on_connect_error
         )
+
+    def _on_connect_error(self, error: Exception) -> None:
+        if isinstance(error, ftp_client.UnknownHostKeyError):
+            self._prompt_trust_host_key(error)
+            return
+        self._on_error(error)
+
+    def _prompt_trust_host_key(self, error: ftp_client.UnknownHostKeyError) -> None:
+        try:
+            self._status_label.setText(f"Unknown host key for {error.hostname}")
+        except RuntimeError:
+            return  # tab was closed before the connection attempt finished
+        confirmed = QMessageBox.question(
+            self,
+            "Unknown Host Key",
+            f"The authenticity of host '{error.hostname}' can't be established.\n"
+            f"{error.key.get_name()} key fingerprint is {error.fingerprint}.\n\n"
+            "Are you sure you want to continue connecting? This adds the key to your "
+            "~/.ssh/known_hosts, the same as accepting it in a regular ssh client would.",
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            self._status_label.setText("Connection cancelled — host key not trusted.")
+            return
+        self._session.trust_host_key(error.hostname, error.key)
+        self._status_label.setText(f"Connecting to {self._display_name}…")
+        self._connect_remote()
 
     def _on_connected(self) -> None:
         try:

@@ -52,10 +52,21 @@ place "Connect via SSH"/"Connect via RDP" already live:
    a background thread via `core/async_utils.run_in_background`.
    SFTP host-key handling mirrors `_embed_ssh`'s GCP-vs-Manual split:
    `skip_host_key_check=True` (IAP-tunneled) trusts-and-never-persists
-   via `paramiko.AutoAddPolicy`, otherwise it loads
-   `~/.ssh/known_hosts` and rejects an unrecognized host outright
-   (`paramiko.RejectPolicy`) — a real external host still gets real
-   host-key protection, same as manual SSH connections do today.
+   via `paramiko.AutoAddPolicy`; otherwise it loads `~/.ssh/known_hosts`
+   and, for a host with no entry at all, raises `UnknownHostKeyError`
+   (a custom `MissingHostKeyPolicy`, not `paramiko.RejectPolicy`) rather
+   than failing outright — `FtpBrowserWidget` catches that specific
+   error, shows a real-ssh-style SHA256 fingerprint confirmation
+   (`QMessageBox.question`), and on "yes" calls
+   `SftpSession.trust_host_key()` (appends to the same
+   `~/.ssh/known_hosts` a real `ssh` client reads) and retries connect().
+   A genuine key *mismatch* (a different key already on file for that
+   host — the real MITM-relevant case) still raises
+   `paramiko.BadHostKeyException`, wrapped as a hard, non-recoverable
+   `FtpClientError` with no "trust it" option. A real external host
+   (Manual connection or QEMU VM) gets this whole flow; the GCP/IAP
+   tunnel path never does (there's no meaningful host identity on an
+   ephemeral local port to prompt about).
 2. **`widgets/ftp_browser_widget.py`** — `FtpBrowserWidget`: a local
    pane and a remote pane (`_FilePaneWidget`, a small shared view for
    both — path bar, Up/Refresh, a table), plus a transfer queue table
@@ -113,6 +124,17 @@ Every new/changed unit is covered:
 - `tests/modules/connection_manager/test_qemu_client.py` — 4 new tests
   for `get_vm_ip_address` (agent-source parsing, falling back through
   lease/arp, and the two "nothing found" cases).
+- `tests/core/test_ftp_client.py` also covers the unknown-host-key flow:
+  `_RaiseUnknownHostKey` is used (not `RejectPolicy`) when host-key
+  checking is on, `UnknownHostKeyError` carries the right
+  hostname/key/fingerprint, `skip_host_key_check=True` never raises it,
+  a genuine mismatch (`BadHostKeyException`) stays a hard, non-"trust
+  it" failure, and `trust_host_key()` both writes a fresh
+  `known_hosts` and preserves any existing entries in it.
+  `tests/widgets/test_ftp_browser_widget.py` covers both outcomes of
+  the confirmation dialog: accepting trusts the key and retries
+  connect(); declining leaves the session disconnected with no key
+  persisted.
 
 Beyond mocked unit tests, this was verified **live against two real
 local servers** stood up in the dev sandbox for exactly this purpose
@@ -130,6 +152,16 @@ local servers** stood up in the dev sandbox for exactly this purpose
   connected, listed via real MLSD, downloaded, uploaded (progress
   callback fired with real byte counts), created a directory, renamed,
   and deleted, all through the actual FTP wire protocol.
+- The unknown-host-key flow specifically: a fresh `sshd` with an empty
+  `known_hosts` raised `UnknownHostKeyError` with a real SHA256
+  fingerprint on first connect; calling `trust_host_key()` and
+  reconnecting succeeded; a brand-new `SftpSession` object afterward
+  connected with no prompt at all, proving the trust was actually
+  persisted to `~/.ssh/known_hosts` in the real OpenSSH format (not
+  just held in memory). Separately, hand-crafting a *mismatched*
+  known_hosts entry for the same host and reconnecting confirmed it
+  still hard-fails with `BadHostKeyException`, never the "trust it"
+  path — a real key mismatch can't be waved through.
 
 Both temporary servers were torn down after verification; nothing from
 them is part of the repo or the test suite (the unit tests mock
@@ -161,7 +193,15 @@ this sandbox for reasons unrelated to this change — see below).
 - **No known_hosts pinning for GCP-tunneled SFTP** — same trade-off
   `_embed_ssh` already makes for GCP/IAP SSH terminals: the ephemeral
   local tunnel port has no meaningful host identity to pin, so that
-  path always trusts-and-moves-on rather than checking a host key.
+  path always trusts-and-moves-on rather than checking a host key (and
+  so never shows the unknown-host-key prompt described above — there's
+  nothing meaningful to prompt about there).
+- **The unknown-host-key confirmation dialog shows the key's SHA256
+  fingerprint but not the older MD5/"randomart" formats** some users
+  may be used to comparing against a server's own `ssh-keygen -lf`
+  output — SHA256 is `ssh-keygen`'s own modern default, so this matches
+  what a fresh `ssh` connection prompt shows today, but isn't a format
+  match for very old scripts/docs that still print MD5 fingerprints.
 
 ## Known pre-existing sandbox limitations (not related to this change)
 

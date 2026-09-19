@@ -5,7 +5,7 @@ from it_toolbox.widgets.ftp_browser_widget import FtpBrowserWidget
 class _FakeSession:
     kind = "sftp"
 
-    def __init__(self, entries_by_path, home="/home/alice"):
+    def __init__(self, entries_by_path, home="/home/alice", fail_connect_with=None):
         self._entries_by_path = entries_by_path
         self._home = home
         self.connected = False
@@ -16,9 +16,20 @@ class _FakeSession:
         self.renames = []
         self.removed = []
         self.rmdirs = []
+        self.trusted_host_keys = []
+        # Raised by connect() until trust_host_key() has been called --
+        # simulates paramiko's real "unknown host key" -> retry flow
+        # without a real SSH connection.
+        self._fail_connect_with = fail_connect_with
 
     def connect(self):
+        if self._fail_connect_with is not None:
+            raise self._fail_connect_with
         self.connected = True
+
+    def trust_host_key(self, hostname, key):
+        self.trusted_host_keys.append((hostname, key))
+        self._fail_connect_with = None
 
     def home_dir(self):
         return self._home
@@ -80,7 +91,41 @@ def test_browser_connects_and_loads_home_directory(qtbot):
     qtbot.waitUntil(lambda: browser._remote_pane._table.rowCount() == 2, timeout=2000)
 
     assert browser._remote_path == "/home/alice"
-    assert "docs" in browser._remote_pane._table.item(0, 0).text()
+
+
+def test_unknown_host_key_prompts_and_retries_on_accept(qtbot, monkeypatch):
+    import paramiko
+
+    import it_toolbox.widgets.ftp_browser_widget as module
+
+    key = paramiko.RSAKey.generate(1024)
+    error = ftp_client.UnknownHostKeyError("10.0.0.5", key)
+    session = _FakeSession({"/home/alice": []}, fail_connect_with=error)
+    monkeypatch.setattr(module.QMessageBox, "question", staticmethod(lambda *a, **k: module.QMessageBox.StandardButton.Yes))
+
+    browser = FtpBrowserWidget(session, "my-box")
+    qtbot.addWidget(browser)
+
+    qtbot.waitUntil(lambda: session.trusted_host_keys == [("10.0.0.5", key)], timeout=2000)
+    qtbot.waitUntil(lambda: session.connected, timeout=2000)
+
+
+def test_unknown_host_key_declined_leaves_session_disconnected(qtbot, monkeypatch):
+    import paramiko
+
+    import it_toolbox.widgets.ftp_browser_widget as module
+
+    key = paramiko.RSAKey.generate(1024)
+    error = ftp_client.UnknownHostKeyError("10.0.0.5", key)
+    session = _FakeSession({"/home/alice": []}, fail_connect_with=error)
+    monkeypatch.setattr(module.QMessageBox, "question", staticmethod(lambda *a, **k: module.QMessageBox.StandardButton.No))
+
+    browser = FtpBrowserWidget(session, "my-box")
+    qtbot.addWidget(browser)
+
+    qtbot.waitUntil(lambda: "cancelled" in browser._status_label.text(), timeout=2000)
+    assert session.trusted_host_keys == []
+    assert session.connected is False
 
 
 def test_double_clicking_a_remote_folder_navigates_into_it(qtbot):

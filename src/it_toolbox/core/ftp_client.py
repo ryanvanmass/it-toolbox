@@ -20,7 +20,9 @@ without one.
 
 from __future__ import annotations
 
+import base64
 import ftplib
+import hashlib
 import os
 import posixpath
 import stat as stat_module
@@ -37,6 +39,41 @@ class FtpClientError(Exception):
     """Raised for any connection/auth/protocol failure from either
     SftpSession or FtpSession — the browser widget shows str(exc) in a
     single QMessageBox regardless of which backend raised it."""
+
+
+def _sha256_fingerprint(key: paramiko.PKey) -> str:
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+class UnknownHostKeyError(FtpClientError):
+    """Raised by SftpSession.connect() instead of a generic failure when
+    the host key isn't yet trusted (no known_hosts entry for this host at
+    all -- a genuine mismatch instead raises paramiko.BadHostKeyException,
+    handled separately and never offered a one-click "trust it" path).
+    Carries enough to show a real ssh-style fingerprint confirmation
+    prompt; if the user accepts, the caller persists it via
+    SftpSession.trust_host_key() and retries connect().
+    """
+
+    def __init__(self, hostname: str, key: paramiko.PKey) -> None:
+        self.hostname = hostname
+        self.key = key
+        self.fingerprint = _sha256_fingerprint(key)
+        super().__init__(
+            f"{hostname}'s host key ({key.get_name()} {self.fingerprint}) is not yet trusted."
+        )
+
+
+class _RaiseUnknownHostKey(paramiko.MissingHostKeyPolicy):
+    """Turns paramiko's "no known_hosts entry for this host" case into
+    UnknownHostKeyError instead of RejectPolicy's plain SSHException, so
+    the caller can distinguish "never seen before, ask the user" from
+    every other connection failure.
+    """
+
+    def missing_host_key(self, client, hostname, key):
+        raise UnknownHostKeyError(hostname, key)
 
 
 @dataclass(frozen=True)
@@ -128,7 +165,7 @@ class SftpSession:
                 client.load_host_keys(str(known_hosts))
             except OSError:
                 pass
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            client.set_missing_host_key_policy(_RaiseUnknownHostKey())
         try:
             client.connect(
                 self._host,
@@ -141,6 +178,8 @@ class SftpSession:
                 look_for_keys=True,
                 timeout=15,
             )
+        except UnknownHostKeyError:
+            raise  # not a generic failure -- let the caller offer to trust it and retry
         except paramiko.AuthenticationException as exc:
             raise FtpClientError(
                 f"Authentication failed for {self._username}@{self._host}."
@@ -148,20 +187,35 @@ class SftpSession:
         except paramiko.BadHostKeyException as exc:
             raise FtpClientError(
                 f"{self._host}'s host key doesn't match the one in your known_hosts file — "
-                "refusing to connect."
+                "refusing to connect. This normally means the host was reinstalled -- if you "
+                "expect that, remove its old entry from ~/.ssh/known_hosts and try again."
             ) from exc
         except paramiko.SSHException as exc:
-            if not self._skip_host_key_check and "not found in known_hosts" in str(exc):
-                raise FtpClientError(
-                    f"{self._host}'s host key isn't in your known_hosts file yet — connect to "
-                    "it once with a regular SSH client first to verify and trust it."
-                ) from exc
             raise FtpClientError(f"Couldn't connect to {self._host}:{self._port} — {exc}") from exc
         except OSError as exc:
             raise FtpClientError(f"Couldn't connect to {self._host}:{self._port} — {exc}") from exc
 
         self._client = client
         self._sftp = client.open_sftp()
+
+    def trust_host_key(self, hostname: str, key: paramiko.PKey) -> None:
+        """Persists `key` as trusted for `hostname` by appending it to the
+        user's real ~/.ssh/known_hosts -- the same file a real `ssh`
+        client itself reads and writes, so accepting it here also
+        satisfies a subsequent real `ssh` connection to the same host.
+        Only meaningful when skip_host_key_check is False; the caller
+        (FtpBrowserWidget) calls this after the user confirms the
+        fingerprint from an UnknownHostKeyError, then retries connect().
+        """
+        known_hosts = Path.home() / ".ssh" / "known_hosts"
+        host_keys = paramiko.HostKeys()
+        try:
+            host_keys.load(str(known_hosts))
+        except OSError:
+            pass
+        host_keys.add(hostname, key.get_name(), key)
+        known_hosts.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        host_keys.save(str(known_hosts))
 
     def home_dir(self) -> str:
         return self._sftp.normalize(".")
