@@ -23,10 +23,21 @@ open as a background tunnel instead of an interactive session. Closer in
 spirit to core/tunnel_session.py's BackgroundTunnel than to the IAP
 tunnel, but simpler: ssh itself does the byte-pumping, so there's no
 event loop to own here, only a subprocess to supervise.
+
+Password auth (`password=` below) is a real, if less secure, opt-in for
+a gateway that doesn't have the app's key -- confirmed by a real gateway
+that rejected key auth outright ("Permission denied (publickey,password)")
+with no way to add a key to it from here. See _build_askpass_env's own
+docstring for how a background subprocess with no controlling terminal
+authenticates with a password at all.
 """
 
+import os
 import socket
+import stat
 import subprocess
+import sys
+import tempfile
 import time
 
 READY_POLL_INTERVAL_SEC = 0.1
@@ -57,14 +68,22 @@ class SshTunnel:
     """
 
     def __init__(
-        self, target: str, dest_host: str, dest_port: int, *, ssh_port: int | None = None
+        self,
+        target: str,
+        dest_host: str,
+        dest_port: int,
+        *,
+        ssh_port: int | None = None,
+        password: str | None = None,
     ) -> None:
         self._target = target
         self._ssh_port = ssh_port
         self._dest_host = dest_host
         self._dest_port = dest_port
+        self._password = password
         self._process: subprocess.Popen[str] | None = None
         self._local_port: int | None = None
+        self._askpass_path: str | None = None
 
     @property
     def port(self) -> int | None:
@@ -83,32 +102,102 @@ class SshTunnel:
             "ssh",
             "-N",  # no remote command — this is a pure port-forward
             "-o", "ExitOnForwardFailure=yes",
-            "-o", "BatchMode=yes",  # never block waiting for a password prompt
             "-L", f"{self._local_port}:{self._dest_host}:{self._dest_port}",
         ]
+        env: dict[str, str] | None
+        if self._password:
+            # BatchMode (the no-password branch below) suppresses *every*
+            # kind of interactive prompt, askpass included -- can't use it
+            # here. Without it, host-key trust prompts have nothing to
+            # answer them either (askpass only covers passphrase/password
+            # prompts) -- accept-new avoids a silent hang the first time
+            # this gateway is ever connected to.
+            cmd += ["-o", "StrictHostKeyChecking=accept-new"]
+            cmd += ["-o", "PreferredAuthentications=password"]
+            env = self._build_askpass_env()
+        else:
+            cmd += ["-o", "BatchMode=yes"]  # never block waiting for a password prompt
+            env = None
         if self._ssh_port:
             cmd += ["-p", str(self._ssh_port)]
         cmd.append(self._target)
 
         try:
-            self._process = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
-            )
-        except FileNotFoundError as e:
-            raise SshTunnelError("ssh not found — install an OpenSSH client") from e
+            try:
+                self._process = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env
+                )
+            except FileNotFoundError as e:
+                raise SshTunnelError("ssh not found — install an OpenSSH client") from e
 
-        deadline = time.monotonic() + ready_timeout
-        while time.monotonic() < deadline:
-            exit_code = self._process.poll()
-            if exit_code is not None:
-                stderr = self._process.stderr.read() if self._process.stderr else ""
-                raise SshTunnelError(f"ssh tunnel to {self._target} exited: {stderr.strip()}")
-            if _can_connect(self._local_port):
-                return self._local_port
-            time.sleep(READY_POLL_INTERVAL_SEC)
+            deadline = time.monotonic() + ready_timeout
+            while time.monotonic() < deadline:
+                exit_code = self._process.poll()
+                if exit_code is not None:
+                    stderr = self._process.stderr.read() if self._process.stderr else ""
+                    raise SshTunnelError(f"ssh tunnel to {self._target} exited: {stderr.strip()}")
+                if _can_connect(self._local_port):
+                    return self._local_port
+                time.sleep(READY_POLL_INTERVAL_SEC)
 
-        self.stop()
-        raise SshTunnelError(f"timed out waiting for ssh tunnel to {self._target} to come up")
+            self.stop()
+            raise SshTunnelError(f"timed out waiting for ssh tunnel to {self._target} to come up")
+        finally:
+            # The askpass helper is only ever invoked once, during the
+            # initial auth handshake -- by the time start() returns
+            # (success or failure) ssh has no further use for it, so
+            # there's no reason to leave the password sitting in a temp
+            # file for the tunnel's whole lifetime.
+            self._cleanup_askpass()
+
+    def _build_askpass_env(self) -> dict[str, str]:
+        """Writes a tiny helper program that prints this tunnel's password
+        to stdout when invoked -- what SSH_ASKPASS points ssh at -- and
+        returns the environment to run ssh with.
+
+        A background subprocess has no controlling terminal for ssh to
+        prompt at directly; SSH_ASKPASS_REQUIRE=force (OpenSSH >= 8.4) is
+        what makes ssh invoke an askpass helper anyway instead of just
+        failing outright. The password itself travels via a separate env
+        var the helper reads (not embedded directly in the script file),
+        and the file is written owner-only (POSIX chmod 600) -- best
+        effort, not a real secret store; see ManualConnection.gateway_password's
+        own docstring for the plaintext-at-rest tradeoff this already
+        accepts once the password leaves this process at all.
+
+        Verified against a real sshd on Linux only. Windows OpenSSH also
+        supports SSH_ASKPASS, so this writes a .cmd wrapper there instead
+        of failing outright, but that path hasn't been exercised against
+        a real Windows OpenSSH client.
+        """
+        is_windows = sys.platform == "win32"
+        fd, path = tempfile.mkstemp(
+            suffix=".cmd" if is_windows else ".sh", prefix="it-toolbox-askpass-"
+        )
+        script = (
+            "@echo off\r\necho %IT_TOOLBOX_SSH_GATEWAY_PASSWORD%\r\n"
+            if is_windows
+            else '#!/bin/sh\nprintf "%s\\n" "$IT_TOOLBOX_SSH_GATEWAY_PASSWORD"\n'
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        if not is_windows:
+            os.chmod(path, stat.S_IRWXU)  # owner rwx only
+
+        self._askpass_path = path
+        env = dict(os.environ)
+        env["IT_TOOLBOX_SSH_GATEWAY_PASSWORD"] = self._password
+        env["SSH_ASKPASS"] = path
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        return env
+
+    def _cleanup_askpass(self) -> None:
+        if self._askpass_path is not None:
+            try:
+                os.unlink(self._askpass_path)
+            except OSError:
+                pass
+            self._askpass_path = None
 
     def stop(self, timeout: float = 5) -> None:
         """Tear down the tunnel. Safe to call from any thread, more than

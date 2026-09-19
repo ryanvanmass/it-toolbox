@@ -5,8 +5,11 @@ port, and protocol directly. Mirrors manage_hosts_dialog.py's shape.
 Optionally routed through an SSH gateway (core/ssh_tunnel.py) -- mirrors
 mRemoteNG's SSH-tunneling feature, e.g. reaching an internal RDP host
 through a bastion the client machine can't otherwise reach directly. The
-gateway is authenticated with the user's existing SSH keys/agent, same
-as every other SSH use in this app -- no separate password field here.
+gateway defaults to the user's existing SSH keys/agent, same as every
+other SSH use in this app; an optional password field is a real, if
+less secure, opt-in for a gateway that only accepts password auth (see
+ManualConnection.gateway_password's own docstring for the plaintext-at-
+rest tradeoff).
 """
 
 from PySide6.QtCore import Qt
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -87,10 +91,24 @@ class _ConnectionEditDialog(QDialog):
         )
         self._gateway_username_edit.setPlaceholderText("leave blank to use the local SSH default")
 
+        self._gateway_password_edit = QLineEdit(
+            connection.gateway_password if has_gateway and connection.gateway_password else ""
+        )
+        self._gateway_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._gateway_password_edit.setPlaceholderText("leave blank to use keys/agent instead")
+
         gateway_form = QFormLayout()
         gateway_form.addRow("Gateway host:", self._gateway_host_edit)
         gateway_form.addRow("Gateway port:", self._gateway_port_spin)
         gateway_form.addRow("Gateway username:", self._gateway_username_edit)
+        gateway_form.addRow("Gateway password:", self._gateway_password_edit)
+        gateway_password_note = QLabel(
+            "Only needed if the gateway doesn't accept this app's SSH key -- stored as plain "
+            "text (this app has no credential vault)."
+        )
+        gateway_password_note.setWordWrap(True)
+        gateway_password_note.setStyleSheet("color: gray;")
+        gateway_form.addRow("", gateway_password_note)
         gateway_box_layout = QVBoxLayout()
         gateway_box_layout.addWidget(self._gateway_checkbox)
         gateway_box_layout.addLayout(gateway_form)
@@ -113,6 +131,7 @@ class _ConnectionEditDialog(QDialog):
         self._gateway_host_edit.setEnabled(checked)
         self._gateway_port_spin.setEnabled(checked)
         self._gateway_username_edit.setEnabled(checked)
+        self._gateway_password_edit.setEnabled(checked)
 
     def _on_kind_changed(self, index: int) -> None:
         # Only auto-fill the port when it still matches the *other*
@@ -135,6 +154,9 @@ class _ConnectionEditDialog(QDialog):
             gateway_port=self._gateway_port_spin.value(),
             gateway_username=(
                 self._gateway_username_edit.text().strip() or None if gateway_enabled else None
+            ),
+            gateway_password=(
+                self._gateway_password_edit.text() or None if gateway_enabled else None
             ),
         )
 

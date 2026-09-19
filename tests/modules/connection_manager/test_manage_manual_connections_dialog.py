@@ -44,6 +44,33 @@ def test_gateway_fields_disabled_until_checkbox_checked(qtbot):
     assert dialog._gateway_host_edit.isEnabled() is True
     assert dialog._gateway_port_spin.isEnabled() is True
     assert dialog._gateway_username_edit.isEnabled() is True
+    assert dialog._gateway_password_edit.isEnabled() is True
+
+
+def test_edit_dialog_prefills_existing_gateway_password(qtbot):
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
+        gateway_host="pvsrv-zabbixproxy", gateway_username="planview-admin",
+        gateway_password="hunter2",
+    )
+    dialog = _ConnectionEditDialog(connection)
+    qtbot.addWidget(dialog)
+
+    assert dialog._gateway_password_edit.text() == "hunter2"
+    assert dialog.connection() == connection
+
+
+def test_unchecking_gateway_clears_password_too(qtbot):
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
+        gateway_host="bastion.example.com", gateway_password="hunter2",
+    )
+    dialog = _ConnectionEditDialog(connection)
+    qtbot.addWidget(dialog)
+
+    dialog._gateway_checkbox.setChecked(False)
+
+    assert dialog.connection().gateway_password is None
 
 
 def test_unchecking_gateway_clears_it_from_the_resulting_connection(qtbot):

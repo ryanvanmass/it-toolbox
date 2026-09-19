@@ -1949,6 +1949,7 @@ def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
         {
             "name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice",
             "gateway_host": None, "gateway_port": SSH_PORT, "gateway_username": None,
+            "gateway_password": None,
         }
     ]
 
@@ -1965,6 +1966,7 @@ def test_manual_connections_roundtrip_preserves_gateway(qtbot, monkeypatch):
     connection = ManualConnection(
         name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
         gateway_host="bastion.example.com", gateway_port=2222, gateway_username="bob",
+        gateway_password="hunter2",
     )
 
     view = _make_view(qtbot, monkeypatch)
@@ -1974,6 +1976,7 @@ def test_manual_connections_roundtrip_preserves_gateway(qtbot, monkeypatch):
         {
             "name": "internal-rdp", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": None,
             "gateway_host": "bastion.example.com", "gateway_port": 2222, "gateway_username": "bob",
+            "gateway_password": "hunter2",
         }
     ]
 
@@ -1999,8 +2002,8 @@ def test_manual_gateway_connect_starts_tunnel_and_embeds_rdp(qtbot, monkeypatch)
     monkeypatch.setattr(
         main_view_module,
         "SshTunnel",
-        lambda target, dest_host, dest_port, ssh_port=None: (
-            tunnel_calls.append((target, dest_host, dest_port, ssh_port)) or tunnel
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
         ),
     )
 
@@ -2017,8 +2020,43 @@ def test_manual_gateway_connect_starts_tunnel_and_embeds_rdp(qtbot, monkeypatch)
     assert (widget.host, widget.port, widget.username, widget.password) == (
         "127.0.0.1", 6001, "alice", "secret",
     )
-    assert tunnel_calls == [("bob@bastion.example.com", "10.0.0.5", 3389, 2222)]
+    assert tunnel_calls == [("bob@bastion.example.com", "10.0.0.5", 3389, 2222, None)]
     assert list(view._active_sessions.values()) == [("rdp", tunnel)]
+
+
+def test_manual_gateway_connect_passes_gateway_password_to_tunnel(qtbot, monkeypatch):
+    # Regression test: a real gateway rejected key auth outright
+    # ("Permission denied (publickey,password)") -- gateway_password must
+    # actually reach SshTunnel, not just round-trip through settings.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("secret", True))
+    )
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_username="planview-admin",
+        gateway_password="hunter2",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    assert tunnel_calls == [
+        ("planview-admin@pvsrv-zabbixproxy", "10.0.0.5", 3389, SSH_PORT, "hunter2")
+    ]
 
 
 def test_manual_gateway_connect_skips_host_key_checking_for_ssh(qtbot, monkeypatch):
@@ -2027,7 +2065,9 @@ def test_manual_gateway_connect_skips_host_key_checking_for_ssh(qtbot, monkeypat
     monkeypatch.setattr(main_view_module, "TerminalWidget", _FakeTerminalWidget)
     tunnel = _FakeTunnel(port=6001)
     monkeypatch.setattr(
-        main_view_module, "SshTunnel", lambda target, dest_host, dest_port, ssh_port=None: tunnel
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: tunnel,
     )
 
     view = _make_view(qtbot, monkeypatch)

@@ -659,6 +659,7 @@ class ConnectionManagerView(QWidget):
                 gateway_host=c.get("gateway_host"),
                 gateway_port=c.get("gateway_port", SSH_PORT),
                 gateway_username=c.get("gateway_username"),
+                gateway_password=c.get("gateway_password"),
             )
             for c in settings.load_manual_connections()
         ]
@@ -676,6 +677,7 @@ class ConnectionManagerView(QWidget):
                     "gateway_host": c.gateway_host,
                     "gateway_port": c.gateway_port,
                     "gateway_username": c.gateway_username,
+                    "gateway_password": c.gateway_password,
                 }
                 for c in connections
             ]
@@ -1494,7 +1496,11 @@ class ConnectionManagerView(QWidget):
             else connection.gateway_host
         )
         tunnel = SshTunnel(
-            gateway_target, connection.host, connection.port, ssh_port=connection.gateway_port
+            gateway_target,
+            connection.host,
+            connection.port,
+            ssh_port=connection.gateway_port,
+            password=connection.gateway_password,
         )
         tunnel.start()
         return tunnel
