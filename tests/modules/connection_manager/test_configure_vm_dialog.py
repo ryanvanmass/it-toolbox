@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 from it_toolbox.modules.connection_manager.models import (
@@ -9,7 +10,7 @@ from it_toolbox.modules.connection_manager.models import (
     VmDisk,
     VmNetworkInterface,
 )
-from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import ConfigureVmDialog
+from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import BOOT_DEVICE_ROLE, ConfigureVmDialog
 
 HOST = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
 VM = QemuVm(id="-", name="myvm", state="shut off")
@@ -23,7 +24,8 @@ _ONE_NETWORK = (VirtualNetwork(name="default", state="active"),)
 
 
 def _make_dialog(
-    qtbot, monkeypatch, current_vcpus=2, current_memory_mib=2048,
+    qtbot, monkeypatch, current_vcpus=2, current_memory_mib=2048, current_display_device="spice",
+    current_boot_order=(),
     disks=_ONE_DISK, interfaces=_ONE_INTERFACE, pools=_ONE_POOL, networks=_ONE_NETWORK,
     volumes=(), vm=VM,
 ):
@@ -47,7 +49,9 @@ def _make_dialog(
         "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.list_volumes",
         lambda host, pool_name: list(volumes),
     )
-    dialog = ConfigureVmDialog(HOST, vm, current_vcpus, current_memory_mib)
+    dialog = ConfigureVmDialog(
+        HOST, vm, current_vcpus, current_memory_mib, current_display_device, list(current_boot_order)
+    )
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitUntil(lambda: dialog._disk_pool_combo.count() == len(pools), timeout=1000)
@@ -130,7 +134,10 @@ def test_network_section_shows_and_preselects_current_network(qtbot, monkeypatch
 def test_accept_with_no_changes_closes_without_calling_anything(qtbot, monkeypatch):
     dialog = _make_dialog(qtbot, monkeypatch)
     calls = []
-    for fn in ("resize_vm", "add_disk", "remove_disk", "change_cdrom_media", "change_network"):
+    for fn in (
+        "resize_vm", "add_disk", "remove_disk", "change_cdrom_media", "change_network",
+        "set_display_device", "set_boot_order",
+    ):
         monkeypatch.setattr(
             f"it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.{fn}",
             lambda *a, **k: calls.append(fn),
@@ -311,6 +318,165 @@ def test_accept_with_change_network_left_on_same_network_is_a_no_op(qtbot, monke
 
     assert change_calls == []
     assert accepted == [True]
+
+
+def test_display_section_shows_current_device(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device="vnc")
+
+    assert dialog._display_combo.currentData() == "vnc"
+
+
+def test_display_section_defaults_to_spice_when_no_device_at_all(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device=None)
+
+    assert dialog._display_combo.currentData() == "spice"
+
+
+def test_accept_with_display_device_switched_to_spice(qtbot, monkeypatch):
+    # The main recovery scenario this section exists for: a VM that ended
+    # up with VNC graphics (so it can never get a SPICE port -- see
+    # qemu_client.diagnose_missing_spice_port) gets switched back.
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device="vnc")
+
+    index = dialog._display_combo.findData("spice")
+    dialog._display_combo.setCurrentIndex(index)
+
+    set_display_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_display_device",
+        lambda host, vm_name, graphics_type: set_display_calls.append((vm_name, graphics_type)),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: set_display_calls == [("myvm", "spice")], timeout=1000)
+    qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
+
+
+def test_accept_with_display_device_left_unchanged_is_a_no_op(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device="spice")
+    # Combo already preselected to "spice" -- nothing touched.
+
+    set_display_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_display_device",
+        lambda *a, **k: set_display_calls.append(True),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    assert set_display_calls == []
+    assert accepted == [True]
+
+
+def test_accept_with_no_device_left_on_default_spice_selection_is_a_no_op(qtbot, monkeypatch):
+    # Regression case: a VM with no graphics device at all defaults the
+    # combo to "spice" for display purposes, but leaving that default
+    # untouched must not look like a deliberate change -- only an actual
+    # interaction with the combo should trigger set_display_device.
+    dialog = _make_dialog(qtbot, monkeypatch, current_display_device=None)
+
+    set_display_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_display_device",
+        lambda *a, **k: set_display_calls.append(True),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    assert set_display_calls == []
+    assert accepted == [True]
+
+
+def test_boot_order_list_shows_current_order_checked_first(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_boot_order=["cdrom", "hd"])
+
+    items = [dialog._boot_order_list.item(i) for i in range(dialog._boot_order_list.count())]
+    assert [item.data(BOOT_DEVICE_ROLE) for item in items] == ["cdrom", "hd", "network"]
+    assert [item.checkState() for item in items] == [
+        Qt.CheckState.Checked, Qt.CheckState.Checked, Qt.CheckState.Unchecked,
+    ]
+
+
+def test_boot_order_list_all_unchecked_when_no_order_set(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_boot_order=[])
+
+    items = [dialog._boot_order_list.item(i) for i in range(dialog._boot_order_list.count())]
+    assert all(item.checkState() == Qt.CheckState.Unchecked for item in items)
+
+
+def test_move_boot_device_reorders_list(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_boot_order=["hd", "cdrom"])
+
+    dialog._boot_order_list.setCurrentRow(1)  # "cdrom"
+    dialog._move_boot_device(-1)
+
+    items = [dialog._boot_order_list.item(i) for i in range(dialog._boot_order_list.count())]
+    assert [item.data(BOOT_DEVICE_ROLE) for item in items] == ["cdrom", "hd", "network"]
+
+
+def test_move_boot_device_at_top_is_a_no_op(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_boot_order=["hd", "cdrom"])
+
+    dialog._boot_order_list.setCurrentRow(0)
+    dialog._move_boot_device(-1)
+
+    items = [dialog._boot_order_list.item(i) for i in range(dialog._boot_order_list.count())]
+    assert [item.data(BOOT_DEVICE_ROLE) for item in items] == ["hd", "cdrom", "network"]
+
+
+def test_accept_with_reordered_boot_order_calls_set_boot_order(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_boot_order=["hd", "cdrom"])
+    dialog._boot_order_list.setCurrentRow(1)  # "cdrom"
+    dialog._move_boot_device(-1)  # now cdrom, hd, network(unchecked)
+
+    set_boot_order_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_boot_order",
+        lambda host, vm_name, order: set_boot_order_calls.append((vm_name, order)),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: set_boot_order_calls == [("myvm", ["cdrom", "hd"])], timeout=1000)
+    qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
+
+
+def test_accept_with_boot_order_left_unchanged_is_a_no_op(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_boot_order=["hd", "cdrom"])
+
+    set_boot_order_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_boot_order",
+        lambda *a, **k: set_boot_order_calls.append(True),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    assert set_boot_order_calls == []
+    assert accepted == [True]
+
+
+def test_accept_with_boot_device_unchecked_calls_set_boot_order(qtbot, monkeypatch):
+    dialog = _make_dialog(qtbot, monkeypatch, current_boot_order=["hd", "cdrom"])
+    dialog._boot_order_list.item(1).setCheckState(Qt.CheckState.Unchecked)  # uncheck "cdrom"
+
+    set_boot_order_calls = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.configure_vm_dialog.qemu_provisioning.set_boot_order",
+        lambda host, vm_name, order: set_boot_order_calls.append((vm_name, order)),
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog._on_accept()
+
+    qtbot.waitUntil(lambda: set_boot_order_calls == [("myvm", ["hd"])], timeout=1000)
+    qtbot.waitUntil(lambda: accepted == [True], timeout=1000)
 
 
 def test_save_error_reenables_buttons_and_shows_message(qtbot, monkeypatch):

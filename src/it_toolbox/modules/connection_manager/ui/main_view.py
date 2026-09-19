@@ -22,6 +22,7 @@ from it_toolbox.core import async_utils, ftp_client, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
+from it_toolbox.core.ssh_tunnel import SshTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
 from it_toolbox.modules.connection_manager import (
     gcp_client,
@@ -152,7 +153,7 @@ class ConnectionManagerView(QWidget):
         super().__init__(parent)
 
         self._account: str | None = None
-        self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel]] = {}
+        self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel | SshTunnel]] = {}
         self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget | FtpBrowserWidget] = {}
         # Every widget this view has added to self._tabs (sessions above,
         # plus untracked ones like bucket browsers) — lets try_close_tab
@@ -621,6 +622,22 @@ class ConnectionManagerView(QWidget):
         self._save_qemu_hosts(dialog.hosts())
         self._populate_qemu_hosts()
 
+    def _on_qemu_reset_clicked(self, host: QemuHost, vm: QemuVm) -> None:
+        # Same confirm-first convention as GCP's "Force Shutdown" above --
+        # a hard reset is the destructive, no-guest-cooperation sibling of
+        # the plain "Shutdown" action, worth a pause before firing.
+        reply = QMessageBox.question(
+            self,
+            "Reset VM",
+            f"Reset {vm.name}? This forcibly resets the guest, the same as pressing a "
+            "physical machine's reset button — the guest OS gets no chance to shut down "
+            "cleanly first. Unsaved work or in-flight disk writes can be lost. Use "
+            '"Shutdown" instead unless the VM is unresponsive.',
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._run_qemu_power_action(host, vm, "reset")
+
     def _run_qemu_power_action(self, host: QemuHost, vm: QemuVm, action: str) -> None:
         async_utils.run_in_background(
             lambda: qemu_client.power_action(host, vm.name, action),
@@ -650,6 +667,11 @@ class ConnectionManagerView(QWidget):
                     kind=c["kind"],
                     username=c.get("username"),
                     password_encrypted=base64.b64decode(encoded) if encoded else None,
+                    gateway_host=c.get("gateway_host"),
+                    gateway_port=c.get("gateway_port", SSH_PORT),
+                    gateway_username=c.get("gateway_username"),
+                    gateway_password=c.get("gateway_password"),
+                    gateway_prompt_for_password=c.get("gateway_prompt_for_password", False),
                 )
             )
         return connections
@@ -669,6 +691,11 @@ class ConnectionManagerView(QWidget):
                         if c.password_encrypted
                         else None
                     ),
+                    "gateway_host": c.gateway_host,
+                    "gateway_port": c.gateway_port,
+                    "gateway_username": c.gateway_username,
+                    "gateway_password": c.gateway_password,
+                    "gateway_prompt_for_password": c.gateway_prompt_for_password,
                 }
                 for c in connections
             ]
@@ -955,6 +982,7 @@ class ConnectionManagerView(QWidget):
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
+        reset_action = menu.addAction("Reset…")
         # Available regardless of running state -- ConfigureVmDialog itself
         # adapts what each change actually does per operation (see its own
         # module docstring): vCPU/memory always stages for next restart,
@@ -977,6 +1005,8 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
+        elif chosen is reset_action:
+            self._on_qemu_reset_clicked(host, vm)
         elif chosen is configure_action:
             self._on_configure_vm_clicked(item, host, vm)
         elif chosen is set_ip_action:
@@ -984,16 +1014,24 @@ class ConnectionManagerView(QWidget):
 
     def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:
         async_utils.run_in_background(
-            lambda: qemu_provisioning.get_vm_resources(host, vm.name),
-            on_result=lambda resources: self._open_configure_vm_dialog(item, host, vm, resources),
+            lambda: (
+                qemu_provisioning.get_vm_resources(host, vm.name),
+                qemu_provisioning.get_vm_display_device(host, vm.name),
+                qemu_provisioning.get_boot_order(host, vm.name),
+            ),
+            on_result=lambda result: self._open_configure_vm_dialog(item, host, vm, result),
             on_error=lambda error: QMessageBox.warning(self, "Failed to read VM resources", str(error)),
         )
 
     def _open_configure_vm_dialog(
-        self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm, resources: tuple[int, int]
+        self,
+        item: QTreeWidgetItem,
+        host: QemuHost,
+        vm: QemuVm,
+        result: tuple[tuple[int, int], str | None, list[str]],
     ) -> None:
-        vcpus, memory_mib = resources
-        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, parent=self)
+        (vcpus, memory_mib), display_device, boot_order = result
+        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, display_device, boot_order, parent=self)
         if dialog.exec() == ConfigureVmDialog.DialogCode.Accepted:
             host_item = item.parent()
             if host_item is not None:
@@ -1593,6 +1631,27 @@ class ConnectionManagerView(QWidget):
             if not ok:
                 return
 
+        if connection.gateway_host:
+            gateway_password = connection.gateway_password
+            if connection.gateway_prompt_for_password:
+                gateway_target = connection.gateway_username or "the SSH gateway"
+                gateway_password, ok = QInputDialog.getText(
+                    self,
+                    "SSH Gateway Password",
+                    f"Password for {gateway_target}@{connection.gateway_host}:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if not ok:
+                    return
+            async_utils.run_in_background(
+                lambda: self._start_manual_gateway_tunnel(connection, gateway_password),
+                on_result=lambda tunnel: self._on_manual_gateway_tunnel_ready(
+                    tunnel, connection, username, password
+                ),
+                on_error=self._on_session_error,
+            )
+            return
+
         session_id = self._next_session_id
         self._next_session_id += 1
 
@@ -1670,6 +1729,50 @@ class ConnectionManagerView(QWidget):
         self._save_manual_connections(updated)
         self._populate_manual_connections()
 
+    @staticmethod
+    def _start_manual_gateway_tunnel(connection: ManualConnection, gateway_password: str | None) -> SshTunnel:
+        gateway_target = (
+            f"{connection.gateway_username}@{connection.gateway_host}"
+            if connection.gateway_username
+            else connection.gateway_host
+        )
+        tunnel = SshTunnel(
+            gateway_target,
+            connection.host,
+            connection.port,
+            ssh_port=connection.gateway_port,
+            password=gateway_password,
+        )
+        tunnel.start()
+        return tunnel
+
+    def _on_manual_gateway_tunnel_ready(
+        self,
+        tunnel: SshTunnel,
+        connection: ManualConnection,
+        username: str | None,
+        password: str | None,
+    ) -> None:
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._active_sessions[session_id] = (connection.kind, tunnel)
+
+        if connection.kind == "ssh":
+            # The local hop's own host key is meaningless here (a fresh
+            # ephemeral local port every session -- same reasoning as the
+            # GCP/IAP tunnel path in _embed_ssh's own docstring); the real
+            # trust boundary is the gateway's SSH host key, checked by the
+            # tunnel subprocess itself when it connects out.
+            self._embed_ssh(session_id, connection.name, tunnel.port, username, skip_host_key_check=True)
+        else:
+            self._embed_rdp(session_id, connection.name, tunnel.port, username, password)
+
+        label = (
+            f"{connection.name} ({connection.kind.upper()}) — via {connection.gateway_host} "
+            f"→ {connection.host}:{connection.port}"
+        )
+        self._active_sessions_dialog.add_session(session_id, label)
+
     # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------
 
     def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
@@ -1695,7 +1798,7 @@ class ConnectionManagerView(QWidget):
         directly reachable on this same machine)."""
         spice_port = qemu_client.get_vm_spice_port(host, vm.name)
         if spice_port is None:
-            raise QemuApiError(f"{vm.name} has no SPICE port available — is it running?")
+            raise QemuApiError(qemu_client.diagnose_missing_spice_port(host, vm.name, vm.state))
         if is_local_uri(host.uri):
             return None, spice_port
         tunnel = QemuTunnel(host.uri, spice_port)

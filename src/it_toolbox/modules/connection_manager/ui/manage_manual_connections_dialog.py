@@ -7,14 +7,26 @@ core/settings's encryption helpers, and a blank password field when
 editing an existing connection means "keep the currently-stored
 password" — the caller (ConnectionManagerView) encrypts and persists
 whatever was actually changed after this dialog closes.
+
+A connection (of any kind) can optionally be routed through an SSH
+gateway (core/ssh_tunnel.py) -- mirrors mRemoteNG's SSH-tunneling
+feature, e.g. reaching an internal host through a bastion the client
+machine can't otherwise reach directly. The gateway defaults to the
+user's existing SSH keys/agent, same as every other SSH use in this
+app; an optional password field is a real, if less secure, opt-in for a
+gateway that only accepts password auth (see
+ManualConnection.gateway_password's own docstring for the plaintext-at-
+rest tradeoff).
 """
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -96,6 +108,54 @@ class _ConnectionEditDialog(QDialog):
         self._form.addRow("Password:", self._password_edit)
         self._form.addRow("", self._password_hint)
 
+        # -- Optional SSH gateway --------------------------------------------
+        has_gateway = bool(connection and connection.gateway_host)
+        self._gateway_checkbox = QCheckBox("Connect via an SSH gateway")
+        self._gateway_checkbox.setChecked(has_gateway)
+        self._gateway_checkbox.toggled.connect(self._on_gateway_toggled)
+
+        self._gateway_host_edit = QLineEdit(connection.gateway_host if has_gateway else "")
+        self._gateway_host_edit.setPlaceholderText("bastion hostname or IP")
+        self._gateway_port_spin = QSpinBox()
+        self._gateway_port_spin.setRange(1, 65535)
+        self._gateway_port_spin.setValue(connection.gateway_port if connection else SSH_PORT)
+        self._gateway_username_edit = QLineEdit(
+            connection.gateway_username if has_gateway and connection.gateway_username else ""
+        )
+        self._gateway_username_edit.setPlaceholderText("leave blank to use the local SSH default")
+
+        self._gateway_password_edit = QLineEdit(
+            connection.gateway_password if has_gateway and connection.gateway_password else ""
+        )
+        self._gateway_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._gateway_password_edit.setPlaceholderText("leave blank to use keys/agent instead")
+        gateway_password_note = QLabel(
+            "Only needed if the gateway doesn't accept this app's SSH key -- stored as plain "
+            "text (this app has no credential vault)."
+        )
+        gateway_password_note.setWordWrap(True)
+        gateway_password_note.setStyleSheet("color: gray;")
+
+        self._gateway_prompt_password_checkbox = QCheckBox("Prompt for it instead of storing it")
+        self._gateway_prompt_password_checkbox.setChecked(
+            has_gateway and connection.gateway_prompt_for_password
+        )
+        self._gateway_prompt_password_checkbox.toggled.connect(self._on_gateway_prompt_password_toggled)
+
+        gateway_form = QFormLayout()
+        gateway_form.addRow("Gateway host:", self._gateway_host_edit)
+        gateway_form.addRow("Gateway port:", self._gateway_port_spin)
+        gateway_form.addRow("Gateway username:", self._gateway_username_edit)
+        gateway_form.addRow("Gateway password:", self._gateway_password_edit)
+        gateway_form.addRow("", gateway_password_note)
+        gateway_form.addRow("", self._gateway_prompt_password_checkbox)
+        gateway_box_layout = QVBoxLayout()
+        gateway_box_layout.addWidget(self._gateway_checkbox)
+        gateway_box_layout.addLayout(gateway_form)
+        gateway_box = QGroupBox("SSH Gateway")
+        gateway_box.setLayout(gateway_box_layout)
+        self._on_gateway_toggled(has_gateway)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -104,10 +164,37 @@ class _ConnectionEditDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(self._form)
+        layout.addWidget(gateway_box)
         layout.addWidget(buttons)
 
         self._original_password_encrypted = connection.password_encrypted if connection else None
         self._update_password_field_visibility(self._current_kind)
+
+    def _on_gateway_toggled(self, checked: bool) -> None:
+        self._gateway_host_edit.setEnabled(checked)
+        self._gateway_port_spin.setEnabled(checked)
+        self._gateway_username_edit.setEnabled(checked)
+        self._gateway_prompt_password_checkbox.setEnabled(checked)
+        # The password field's own enabled state is also gated on the
+        # "prompt instead" checkbox -- re-derive it here rather than just
+        # setting it to `checked`, so re-enabling the gateway section
+        # doesn't also re-enable a field "prompt instead" says to leave
+        # alone.
+        self._on_gateway_prompt_password_toggled(self._gateway_prompt_password_checkbox.isChecked())
+
+    def _on_gateway_prompt_password_toggled(self, checked: bool) -> None:
+        gateway_enabled = self._gateway_checkbox.isChecked()
+        self._gateway_password_edit.setEnabled(gateway_enabled and not checked)
+        if checked:
+            # Prompting each time means never storing one -- clear any
+            # value left over from before this was checked, rather than
+            # just hiding a stale password that would otherwise get
+            # silently written back out to disk (connection() would return
+            # None for it regardless, since it's gated on this same
+            # checkbox, but leaving stale text in a disabled field the
+            # user can't see is exactly the kind of thing that no longer
+            # reflects what's actually stored being confusing later).
+            self._gateway_password_edit.clear()
 
     def _on_kind_changed(self, index: int) -> None:
         # Only auto-fill the port when it still matches the *previous*
@@ -130,6 +217,7 @@ class _ConnectionEditDialog(QDialog):
             password_label.setVisible(visible)
 
     def connection(self) -> ManualConnection:
+        gateway_enabled = self._gateway_checkbox.isChecked()
         return ManualConnection(
             name=self._name_edit.text().strip(),
             host=self._host_edit.text().strip(),
@@ -137,6 +225,17 @@ class _ConnectionEditDialog(QDialog):
             kind=self._kind_combo.currentData(),
             username=self._username_edit.text().strip() or None,
             password_encrypted=self._original_password_encrypted,
+            gateway_host=self._gateway_host_edit.text().strip() if gateway_enabled else None,
+            gateway_port=self._gateway_port_spin.value(),
+            gateway_username=(
+                self._gateway_username_edit.text().strip() or None if gateway_enabled else None
+            ),
+            gateway_password=(
+                self._gateway_password_edit.text() or None if gateway_enabled else None
+            ),
+            gateway_prompt_for_password=(
+                gateway_enabled and self._gateway_prompt_password_checkbox.isChecked()
+            ),
         )
 
     def new_password(self) -> str | None:
@@ -190,10 +289,15 @@ class ManageManualConnectionsDialog(QDialog):
         layout.addLayout(buttons_bar)
         layout.addLayout(close_bar)
 
+    @staticmethod
+    def _list_label(connection: ManualConnection) -> str:
+        label = f"{connection.name} — {connection.kind.upper()} {connection.host}:{connection.port}"
+        if connection.gateway_host:
+            label += f" (via {connection.gateway_host})"
+        return label
+
     def _add_list_item(self, connection: ManualConnection, new_password: str | None = None) -> None:
-        item = QListWidgetItem(
-            f"{connection.name} — {connection.kind.upper()} {connection.host}:{connection.port}"
-        )
+        item = QListWidgetItem(self._list_label(connection))
         item.setData(CONNECTION_ROLE, connection)
         item.setData(NEW_PASSWORD_ROLE, new_password)
         self._list.addItem(item)
@@ -215,7 +319,7 @@ class ManageManualConnectionsDialog(QDialog):
             return
         connection = dialog.connection()
         if connection.name and connection.host:
-            item.setText(f"{connection.name} — {connection.kind.upper()} {connection.host}:{connection.port}")
+            item.setText(self._list_label(connection))
             item.setData(CONNECTION_ROLE, connection)
             item.setData(NEW_PASSWORD_ROLE, dialog.new_password())
 

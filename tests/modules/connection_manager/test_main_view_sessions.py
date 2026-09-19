@@ -3,6 +3,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QDialog, QTreeWidgetItem, QWidget
 
 from it_toolbox.modules.connection_manager.models import (
+    SSH_PORT,
     GcpProject,
     GcsBucket,
     GlinetHost,
@@ -1517,10 +1518,15 @@ def test_prepare_qemu_spice_connection_raises_when_no_spice_port(qtbot, monkeypa
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
     monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: None)
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "diagnose_missing_spice_port",
+        lambda host, name, state: f"{name} is not running (state: {state}).",
+    )
     host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
     vm = QemuVm(id="1", name="myvm", state="shut off")
 
-    with pytest.raises(main_view_module.QemuApiError, match="no SPICE port"):
+    with pytest.raises(main_view_module.QemuApiError, match="not running"):
         ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
 
 
@@ -1641,6 +1647,57 @@ def test_qemu_power_action_calls_client_and_refreshes_vm_list(qtbot, monkeypatch
     assert host_item.child(0).text(0) == "(no VMs)"
 
 
+def test_qemu_reset_asks_for_confirmation_first(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.qemu_client, "power_action", lambda host, vm_name, action: calls.append(action)
+    )
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.No,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_reset_clicked(host, vm)
+
+    assert calls == []  # declining the confirmation must not call the API
+
+
+def test_qemu_reset_calls_power_action_once_confirmed(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "power_action",
+        lambda host, vm_name, action: calls.append((host, vm_name, action)),
+    )
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    view._qemu_root_item = QTreeWidgetItem(["QEMU"])
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+    view._qemu_root_item.addChild(host_item)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_reset_clicked(host, vm)
+
+    qtbot.waitUntil(lambda: calls == [(host, "myvm", "reset")], timeout=2000)
+
+
 def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
@@ -1757,14 +1814,20 @@ def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, mo
     class _FakeConfigureVmDialog:
         DialogCode = ConfigureVmDialog.DialogCode
 
-        def __init__(self, host, vm, vcpus, memory_mib, parent=None):
-            captured["args"] = (host, vm, vcpus, memory_mib)
+        def __init__(self, host, vm, vcpus, memory_mib, display_device, boot_order, parent=None):
+            captured["args"] = (host, vm, vcpus, memory_mib, display_device, boot_order)
 
         def exec(self):
             return self.DialogCode.Accepted
 
     monkeypatch.setattr(main_view_module, "ConfigureVmDialog", _FakeConfigureVmDialog)
     monkeypatch.setattr(main_view_module.qemu_provisioning, "get_vm_resources", lambda host, name: (4, 8192))
+    monkeypatch.setattr(
+        main_view_module.qemu_provisioning, "get_vm_display_device", lambda host, name: "spice"
+    )
+    monkeypatch.setattr(
+        main_view_module.qemu_provisioning, "get_boot_order", lambda host, name: ["hd", "cdrom"]
+    )
     monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
 
     view = _make_view(qtbot, monkeypatch)
@@ -1780,7 +1843,7 @@ def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, mo
     view._on_configure_vm_clicked(vm_item, host, vm)
 
     qtbot.waitUntil(lambda: "args" in captured, timeout=2000)
-    assert captured["args"] == (host, vm, 4, 8192)
+    assert captured["args"] == (host, vm, 4, 8192, "spice", ["hd", "cdrom"])
     qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
     assert host_item.child(0).text(0) == "(no VMs)"
 
@@ -1890,6 +1953,11 @@ def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
             "kind": "rdp",
             "username": "alice",
             "password_encrypted": None,
+            "gateway_host": None,
+            "gateway_port": SSH_PORT,
+            "gateway_username": None,
+            "gateway_password": None,
+            "gateway_prompt_for_password": False,
         }
     ]
 
@@ -2211,6 +2279,211 @@ def test_set_qemu_vm_ip_stores_and_clears_override(qtbot, monkeypatch):
     view._on_set_qemu_vm_ip_clicked(host, vm)
     assert ("lab", "myvm") not in view._qemu_vm_ip_overrides
     assert ("lab", "myvm") not in saved["overrides"]
+
+
+def test_manual_connections_roundtrip_preserves_gateway(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_manual_connections",
+        lambda connections: saved.setdefault("connections", connections),
+    )
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
+        gateway_host="bastion.example.com", gateway_port=2222, gateway_username="bob",
+        gateway_password="hunter2",
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_manual_connections([connection])
+
+    assert saved["connections"] == [
+        {
+            "name": "internal-rdp", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": None,
+            "password_encrypted": None,
+            "gateway_host": "bastion.example.com", "gateway_port": 2222, "gateway_username": "bob",
+            "gateway_password": "hunter2", "gateway_prompt_for_password": False,
+        }
+    ]
+
+    # _load_manual_connections reads settings.load_manual_connections(), not
+    # the "saved" dict above -- reuse the same raw shape to confirm the
+    # round trip the other direction too.
+    monkeypatch.setattr(
+        main_view_module.settings, "load_manual_connections", lambda: saved["connections"]
+    )
+    loaded = view._load_manual_connections()
+    assert loaded == [connection]
+
+
+def test_manual_gateway_connect_starts_tunnel_and_embeds_rdp(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("secret", True))
+    )
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="bastion.example.com", gateway_port=2222, gateway_username="bob",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port, widget.username, widget.password) == (
+        "127.0.0.1", 6001, "alice", "secret",
+    )
+    assert tunnel_calls == [("bob@bastion.example.com", "10.0.0.5", 3389, 2222, None)]
+    assert list(view._active_sessions.values()) == [("rdp", tunnel)]
+
+
+def test_manual_gateway_connect_passes_gateway_password_to_tunnel(qtbot, monkeypatch):
+    # Regression test: a real gateway rejected key auth outright
+    # ("Permission denied (publickey,password)") -- gateway_password must
+    # actually reach SshTunnel, not just round-trip through settings.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("secret", True))
+    )
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_username="planview-admin",
+        gateway_password="hunter2",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    assert tunnel_calls == [
+        ("planview-admin@pvsrv-zabbixproxy", "10.0.0.5", 3389, SSH_PORT, "hunter2")
+    ]
+
+
+def test_manual_gateway_connect_prompts_for_password_when_configured(qtbot, monkeypatch):
+    # gateway_prompt_for_password mirrors the RDP password's own
+    # never-stored, ask-every-time convention -- confirm the prompt
+    # actually fires and its answer (not any stored gateway_password,
+    # which is None here anyway) reaches SshTunnel.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    prompts = []
+
+    def fake_get_text(parent, title, label, *args, **kwargs):
+        prompts.append((title, label))
+        if title == "SSH Gateway Password":
+            return "typed-at-runtime", True
+        return "rdp-secret", True
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", staticmethod(fake_get_text))
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_username="planview-admin",
+        gateway_prompt_for_password=True,
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    assert tunnel_calls == [
+        ("planview-admin@pvsrv-zabbixproxy", "10.0.0.5", 3389, SSH_PORT, "typed-at-runtime")
+    ]
+    assert ("SSH Gateway Password", "Password for planview-admin@pvsrv-zabbixproxy:") in prompts
+
+
+def test_manual_gateway_connect_cancelling_password_prompt_aborts_connect(qtbot, monkeypatch):
+    # kind="ssh" and an explicit username so the SSH Gateway Password
+    # prompt is the *only* QInputDialog.getText call in this flow --
+    # otherwise an earlier username/RDP-password prompt returning "not
+    # ok" would abort for a different reason than the one under test.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "TerminalWidget", _FakeTerminalWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False))
+    )
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda *a, **k: tunnel_calls.append(True),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-box", host="10.0.0.5", port=22, kind="ssh", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_prompt_for_password=True,
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    assert tunnel_calls == []
+    assert view._tabs.count() == 0
+
+
+def test_manual_gateway_connect_skips_host_key_checking_for_ssh(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "TerminalWidget", _FakeTerminalWidget)
+    tunnel = _FakeTunnel(port=6001)
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: tunnel,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-box", host="10.0.0.5", port=22, kind="ssh", username="alice",
+        gateway_host="bastion.example.com",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    argv = view._tabs.widget(0).argv
+    assert "StrictHostKeyChecking=no" in argv
+
+
 
 
 # -- GL.iNet hosts / dashboard ------------------------------------------------

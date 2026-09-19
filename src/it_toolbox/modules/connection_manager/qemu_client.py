@@ -31,6 +31,11 @@ _POWER_ACTIONS = {
     "shutdown": "shutdown",
     "pause": "suspend",
     "resume": "resume",
+    # Forcibly resets the guest -- the same as pressing a physical
+    # machine's reset button; the guest OS gets no chance to shut down
+    # cleanly first. Distinct from "shutdown" (a graceful ACPI request)
+    # and from "start" (which does nothing to an already-running VM).
+    "reset": "reset",
 }
 
 
@@ -79,6 +84,10 @@ def get_vm_spice_port(host: QemuHost, vm_name: str) -> int | None:
     its port hasn't been assigned yet (VM not currently running).
     """
     xml_text = run_virsh(host, "dumpxml", vm_name)
+    return _parse_spice_port(xml_text)
+
+
+def _parse_spice_port(xml_text: str) -> int | None:
     root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
     graphics = root.find(".//graphics[@type='spice']")
     if graphics is None:
@@ -87,6 +96,50 @@ def get_vm_spice_port(host: QemuHost, vm_name: str) -> int | None:
     if port is None or port == "-1":
         return None
     return int(port)
+
+
+def diagnose_missing_spice_port(host: QemuHost, vm_name: str, vm_state: str) -> str:
+    """Explains *why* get_vm_spice_port(host, vm_name) came back None, for
+    a clearer error than a blanket "is it running?". That question is only
+    actually right for one of several distinct cases this can mean:
+
+    - The VM genuinely isn't running yet.
+    - The VM has no SPICE graphics device at all -- e.g. it was created
+      (outside this app) with VNC graphics instead, which looks identical
+      from the tree/power-control side but was never going to get a SPICE
+      port no matter how long it runs.
+    - The VM's SPICE server is configured for TLS-only access (libvirt
+      sets the plain `port` attribute to "-1" and puts the real,
+      live-assigned port in `tlsPort` instead -- a default some admin
+      tools, e.g. a remote-connection wizard, choose). This app's
+      embedded SPICE client doesn't negotiate TLS, so this needs its own
+      message rather than being reported as "not running" when it's
+      actually up and reachable, just not via a plaintext port.
+    """
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
+    graphics = root.find(".//graphics[@type='spice']")
+
+    if graphics is None:
+        other = root.find(".//graphics")
+        if other is not None:
+            return (
+                f"{vm_name} has no SPICE graphics device — its display is "
+                f"configured for {other.get('type', 'a different protocol')!r} instead."
+            )
+        return f"{vm_name} has no graphics device configured at all."
+
+    tls_port = graphics.get("tlsPort")
+    if tls_port not in (None, "-1"):
+        return (
+            f"{vm_name}'s SPICE server is configured for TLS-only access "
+            "(no plaintext port available), which this app doesn't support connecting to yet."
+        )
+
+    if vm_state != "running":
+        return f"{vm_name} is not running (state: {vm_state})."
+
+    return f"{vm_name} has no SPICE port available — is it running?"
 
 
 def power_action(host: QemuHost, vm_name: str, action: str) -> None:
