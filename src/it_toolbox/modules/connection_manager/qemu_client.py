@@ -147,3 +147,50 @@ def power_action(host: QemuHost, vm_name: str, action: str) -> None:
     if virsh_command is None:
         raise QemuApiError(f"Unknown power action: {action!r}")
     run_virsh(host, virsh_command, vm_name)
+
+
+# Matches one data row of `virsh domifaddr` output, e.g.:
+#   vnet0      52:54:00:36:2f:c1    ipv4         192.168.122.150/24
+# The guest-agent source can also report rows with "-" in place of a
+# name/MAC (loopback/link-local entries with no interface identity of
+# their own), hence accepting "-" as well as a real MAC there.
+_DOMIFADDR_LINE_RE = re.compile(
+    r"^\s*(\S+)\s+([0-9a-fA-F:]{17}|-)\s+(ipv4|ipv6)\s+([0-9a-fA-F.:]+)/\d+\s*$"
+)
+
+
+def _parse_domifaddr_output(output: str) -> str | None:
+    for line in output.splitlines():
+        match = _DOMIFADDR_LINE_RE.match(line)
+        if not match:
+            continue
+        _name, _mac, protocol, address = match.groups()
+        if protocol != "ipv4" or address.startswith("127."):
+            continue
+        return address
+    return None
+
+
+def get_vm_ip_address(host: QemuHost, vm_name: str) -> str | None:
+    """Best-effort guest IP discovery via `virsh domifaddr`, tried against
+    each of libvirt's three sources in order of reliability: "agent" (an
+    accurate, guest-reported address -- needs the QEMU guest agent
+    installed and running in the guest), "lease" (libvirt's own DHCP
+    lease record -- only populated for a NAT/isolated virtual network
+    using libvirt's own dnsmasq, not a bridged one), then "arp" (the
+    host's ARP cache -- ony has an entry if the host has actually talked
+    to the guest recently, which needs them on the same bridged L2
+    segment). Returns None if none of those sources have anything, in
+    which case the caller should fall back to a manually-configured
+    override (see settings.load_qemu_vm_ip_overrides) -- there's no
+    guest IP tracked anywhere else in this app to fall back to.
+    """
+    for source in ("agent", "lease", "arp"):
+        try:
+            output = run_virsh(host, "domifaddr", vm_name, "--source", source)
+        except QemuApiError:
+            continue
+        ip = _parse_domifaddr_output(output)
+        if ip is not None:
+            return ip
+    return None

@@ -91,6 +91,42 @@ def save_manual_connections(connections: list[dict]) -> None:
     manual_connections_path().write_text(json.dumps(connections))
 
 
+def qemu_vm_ip_overrides_path() -> Path:
+    return data_dir() / "qemu_vm_ip_overrides.json"
+
+
+def load_qemu_vm_ip_overrides() -> dict[tuple[str, str], str]:
+    """Manually-configured guest IPs for QEMU VMs, for when
+    qemu_client.get_vm_ip_address's virsh domifaddr discovery comes up
+    empty (e.g. a bridged network with no DHCP lease record and no guest
+    agent installed) -- keyed by (host_name, vm_name) since a VM name is
+    only unique within its own host. Stored as a list of
+    {"host", "vm", "ip"} dicts (JSON object keys must be strings, so the
+    natural tuple key can't be used directly) and returned keyed by that
+    tuple for the caller's convenience, same shape as
+    load_instance_ssh_username_overrides.
+    """
+    path = qemu_vm_ip_overrides_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    overrides: dict[tuple[str, str], str] = {}
+    for entry in raw:
+        try:
+            overrides[(entry["host"], entry["vm"])] = entry["ip"]
+        except (KeyError, TypeError):
+            continue
+    return overrides
+
+
+def save_qemu_vm_ip_overrides(overrides: dict[tuple[str, str], str]) -> None:
+    raw = [{"host": host, "vm": vm, "ip": ip} for (host, vm), ip in overrides.items()]
+    qemu_vm_ip_overrides_path().write_text(json.dumps(raw))
+
+
 def instance_ssh_username_overrides_path() -> Path:
     return data_dir() / "instance_ssh_username_overrides.json"
 
@@ -492,6 +528,36 @@ def decrypt_glinet_password(encrypted: bytes, passphrase: str | None = None) -> 
     if key_path is None or not key_path.is_file():
         raise SecretDecryptionError(
             "No SSH private key found to decrypt the stored GL.iNet host password "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _decrypt_secret(encrypted, key_path, passphrase)
+
+
+def resolve_manual_connection_ssh_key_path() -> Path | None:
+    """Manual connection (SFTP/FTP) passwords use the same default SSH key
+    resolution as JumpCloud/GL.iNet (no separate override setting for v1)
+    — this thin wrapper exists purely as an independent monkeypatch seam
+    in tests, same reasoning as resolve_glinet_ssh_key_path.
+    """
+    return default_ssh_key_path()
+
+
+def encrypt_manual_connection_password(password: str) -> bytes:
+    """Raises SecretDecryptionError if no SSH key (or matching .pub) is found."""
+    key_path = resolve_manual_connection_ssh_key_path()
+    if key_path is None:
+        raise SecretDecryptionError(
+            "No SSH key found to encrypt the connection password with "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _encrypt_secret(password, key_path)
+
+
+def decrypt_manual_connection_password(encrypted: bytes, passphrase: str | None = None) -> str:
+    key_path = resolve_manual_connection_ssh_key_path()
+    if key_path is None or not key_path.is_file():
+        raise SecretDecryptionError(
+            "No SSH private key found to decrypt the stored connection password "
             "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
         )
     return _decrypt_secret(encrypted, key_path, passphrase)
