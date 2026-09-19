@@ -206,7 +206,21 @@ class GlinetVpnTunnel:
 class ManualConnection:
     """A directly user-entered RDP or SSH endpoint — no account, project,
     or host discovery involved, unlike the GCP/QEMU families. Connects
-    straight to host:port, with no tunnel in front of it.
+    straight to host:port, with no tunnel in front of it -- unless
+    gateway_host is set, in which case host:port is reached *through* an
+    SSH tunnel to the gateway instead (mirrors mRemoteNG's SSH-tunneling
+    feature; see core/ssh_tunnel.py). The gateway defaults to the same
+    key/agent-based auth every other SSH connection in this app uses;
+    gateway_password is an explicit opt-in for a gateway that only
+    accepts password auth (a real, if less secure, need -- confirmed by
+    a real gateway that rejected the app's key with a plain "Permission
+    denied (publickey,password)"). Stored as plain text in
+    manual_connections.json -- this app has no credential-vault story
+    anywhere else either, so this isn't a new weaker link, just an
+    explicit one worth flagging. gateway_prompt_for_password sidesteps
+    that entirely (mirrors the RDP password, which was already always
+    prompted, never stored): when set, gateway_password is ignored and
+    the connect flow asks for it fresh each time instead.
     """
 
     name: str
@@ -214,3 +228,8 @@ class ManualConnection:
     port: int
     kind: str  # "rdp" or "ssh"
     username: str | None = None
+    gateway_host: str | None = None
+    gateway_port: int = SSH_PORT
+    gateway_username: str | None = None
+    gateway_password: str | None = None
+    gateway_prompt_for_password: bool = False
