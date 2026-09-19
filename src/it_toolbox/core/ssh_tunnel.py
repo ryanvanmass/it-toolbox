@@ -42,6 +42,22 @@ import time
 
 READY_POLL_INTERVAL_SEC = 0.1
 
+def _popen_kwargs() -> dict:
+    """subprocess.Popen kwargs that keep this background tunnel from
+    popping up a real, visible console window on Windows for a console-
+    subsystem executable like ssh.exe -- confirmed live: a real report of
+    a bare "ssh.exe" window staying open behind the app for the whole
+    session, titled after the binary's own path since nothing else sets
+    one. A function, not a module-level constant, so this is actually
+    testable without needing a real Windows Python interpreter to import
+    this module at all -- CREATE_NO_WINDOW only exists as a subprocess
+    attribute there, hence getattr with a harmless fallback rather than
+    a direct attribute reference.
+    """
+    if sys.platform == "win32":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
 
 class SshTunnelError(Exception):
     pass
@@ -125,7 +141,12 @@ class SshTunnel:
         try:
             try:
                 self._process = subprocess.Popen(
-                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                    **_popen_kwargs(),
                 )
             except FileNotFoundError as e:
                 raise SshTunnelError("ssh not found — install an OpenSSH client") from e

@@ -37,6 +37,43 @@ class _FakeStderr:
         return self._text
 
 
+def test_popen_kwargs_empty_on_non_windows(monkeypatch):
+    monkeypatch.setattr(ssh_tunnel.sys, "platform", "linux")
+    assert ssh_tunnel._popen_kwargs() == {}
+
+
+def test_popen_kwargs_sets_creationflags_on_windows(monkeypatch):
+    # getattr with a fallback, not a direct subprocess.CREATE_NO_WINDOW
+    # reference -- that attribute only exists on a real Windows Python,
+    # so this is what's actually testable from a non-Windows sandbox:
+    # that the win32 branch requests a creationflags kwarg at all, not
+    # the real platform-specific flag value itself.
+    monkeypatch.setattr(ssh_tunnel.sys, "platform", "win32")
+    assert "creationflags" in ssh_tunnel._popen_kwargs()
+
+
+def test_start_passes_popen_kwargs_through(monkeypatch):
+    # Regression test for a real report: a background ssh.exe tunnel left
+    # a bare, visible console window open behind the app on Windows for
+    # the whole session -- confirm whatever _popen_kwargs() returns
+    # actually reaches the real Popen call, not just that the helper
+    # itself computes the right thing in isolation.
+    monkeypatch.setattr(ssh_tunnel, "_popen_kwargs", lambda: {"creationflags": 0x08000000})
+    calls = []
+
+    def fake_popen(cmd, **kwargs):
+        calls.append(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr(ssh_tunnel.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ssh_tunnel, "_can_connect", lambda port: True)
+
+    tunnel = SshTunnel("alice@lab-host", "127.0.0.1", 5900)
+    tunnel.start(ready_timeout=1)
+
+    assert calls[0]["creationflags"] == 0x08000000
+
+
 def test_start_builds_forward_to_given_dest_host_and_port(monkeypatch):
     calls = []
     monkeypatch.setattr(
