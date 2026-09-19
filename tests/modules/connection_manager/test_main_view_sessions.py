@@ -3,6 +3,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QTreeWidgetItem, QWidget
 
 from it_toolbox.modules.connection_manager.models import (
+    SSH_PORT,
     GcpProject,
     GcsBucket,
     GlinetHost,
@@ -1945,8 +1946,101 @@ def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
     view._save_manual_connections([connection])
 
     assert saved["connections"] == [
-        {"name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice"}
+        {
+            "name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice",
+            "gateway_host": None, "gateway_port": SSH_PORT, "gateway_username": None,
+        }
     ]
+
+
+def test_manual_connections_roundtrip_preserves_gateway(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_manual_connections",
+        lambda connections: saved.setdefault("connections", connections),
+    )
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
+        gateway_host="bastion.example.com", gateway_port=2222, gateway_username="bob",
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_manual_connections([connection])
+
+    assert saved["connections"] == [
+        {
+            "name": "internal-rdp", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": None,
+            "gateway_host": "bastion.example.com", "gateway_port": 2222, "gateway_username": "bob",
+        }
+    ]
+
+    # _load_manual_connections reads settings.load_manual_connections(), not
+    # the "saved" dict above -- reuse the same raw shape to confirm the
+    # round trip the other direction too.
+    monkeypatch.setattr(
+        main_view_module.settings, "load_manual_connections", lambda: saved["connections"]
+    )
+    loaded = view._load_manual_connections()
+    assert loaded == [connection]
+
+
+def test_manual_gateway_connect_starts_tunnel_and_embeds_rdp(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("secret", True))
+    )
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="bastion.example.com", gateway_port=2222, gateway_username="bob",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port, widget.username, widget.password) == (
+        "127.0.0.1", 6001, "alice", "secret",
+    )
+    assert tunnel_calls == [("bob@bastion.example.com", "10.0.0.5", 3389, 2222)]
+    assert list(view._active_sessions.values()) == [("rdp", tunnel)]
+
+
+def test_manual_gateway_connect_skips_host_key_checking_for_ssh(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "TerminalWidget", _FakeTerminalWidget)
+    tunnel = _FakeTunnel(port=6001)
+    monkeypatch.setattr(
+        main_view_module, "SshTunnel", lambda target, dest_host, dest_port, ssh_port=None: tunnel
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-box", host="10.0.0.5", port=22, kind="ssh", username="alice",
+        gateway_host="bastion.example.com",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    argv = view._tabs.widget(0).argv
+    assert "StrictHostKeyChecking=no" in argv
 
 
 # -- GL.iNet hosts / dashboard ------------------------------------------------

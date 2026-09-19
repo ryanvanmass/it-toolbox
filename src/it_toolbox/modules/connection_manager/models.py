@@ -206,7 +206,12 @@ class GlinetVpnTunnel:
 class ManualConnection:
     """A directly user-entered RDP or SSH endpoint — no account, project,
     or host discovery involved, unlike the GCP/QEMU families. Connects
-    straight to host:port, with no tunnel in front of it.
+    straight to host:port, with no tunnel in front of it -- unless
+    gateway_host is set, in which case host:port is reached *through* an
+    SSH tunnel to the gateway instead (mirrors mRemoteNG's SSH-tunneling
+    feature; see core/ssh_tunnel.py). The gateway is authenticated the
+    same way session_launcher.py's own SSH connections are -- the user's
+    existing keys/agent, no separate password field.
     """
 
     name: str
@@ -214,3 +219,6 @@ class ManualConnection:
     port: int
     kind: str  # "rdp" or "ssh"
     username: str | None = None
+    gateway_host: str | None = None
+    gateway_port: int = SSH_PORT
+    gateway_username: str | None = None

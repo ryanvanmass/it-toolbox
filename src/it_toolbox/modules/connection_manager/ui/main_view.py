@@ -21,6 +21,7 @@ from it_toolbox.core import async_utils, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
+from it_toolbox.core.ssh_tunnel import SshTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
 from it_toolbox.modules.connection_manager import (
     gcp_client,
@@ -146,7 +147,7 @@ class ConnectionManagerView(QWidget):
         super().__init__(parent)
 
         self._account: str | None = None
-        self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel]] = {}
+        self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel | SshTunnel]] = {}
         self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget] = {}
         # Every widget this view has added to self._tabs (sessions above,
         # plus untracked ones like bucket browsers) — lets try_close_tab
@@ -650,7 +651,14 @@ class ConnectionManagerView(QWidget):
     def _load_manual_connections() -> list[ManualConnection]:
         return [
             ManualConnection(
-                name=c["name"], host=c["host"], port=c["port"], kind=c["kind"], username=c.get("username")
+                name=c["name"],
+                host=c["host"],
+                port=c["port"],
+                kind=c["kind"],
+                username=c.get("username"),
+                gateway_host=c.get("gateway_host"),
+                gateway_port=c.get("gateway_port", SSH_PORT),
+                gateway_username=c.get("gateway_username"),
             )
             for c in settings.load_manual_connections()
         ]
@@ -665,6 +673,9 @@ class ConnectionManagerView(QWidget):
                     "port": c.port,
                     "kind": c.kind,
                     "username": c.username,
+                    "gateway_host": c.gateway_host,
+                    "gateway_port": c.gateway_port,
+                    "gateway_username": c.gateway_username,
                 }
                 for c in connections
             ]
@@ -1452,6 +1463,16 @@ class ConnectionManagerView(QWidget):
             if not ok:
                 return
 
+        if connection.gateway_host:
+            async_utils.run_in_background(
+                lambda: self._start_manual_gateway_tunnel(connection),
+                on_result=lambda tunnel: self._on_manual_gateway_tunnel_ready(
+                    tunnel, connection, username, password
+                ),
+                on_error=self._on_session_error,
+            )
+            return
+
         session_id = self._next_session_id
         self._next_session_id += 1
 
@@ -1463,6 +1484,46 @@ class ConnectionManagerView(QWidget):
             )
 
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    @staticmethod
+    def _start_manual_gateway_tunnel(connection: ManualConnection) -> SshTunnel:
+        gateway_target = (
+            f"{connection.gateway_username}@{connection.gateway_host}"
+            if connection.gateway_username
+            else connection.gateway_host
+        )
+        tunnel = SshTunnel(
+            gateway_target, connection.host, connection.port, ssh_port=connection.gateway_port
+        )
+        tunnel.start()
+        return tunnel
+
+    def _on_manual_gateway_tunnel_ready(
+        self,
+        tunnel: SshTunnel,
+        connection: ManualConnection,
+        username: str | None,
+        password: str | None,
+    ) -> None:
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._active_sessions[session_id] = (connection.kind, tunnel)
+
+        if connection.kind == "ssh":
+            # The local hop's own host key is meaningless here (a fresh
+            # ephemeral local port every session -- same reasoning as the
+            # GCP/IAP tunnel path in _embed_ssh's own docstring); the real
+            # trust boundary is the gateway's SSH host key, checked by the
+            # tunnel subprocess itself when it connects out.
+            self._embed_ssh(session_id, connection.name, tunnel.port, username, skip_host_key_check=True)
+        else:
+            self._embed_rdp(session_id, connection.name, tunnel.port, username, password)
+
+        label = (
+            f"{connection.name} ({connection.kind.upper()}) — via {connection.gateway_host} "
+            f"→ {connection.host}:{connection.port}"
+        )
         self._active_sessions_dialog.add_session(session_id, label)
 
     # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------

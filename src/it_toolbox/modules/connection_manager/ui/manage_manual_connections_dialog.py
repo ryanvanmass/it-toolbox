@@ -1,14 +1,22 @@
 """CRUD dialog for manually-configured RDP/SSH connections — no account,
 project, or host discovery involved; the user just registers a host,
 port, and protocol directly. Mirrors manage_hosts_dialog.py's shape.
+
+Optionally routed through an SSH gateway (core/ssh_tunnel.py) -- mirrors
+mRemoteNG's SSH-tunneling feature, e.g. reaching an internal RDP host
+through a bastion the client machine can't otherwise reach directly. The
+gateway is authenticated with the user's existing SSH keys/agent, same
+as every other SSH use in this app -- no separate password field here.
 """
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLineEdit,
     QListWidget,
@@ -63,6 +71,33 @@ class _ConnectionEditDialog(QDialog):
         form.addRow("Port:", self._port_spin)
         form.addRow("Username:", self._username_edit)
 
+        # -- Optional SSH gateway --------------------------------------------
+        has_gateway = bool(connection and connection.gateway_host)
+        self._gateway_checkbox = QCheckBox("Connect via an SSH gateway")
+        self._gateway_checkbox.setChecked(has_gateway)
+        self._gateway_checkbox.toggled.connect(self._on_gateway_toggled)
+
+        self._gateway_host_edit = QLineEdit(connection.gateway_host if has_gateway else "")
+        self._gateway_host_edit.setPlaceholderText("bastion hostname or IP")
+        self._gateway_port_spin = QSpinBox()
+        self._gateway_port_spin.setRange(1, 65535)
+        self._gateway_port_spin.setValue(connection.gateway_port if connection else SSH_PORT)
+        self._gateway_username_edit = QLineEdit(
+            connection.gateway_username if has_gateway and connection.gateway_username else ""
+        )
+        self._gateway_username_edit.setPlaceholderText("leave blank to use the local SSH default")
+
+        gateway_form = QFormLayout()
+        gateway_form.addRow("Gateway host:", self._gateway_host_edit)
+        gateway_form.addRow("Gateway port:", self._gateway_port_spin)
+        gateway_form.addRow("Gateway username:", self._gateway_username_edit)
+        gateway_box_layout = QVBoxLayout()
+        gateway_box_layout.addWidget(self._gateway_checkbox)
+        gateway_box_layout.addLayout(gateway_form)
+        gateway_box = QGroupBox("SSH Gateway")
+        gateway_box.setLayout(gateway_box_layout)
+        self._on_gateway_toggled(has_gateway)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -71,7 +106,13 @@ class _ConnectionEditDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        layout.addWidget(gateway_box)
         layout.addWidget(buttons)
+
+    def _on_gateway_toggled(self, checked: bool) -> None:
+        self._gateway_host_edit.setEnabled(checked)
+        self._gateway_port_spin.setEnabled(checked)
+        self._gateway_username_edit.setEnabled(checked)
 
     def _on_kind_changed(self, index: int) -> None:
         # Only auto-fill the port when it still matches the *other*
@@ -83,12 +124,18 @@ class _ConnectionEditDialog(QDialog):
             self._port_spin.setValue(_DEFAULT_PORTS[kind])
 
     def connection(self) -> ManualConnection:
+        gateway_enabled = self._gateway_checkbox.isChecked()
         return ManualConnection(
             name=self._name_edit.text().strip(),
             host=self._host_edit.text().strip(),
             port=self._port_spin.value(),
             kind=self._kind_combo.currentData(),
             username=self._username_edit.text().strip() or None,
+            gateway_host=self._gateway_host_edit.text().strip() if gateway_enabled else None,
+            gateway_port=self._gateway_port_spin.value(),
+            gateway_username=(
+                self._gateway_username_edit.text().strip() or None if gateway_enabled else None
+            ),
         )
 
 
@@ -134,10 +181,15 @@ class ManageManualConnectionsDialog(QDialog):
         layout.addLayout(buttons_bar)
         layout.addLayout(close_bar)
 
+    @staticmethod
+    def _list_label(connection: ManualConnection) -> str:
+        label = f"{connection.name} — {connection.kind.upper()} {connection.host}:{connection.port}"
+        if connection.gateway_host:
+            label += f" (via {connection.gateway_host})"
+        return label
+
     def _add_list_item(self, connection: ManualConnection) -> None:
-        item = QListWidgetItem(
-            f"{connection.name} — {connection.kind.upper()} {connection.host}:{connection.port}"
-        )
+        item = QListWidgetItem(self._list_label(connection))
         item.setData(CONNECTION_ROLE, connection)
         self._list.addItem(item)
 
@@ -158,7 +210,7 @@ class ManageManualConnectionsDialog(QDialog):
             return
         connection = dialog.connection()
         if connection.name and connection.host:
-            item.setText(f"{connection.name} — {connection.kind.upper()} {connection.host}:{connection.port}")
+            item.setText(self._list_label(connection))
             item.setData(CONNECTION_ROLE, connection)
 
     def _on_remove_clicked(self) -> None:
