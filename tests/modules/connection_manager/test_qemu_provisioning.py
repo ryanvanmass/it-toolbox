@@ -520,6 +520,132 @@ def test_set_display_device_adds_graphics_when_vm_has_none(monkeypatch):
     assert graphics.get("type") == "spice"
 
 
+_REAL_DUMPXML_BOOT_ORDER_CDROM_THEN_HD = """<domain type='kvm'>
+  <name>myvm</name>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.1'>hvm</type>
+    <boot dev='cdrom'/>
+    <boot dev='hd'/>
+  </os>
+  <devices></devices>
+</domain>"""
+
+_REAL_DUMPXML_BOOT_ORDER_UEFI_NO_BOOT_LIST = """<domain type='kvm'>
+  <name>myvm</name>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader>
+    <nvram>/var/lib/libvirt/qemu/nvram/myvm_VARS.fd</nvram>
+  </os>
+  <devices></devices>
+</domain>"""
+
+_REAL_DUMPXML_BOOT_ORDER_WITH_PER_DEVICE_ORDER = """<domain type='kvm'>
+  <name>myvm</name>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.1'>hvm</type>
+  </os>
+  <devices>
+    <disk type='file' device='disk'>
+      <target dev='vda' bus='virtio'/>
+      <boot order='2'/>
+    </disk>
+    <interface type='network'>
+      <target dev='vnet0'/>
+      <boot order='1'/>
+    </interface>
+  </devices>
+</domain>"""
+
+
+def test_get_boot_order_parses_existing_order(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda *a, **k: _completed(stdout=_REAL_DUMPXML_BOOT_ORDER_CDROM_THEN_HD),
+    )
+    assert qemu_provisioning.get_boot_order(HOST, "myvm") == ["cdrom", "hd"]
+
+
+def test_get_boot_order_returns_empty_when_unset(monkeypatch):
+    monkeypatch.setattr(
+        qemu_provisioning.subprocess, "run",
+        lambda *a, **k: _completed(stdout=_REAL_DUMPXML_BOOT_ORDER_UEFI_NO_BOOT_LIST),
+    )
+    assert qemu_provisioning.get_boot_order(HOST, "myvm") == []
+
+
+def test_set_boot_order_rejects_unsupported_device(monkeypatch):
+    with pytest.raises(qemu_provisioning.QemuApiError, match="Unsupported boot device"):
+        qemu_provisioning.set_boot_order(HOST, "myvm", ["hd", "usb"])
+
+
+def test_set_boot_order_writes_new_order_after_type(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    defined_xml = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        if cmd[3] == "dumpxml":
+            return _completed(stdout=_REAL_DUMPXML_BOOT_ORDER_CDROM_THEN_HD)
+        if cmd[3] == "define":
+            with open(cmd[4]) as f:
+                defined_xml["text"] = f.read()
+        return _completed()
+
+    monkeypatch.setattr(qemu_provisioning.subprocess, "run", fake_run)
+
+    qemu_provisioning.set_boot_order(HOST, "myvm", ["hd", "network", "cdrom"])
+
+    root = ET.fromstring(defined_xml["text"])
+    os_el = root.find("os")
+    assert [child.tag for child in os_el] == ["type", "boot", "boot", "boot"]
+    assert [b.get("dev") for b in os_el.findall("boot")] == ["hd", "network", "cdrom"]
+
+
+def test_set_boot_order_inserts_after_loader_and_nvram(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    defined_xml = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        if cmd[3] == "dumpxml":
+            return _completed(stdout=_REAL_DUMPXML_BOOT_ORDER_UEFI_NO_BOOT_LIST)
+        if cmd[3] == "define":
+            with open(cmd[4]) as f:
+                defined_xml["text"] = f.read()
+        return _completed()
+
+    monkeypatch.setattr(qemu_provisioning.subprocess, "run", fake_run)
+
+    qemu_provisioning.set_boot_order(HOST, "myvm", ["hd"])
+
+    root = ET.fromstring(defined_xml["text"])
+    os_el = root.find("os")
+    assert [child.tag for child in os_el] == ["type", "loader", "nvram", "boot"]
+
+
+def test_set_boot_order_strips_conflicting_per_device_order(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    defined_xml = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        if cmd[3] == "dumpxml":
+            return _completed(stdout=_REAL_DUMPXML_BOOT_ORDER_WITH_PER_DEVICE_ORDER)
+        if cmd[3] == "define":
+            with open(cmd[4]) as f:
+                defined_xml["text"] = f.read()
+        return _completed()
+
+    monkeypatch.setattr(qemu_provisioning.subprocess, "run", fake_run)
+
+    qemu_provisioning.set_boot_order(HOST, "myvm", ["hd"])
+
+    root = ET.fromstring(defined_xml["text"])
+    for device_el in root.find("devices"):
+        assert device_el.find("boot") is None
+
+
 def test_change_cdrom_media_eject_only(monkeypatch):
     calls = []
     monkeypatch.setattr(

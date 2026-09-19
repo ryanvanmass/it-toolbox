@@ -614,6 +614,22 @@ class ConnectionManagerView(QWidget):
         self._save_qemu_hosts(dialog.hosts())
         self._populate_qemu_hosts()
 
+    def _on_qemu_reset_clicked(self, host: QemuHost, vm: QemuVm) -> None:
+        # Same confirm-first convention as GCP's "Force Shutdown" above --
+        # a hard reset is the destructive, no-guest-cooperation sibling of
+        # the plain "Shutdown" action, worth a pause before firing.
+        reply = QMessageBox.question(
+            self,
+            "Reset VM",
+            f"Reset {vm.name}? This forcibly resets the guest, the same as pressing a "
+            "physical machine's reset button — the guest OS gets no chance to shut down "
+            "cleanly first. Unsaved work or in-flight disk writes can be lost. Use "
+            '"Shutdown" instead unless the VM is unresponsive.',
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._run_qemu_power_action(host, vm, "reset")
+
     def _run_qemu_power_action(self, host: QemuHost, vm: QemuVm, action: str) -> None:
         async_utils.run_in_background(
             lambda: qemu_client.power_action(host, vm.name, action),
@@ -920,6 +936,7 @@ class ConnectionManagerView(QWidget):
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
+        reset_action = menu.addAction("Reset…")
         # Available regardless of running state -- ConfigureVmDialog itself
         # adapts what each change actually does per operation (see its own
         # module docstring): vCPU/memory always stages for next restart,
@@ -939,6 +956,8 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
+        elif chosen is reset_action:
+            self._on_qemu_reset_clicked(host, vm)
         elif chosen is configure_action:
             self._on_configure_vm_clicked(item, host, vm)
 
@@ -947,6 +966,7 @@ class ConnectionManagerView(QWidget):
             lambda: (
                 qemu_provisioning.get_vm_resources(host, vm.name),
                 qemu_provisioning.get_vm_display_device(host, vm.name),
+                qemu_provisioning.get_boot_order(host, vm.name),
             ),
             on_result=lambda result: self._open_configure_vm_dialog(item, host, vm, result),
             on_error=lambda error: QMessageBox.warning(self, "Failed to read VM resources", str(error)),
@@ -957,10 +977,10 @@ class ConnectionManagerView(QWidget):
         item: QTreeWidgetItem,
         host: QemuHost,
         vm: QemuVm,
-        result: tuple[tuple[int, int], str | None],
+        result: tuple[tuple[int, int], str | None, list[str]],
     ) -> None:
-        (vcpus, memory_mib), display_device = result
-        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, display_device, parent=self)
+        (vcpus, memory_mib), display_device, boot_order = result
+        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, display_device, boot_order, parent=self)
         if dialog.exec() == ConfigureVmDialog.DialogCode.Accepted:
             host_item = item.parent()
             if host_item is not None:
