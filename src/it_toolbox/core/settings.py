@@ -497,6 +497,36 @@ def decrypt_glinet_password(encrypted: bytes, passphrase: str | None = None) -> 
     return _decrypt_secret(encrypted, key_path, passphrase)
 
 
+def resolve_manual_connection_ssh_key_path() -> Path | None:
+    """Manual connection (SFTP/FTP) passwords use the same default SSH key
+    resolution as JumpCloud/GL.iNet (no separate override setting for v1)
+    — this thin wrapper exists purely as an independent monkeypatch seam
+    in tests, same reasoning as resolve_glinet_ssh_key_path.
+    """
+    return default_ssh_key_path()
+
+
+def encrypt_manual_connection_password(password: str) -> bytes:
+    """Raises SecretDecryptionError if no SSH key (or matching .pub) is found."""
+    key_path = resolve_manual_connection_ssh_key_path()
+    if key_path is None:
+        raise SecretDecryptionError(
+            "No SSH key found to encrypt the connection password with "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _encrypt_secret(password, key_path)
+
+
+def decrypt_manual_connection_password(encrypted: bytes, passphrase: str | None = None) -> str:
+    key_path = resolve_manual_connection_ssh_key_path()
+    if key_path is None or not key_path.is_file():
+        raise SecretDecryptionError(
+            "No SSH private key found to decrypt the stored connection password "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _decrypt_secret(encrypted, key_path, passphrase)
+
+
 def glinet_hosts_path() -> Path:
     return data_dir() / "glinet_hosts.json"
 

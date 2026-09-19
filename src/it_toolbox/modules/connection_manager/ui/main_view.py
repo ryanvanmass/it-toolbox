@@ -4,6 +4,7 @@ import platform
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, settings
+from it_toolbox.core import async_utils, ftp_client, settings
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
@@ -47,6 +48,9 @@ from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import (
     ConfigureVmDialog,
 )
 from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
+from it_toolbox.modules.connection_manager.ui.ftp_credentials_dialog import (
+    FtpCredentialsDialog,
+)
 from it_toolbox.modules.connection_manager.ui.manage_glinet_hosts_dialog import (
     ManageGlinetHostsDialog,
 )
@@ -60,6 +64,7 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
+from it_toolbox.widgets.ftp_browser_widget import FtpBrowserWidget
 from it_toolbox.widgets.glinet_dashboard_widget import GlinetDashboardWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
@@ -147,7 +152,7 @@ class ConnectionManagerView(QWidget):
 
         self._account: str | None = None
         self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel]] = {}
-        self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget] = {}
+        self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget | FtpBrowserWidget] = {}
         # Every widget this view has added to self._tabs (sessions above,
         # plus untracked ones like bucket browsers) — lets try_close_tab
         # recognize its own tabs when self._tabs is shared with other
@@ -632,12 +637,20 @@ class ConnectionManagerView(QWidget):
 
     @staticmethod
     def _load_manual_connections() -> list[ManualConnection]:
-        return [
-            ManualConnection(
-                name=c["name"], host=c["host"], port=c["port"], kind=c["kind"], username=c.get("username")
+        connections = []
+        for c in settings.load_manual_connections():
+            encoded = c.get("password_encrypted")
+            connections.append(
+                ManualConnection(
+                    name=c["name"],
+                    host=c["host"],
+                    port=c["port"],
+                    kind=c["kind"],
+                    username=c.get("username"),
+                    password_encrypted=base64.b64decode(encoded) if encoded else None,
+                )
             )
-            for c in settings.load_manual_connections()
-        ]
+        return connections
 
     @staticmethod
     def _save_manual_connections(connections: list[ManualConnection]) -> None:
@@ -649,6 +662,11 @@ class ConnectionManagerView(QWidget):
                     "port": c.port,
                     "kind": c.kind,
                     "username": c.username,
+                    "password_encrypted": (
+                        base64.b64encode(c.password_encrypted).decode()
+                        if c.password_encrypted
+                        else None
+                    ),
                 }
                 for c in connections
             ]
@@ -669,7 +687,19 @@ class ConnectionManagerView(QWidget):
     def _on_manage_manual_connections_clicked(self) -> None:
         dialog = ManageManualConnectionsDialog(self._load_manual_connections(), parent=self)
         dialog.exec()
-        self._save_manual_connections(dialog.connections())
+        connections = []
+        for connection, new_password in zip(dialog.connections(), dialog.new_passwords(), strict=True):
+            if new_password:
+                connection = ManualConnection(
+                    name=connection.name,
+                    host=connection.host,
+                    port=connection.port,
+                    kind=connection.kind,
+                    username=connection.username,
+                    password_encrypted=settings.encrypt_manual_connection_password(new_password),
+                )
+            connections.append(connection)
+        self._save_manual_connections(connections)
         self._populate_manual_connections()
 
     # -- GL.iNet hosts ------------------------------------------------------
@@ -853,6 +883,7 @@ class ConnectionManagerView(QWidget):
         menu = QMenu(self)
         rdp_action = menu.addAction("Connect via RDP")
         ssh_action = menu.addAction("Connect via SSH")
+        sftp_action = menu.addAction("Connect via SFTP")
         menu.addSeparator()
         turn_on_action = menu.addAction("Turn On")
         turn_off_action = menu.addAction("Turn Off")
@@ -872,6 +903,8 @@ class ConnectionManagerView(QWidget):
             self._start_session_from_instance(instance, "rdp")
         elif chosen is ssh_action:
             self._start_session_from_instance(instance, "ssh")
+        elif chosen is sftp_action:
+            self._start_session_from_instance(instance, "sftp")
         elif chosen is turn_on_action:
             self._run_instance_power_action(instance, "start")
         elif chosen is turn_off_action:
@@ -1081,7 +1114,7 @@ class ConnectionManagerView(QWidget):
             return
 
         username = None
-        if kind == "ssh":
+        if kind in ("ssh", "sftp"):
             username = self._instance_ssh_username_overrides.get(
                 (instance.project_id, instance.zone, instance.name)
             )
@@ -1096,6 +1129,8 @@ class ConnectionManagerView(QWidget):
             username = username.strip() or None
 
         password = None
+        key_path = None
+        key_passphrase = None
         if kind == "rdp":
             # Not persisted anywhere (no keyring integration in this app) —
             # the embedded RDP client needs it upfront for the NLA
@@ -1109,6 +1144,20 @@ class ConnectionManagerView(QWidget):
             )
             if not ok:
                 return
+        elif kind == "sftp":
+            # Same "never persisted for a GCP instance" reasoning as RDP's
+            # password above -- there's no ManualConnection here to
+            # remember it on, so the credentials dialog's own "remember"
+            # checkbox is hidden.
+            dialog = FtpCredentialsDialog(
+                "sftp", instance.name, default_username=username or "", show_remember=False, parent=self
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            username = dialog.username() or username
+            password = dialog.password() or None
+            key_path = dialog.key_path()
+            key_passphrase = dialog.key_passphrase()
 
         self._connect(
             display_name=instance.name,
@@ -1119,6 +1168,8 @@ class ConnectionManagerView(QWidget):
             kind=kind,
             username=username,
             password=password,
+            key_path=key_path,
+            key_passphrase=key_passphrase,
         )
 
     def _run_instance_power_action(self, instance: Instance, action: str) -> None:
@@ -1286,19 +1337,22 @@ class ConnectionManagerView(QWidget):
         kind: str,
         username: str | None,
         password: str | None = None,
+        key_path: str | None = None,
+        key_passphrase: str | None = None,
     ) -> None:
         target = IapTunnelTarget(
             project=project_id,
             zone=zone,
             instance=instance_name,
             interface=network_interface,
+            # sftp rides over an ordinary SSH connection, same as ssh itself.
             port=RDP_PORT if kind == "rdp" else SSH_PORT,
         )
 
         async_utils.run_in_background(
             lambda: self._start_tunnel(target),
             on_result=lambda tunnel: self._on_tunnel_ready(
-                tunnel, display_name, kind, username, password
+                tunnel, display_name, kind, username, password, key_path, key_passphrase
             ),
             on_error=self._on_session_error,
         )
@@ -1318,6 +1372,8 @@ class ConnectionManagerView(QWidget):
         kind: str,
         username: str | None,
         password: str | None = None,
+        key_path: str | None = None,
+        key_passphrase: str | None = None,
     ) -> None:
         session_id = self._next_session_id
         self._next_session_id += 1
@@ -1325,6 +1381,17 @@ class ConnectionManagerView(QWidget):
 
         if kind == "ssh":
             self._embed_ssh(session_id, display_name, tunnel.port, username, skip_host_key_check=True)
+        elif kind == "sftp":
+            session = ftp_client.SftpSession(
+                "127.0.0.1",
+                tunnel.port,
+                username or "",
+                password=password,
+                key_path=key_path,
+                key_passphrase=key_passphrase,
+                skip_host_key_check=True,
+            )
+            self._embed_ftp(session_id, display_name, session)
         else:
             self._embed_rdp(session_id, display_name, tunnel.port, username, password)
 
@@ -1393,9 +1460,26 @@ class ConnectionManagerView(QWidget):
         self._tabs.setCurrentIndex(index)
         rdp.setFocus()
 
+    def _embed_ftp(
+        self,
+        session_id: int,
+        display_name: str,
+        session: ftp_client.SftpSession | ftp_client.FtpSession,
+    ) -> None:
+        browser = FtpBrowserWidget(session, display_name)
+        self._session_tab_widgets[session_id] = browser
+        self._owned_tab_widgets.add(browser)
+        index = self._tabs.addTab(browser, display_name)
+        self._tabs.setCurrentIndex(index)
+        browser.setFocus()
+
     # -- Connect: manually-configured RDP/SSH, direct (no tunnel) ---------
 
     def _start_session_from_manual_connection(self, connection: ManualConnection) -> None:
+        if connection.kind in ("sftp", "ftp"):
+            self._start_manual_ftp_session(connection)
+            return
+
         if connection.kind == "rdp" and RdpWidget is None:
             QMessageBox.warning(
                 self,
@@ -1437,6 +1521,70 @@ class ConnectionManagerView(QWidget):
 
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
         self._active_sessions_dialog.add_session(session_id, label)
+
+    def _start_manual_ftp_session(self, connection: ManualConnection) -> None:
+        default_username = connection.username or settings.load_default_username() or ""
+        password = None
+        if connection.password_encrypted is not None:
+            try:
+                password = settings.decrypt_manual_connection_password(connection.password_encrypted)
+            except settings.SecretDecryptionError:
+                password = None  # fall through to the prompt below
+
+        username = default_username
+        key_path = None
+        key_passphrase = None
+
+        if password is None:
+            dialog = FtpCredentialsDialog(
+                connection.kind, connection.name, default_username=default_username, parent=self
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            username = dialog.username() or default_username
+            password = dialog.password() or None
+            key_path = dialog.key_path()
+            key_passphrase = dialog.key_passphrase()
+            if dialog.remember_password() and password:
+                try:
+                    encrypted = settings.encrypt_manual_connection_password(password)
+                except settings.SecretDecryptionError as exc:
+                    QMessageBox.warning(self, "Couldn't save password", str(exc))
+                else:
+                    self._remember_manual_connection_password(connection, encrypted)
+
+        if not username:
+            QMessageBox.warning(self, "Username required", "A username is required to connect.")
+            return
+
+        if connection.kind == "sftp":
+            session = ftp_client.SftpSession(
+                connection.host, connection.port, username,
+                password=password, key_path=key_path, key_passphrase=key_passphrase,
+            )
+        else:
+            session = ftp_client.FtpSession(connection.host, connection.port, username, password=password or "")
+
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._embed_ftp(session_id, connection.name, session)
+
+        label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    def _remember_manual_connection_password(self, connection: ManualConnection, encrypted: bytes) -> None:
+        connections = self._load_manual_connections()
+        updated = [
+            ManualConnection(
+                name=c.name, host=c.host, port=c.port, kind=c.kind, username=c.username,
+                password_encrypted=encrypted,
+            )
+            if c.name == connection.name and c.host == connection.host and c.port == connection.port
+            else c
+            for c in connections
+        ]
+        self._save_manual_connections(updated)
+        self._populate_manual_connections()
 
     # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------
 

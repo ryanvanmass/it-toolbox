@@ -1,6 +1,6 @@
 import pytest
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QTreeWidgetItem, QWidget
+from PySide6.QtWidgets import QDialog, QTreeWidgetItem, QWidget
 
 from it_toolbox.modules.connection_manager.models import (
     GcpProject,
@@ -1883,8 +1883,240 @@ def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
     view._save_manual_connections([connection])
 
     assert saved["connections"] == [
-        {"name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice"}
+        {
+            "name": "my-box",
+            "host": "10.0.0.5",
+            "port": 3389,
+            "kind": "rdp",
+            "username": "alice",
+            "password_encrypted": None,
+        }
     ]
+
+
+# -- SFTP/FTP -----------------------------------------------------------
+
+
+class _FakeFtpBrowserWidget(QWidget):
+    """Stands in for the real FtpBrowserWidget — it opens a real paramiko/
+    ftplib connection on construction (via a background thread), which a
+    unit test shouldn't depend on. Exposes the same contract main_view
+    relies on: close_session(), and captures the session it was given so
+    tests can inspect the credentials/host/port main_view resolved."""
+
+    def __init__(self, session, display_name):
+        super().__init__()
+        self.session = session
+        self.display_name = display_name
+
+    def close_session(self):
+        pass
+
+
+class _FakeFtpCredentialsDialog:
+    """Stands in for FtpCredentialsDialog — captures the constructor args
+    main_view passed it, and returns pre-set answers instead of actually
+    showing a modal dialog."""
+
+    last_instance = None
+
+    def __init__(self, kind, display_name, default_username="", show_remember=True, parent=None):
+        self.kind = kind
+        self.display_name = display_name
+        self.default_username = default_username
+        self.show_remember = show_remember
+        self._username = default_username
+        self._password = ""
+        self._key_path = None
+        self._key_passphrase = None
+        self._remember = False
+        self._accepted = True
+        _FakeFtpCredentialsDialog.last_instance = self
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted if self._accepted else QDialog.DialogCode.Rejected
+
+    def username(self):
+        return self._username
+
+    def password(self):
+        return self._password
+
+    def key_path(self):
+        return self._key_path
+
+    def key_passphrase(self):
+        return self._key_passphrase
+
+    def remember_password(self):
+        return self._remember
+
+
+@pytest.fixture(autouse=True)
+def _reset_fake_ftp_dialog():
+    _FakeFtpCredentialsDialog.last_instance = None
+    yield
+
+
+def _patch_ftp(monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "FtpBrowserWidget", _FakeFtpBrowserWidget)
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _FakeFtpCredentialsDialog)
+    return main_view_module
+
+
+def test_manual_sftp_connect_prompts_for_credentials_and_embeds_browser(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice")
+
+    view._start_session_from_manual_connection(connection)
+
+    dialog = _FakeFtpCredentialsDialog.last_instance
+    assert dialog.kind == "sftp"
+    assert dialog.default_username == "alice"
+    assert view._tabs.count() == 1
+    widget = view._tabs.widget(0)
+    assert isinstance(widget.session, main_view_module.ftp_client.SftpSession)
+    assert view._active_sessions == {}
+    assert len(view._session_tab_widgets) == 1
+
+
+def test_manual_ftp_connect_uses_plain_ftp_session(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=21, kind="ftp", username="bob")
+
+    view._start_session_from_manual_connection(connection)
+
+    widget = view._tabs.widget(0)
+    assert isinstance(widget.session, main_view_module.ftp_client.FtpSession)
+
+
+def test_manual_sftp_connect_cancelled_dialog_starts_nothing(qtbot, monkeypatch):
+    _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="sftp")
+
+    def _cancel(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._accepted = False
+        return dialog
+
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _cancel)
+
+    view._start_session_from_manual_connection(connection)
+
+    assert view._tabs.count() == 0
+
+
+def test_manual_sftp_connect_uses_stored_password_without_prompting(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.settings, "decrypt_manual_connection_password", lambda encrypted: "stored-secret"
+    )
+
+    def _fail_if_shown(*a, **k):
+        raise AssertionError("credentials dialog should not be shown when a password is stored")
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _fail_if_shown)
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice", password_encrypted=b"ciphertext"
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    widget = view._tabs.widget(0)
+    assert widget.session._password == "stored-secret"
+
+
+def test_manual_sftp_connect_falls_back_to_prompt_when_stored_password_undecryptable(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+
+    def _raise(*a, **k):
+        raise main_view_module.settings.SecretDecryptionError("no key")
+
+    monkeypatch.setattr(main_view_module.settings, "decrypt_manual_connection_password", _raise)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice", password_encrypted=b"ciphertext"
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    assert _FakeFtpCredentialsDialog.last_instance is not None
+    assert view._tabs.count() == 1
+
+
+def test_manual_sftp_remember_password_encrypts_and_persists(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.settings, "encrypt_manual_connection_password", lambda password: b"encrypted:" + password.encode()
+    )
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_manual_connections",
+        lambda connections: saved.setdefault("connections", connections),
+    )
+
+    def _make_dialog(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._password = "typed-secret"
+        dialog._remember = True
+        return dialog
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _make_dialog)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice")
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        manual_connections=[
+            {"name": connection.name, "host": connection.host, "port": connection.port, "kind": connection.kind, "username": connection.username}
+        ],
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    assert saved["connections"][0]["password_encrypted"] is not None
+
+
+def test_gcp_sftp_connect_via_tunnel_embeds_browser(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "sftp", "alice", "secret")
+
+    assert view._tabs.count() == 1
+    widget = view._tabs.widget(0)
+    session = widget.session
+    assert isinstance(session, main_view_module.ftp_client.SftpSession)
+    assert session._host == "127.0.0.1"
+    assert session._port == tunnel.port
+    assert session._skip_host_key_check is True
+    assert list(view._active_sessions.values())[0][0] == "sftp"
+
+
+def test_start_session_from_instance_sftp_shows_credentials_dialog_without_remember(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+
+    connect_calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: connect_calls.append(kwargs))
+
+    view._start_session_from_instance(instance, "sftp")
+
+    dialog = _FakeFtpCredentialsDialog.last_instance
+    assert dialog.show_remember is False
+    assert connect_calls[0]["kind"] == "sftp"
 
 
 # -- GL.iNet hosts / dashboard ------------------------------------------------

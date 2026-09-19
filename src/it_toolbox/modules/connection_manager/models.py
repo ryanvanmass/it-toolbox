@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 RDP_PORT = 3389
 SSH_PORT = 22
+SFTP_PORT = 22  # SFTP is a subsystem of SSH, not a separate protocol/port
+FTP_PORT = 21
 
 
 @dataclass(frozen=True)
@@ -204,13 +206,21 @@ class GlinetVpnTunnel:
 
 @dataclass(frozen=True)
 class ManualConnection:
-    """A directly user-entered RDP or SSH endpoint — no account, project,
-    or host discovery involved, unlike the GCP/QEMU families. Connects
-    straight to host:port, with no tunnel in front of it.
+    """A directly user-entered RDP, SSH, SFTP, or FTP endpoint — no
+    account, project, or host discovery involved, unlike the GCP/QEMU
+    families. Connects straight to host:port, with no tunnel in front of
+    it. `password_encrypted` is only ever populated for "sftp"/"ftp"
+    connections whose password the user chose to remember — always
+    ciphertext (age-encrypted to the user's SSH key, see core/settings.py's
+    encrypt_manual_connection_password), same contract as
+    GlinetHost.password_encrypted. None means no password stored (RDP/SSH
+    never persist one; a not-yet-remembered SFTP/FTP one is prompted for
+    each time).
     """
 
     name: str
     host: str
     port: int
-    kind: str  # "rdp" or "ssh"
+    kind: str  # "rdp", "ssh", "sftp", or "ftp"
     username: str | None = None
+    password_encrypted: bytes | None = None
