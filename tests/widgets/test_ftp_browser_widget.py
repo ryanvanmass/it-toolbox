@@ -349,6 +349,26 @@ def test_uploading_a_folder_with_multiple_files_never_touches_the_session_concur
     assert len(session.uploaded) == 2
 
 
+def test_expand_button_hides_panes_and_grows_the_queue(qtbot):
+    entries = {"/home/alice": []}
+    browser, session = _make_browser(qtbot, entries)
+
+    assert browser._panes_container.isHidden() is False
+    assert browser._queue_expand_button.text() == "Expand"
+
+    browser._on_toggle_queue_expanded()
+
+    assert browser._panes_container.isHidden() is True
+    assert browser._queue_table.maximumHeight() > 1000
+    assert browser._queue_expand_button.text() == "Collapse"
+
+    browser._on_toggle_queue_expanded()
+
+    assert browser._panes_container.isHidden() is False
+    assert browser._queue_table.maximumHeight() == 160
+    assert browser._queue_expand_button.text() == "Expand"
+
+
 def test_close_session_closes_the_underlying_connection(qtbot):
     entries = {"/home/alice": []}
     browser, session = _make_browser(qtbot, entries)

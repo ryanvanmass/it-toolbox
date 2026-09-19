@@ -83,6 +83,12 @@ from it_toolbox.widgets.bucket_browser_widget import format_size
 
 ENTRY_ROLE = Qt.ItemDataRole.UserRole
 
+_QUEUE_COLLAPSED_MAX_HEIGHT = 160
+# Qt's own "effectively no maximum" sentinel (QWIDGETSIZE_MAX) -- used
+# instead of a specific pixel value since the expanded queue should
+# claim however much space the tab actually has, not a guessed number.
+_QUEUE_EXPANDED_MAX_HEIGHT = 16777215
+
 
 def _format_modified(epoch_seconds: float) -> str:
     if not epoch_seconds:
@@ -245,7 +251,9 @@ class FtpBrowserWidget(QWidget):
         self._remote_pane.item_activated.connect(self._on_remote_item_activated)
         self._remote_pane.context_menu_requested.connect(self._on_remote_context_menu)
 
-        panes = QHBoxLayout()
+        self._panes_container = QWidget()
+        panes = QHBoxLayout(self._panes_container)
+        panes.setContentsMargins(0, 0, 0, 0)
         panes.addWidget(self._local_pane, 1)
         panes.addWidget(self._remote_pane, 1)
 
@@ -254,16 +262,38 @@ class FtpBrowserWidget(QWidget):
         self._queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._queue_table.verticalHeader().setVisible(False)
         self._queue_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self._queue_table.setMaximumHeight(160)
+        self._queue_table.setMaximumHeight(_QUEUE_COLLAPSED_MAX_HEIGHT)
+
+        self._queue_expanded = False
+        self._queue_expand_button = QPushButton("Expand")
+        self._queue_expand_button.clicked.connect(self._on_toggle_queue_expanded)
+        queue_header = QHBoxLayout()
+        queue_header.addWidget(QLabel("Transfers"))
+        queue_header.addStretch(1)
+        queue_header.addWidget(self._queue_expand_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._status_label)
-        layout.addLayout(panes, 3)
-        layout.addWidget(QLabel("Transfers"))
+        layout.addWidget(self._panes_container, 3)
+        layout.addLayout(queue_header)
         layout.addWidget(self._queue_table, 1)
 
         self._reload_local()
         self._connect_remote()
+
+    def _on_toggle_queue_expanded(self) -> None:
+        # "Fullscreen" here means filling this tab, not the OS window --
+        # the browser is always embedded in the app's shared tab widget,
+        # never a standalone window of its own. Hiding the panes lets
+        # the queue table's own stretch factor claim that space; without
+        # also lifting its collapsed max-height cap, Qt would just leave
+        # the freed space empty instead of growing the table into it.
+        self._queue_expanded = not self._queue_expanded
+        self._panes_container.setVisible(not self._queue_expanded)
+        self._queue_table.setMaximumHeight(
+            _QUEUE_EXPANDED_MAX_HEIGHT if self._queue_expanded else _QUEUE_COLLAPSED_MAX_HEIGHT
+        )
+        self._queue_expand_button.setText("Collapse" if self._queue_expanded else "Expand")
 
     # -- Connect ------------------------------------------------------
 
