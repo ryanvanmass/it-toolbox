@@ -1949,7 +1949,7 @@ def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
         {
             "name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice",
             "gateway_host": None, "gateway_port": SSH_PORT, "gateway_username": None,
-            "gateway_password": None,
+            "gateway_password": None, "gateway_prompt_for_password": False,
         }
     ]
 
@@ -1976,7 +1976,7 @@ def test_manual_connections_roundtrip_preserves_gateway(qtbot, monkeypatch):
         {
             "name": "internal-rdp", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": None,
             "gateway_host": "bastion.example.com", "gateway_port": 2222, "gateway_username": "bob",
-            "gateway_password": "hunter2",
+            "gateway_password": "hunter2", "gateway_prompt_for_password": False,
         }
     ]
 
@@ -2057,6 +2057,79 @@ def test_manual_gateway_connect_passes_gateway_password_to_tunnel(qtbot, monkeyp
     assert tunnel_calls == [
         ("planview-admin@pvsrv-zabbixproxy", "10.0.0.5", 3389, SSH_PORT, "hunter2")
     ]
+
+
+def test_manual_gateway_connect_prompts_for_password_when_configured(qtbot, monkeypatch):
+    # gateway_prompt_for_password mirrors the RDP password's own
+    # never-stored, ask-every-time convention -- confirm the prompt
+    # actually fires and its answer (not any stored gateway_password,
+    # which is None here anyway) reaches SshTunnel.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    prompts = []
+
+    def fake_get_text(parent, title, label, *args, **kwargs):
+        prompts.append((title, label))
+        if title == "SSH Gateway Password":
+            return "typed-at-runtime", True
+        return "rdp-secret", True
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", staticmethod(fake_get_text))
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_username="planview-admin",
+        gateway_prompt_for_password=True,
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    assert tunnel_calls == [
+        ("planview-admin@pvsrv-zabbixproxy", "10.0.0.5", 3389, SSH_PORT, "typed-at-runtime")
+    ]
+    assert ("SSH Gateway Password", "Password for planview-admin@pvsrv-zabbixproxy:") in prompts
+
+
+def test_manual_gateway_connect_cancelling_password_prompt_aborts_connect(qtbot, monkeypatch):
+    # kind="ssh" and an explicit username so the SSH Gateway Password
+    # prompt is the *only* QInputDialog.getText call in this flow --
+    # otherwise an earlier username/RDP-password prompt returning "not
+    # ok" would abort for a different reason than the one under test.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "TerminalWidget", _FakeTerminalWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False))
+    )
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda *a, **k: tunnel_calls.append(True),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-box", host="10.0.0.5", port=22, kind="ssh", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_prompt_for_password=True,
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    assert tunnel_calls == []
+    assert view._tabs.count() == 0
 
 
 def test_manual_gateway_connect_skips_host_key_checking_for_ssh(qtbot, monkeypatch):

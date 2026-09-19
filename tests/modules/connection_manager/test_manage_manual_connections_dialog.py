@@ -73,6 +73,36 @@ def test_unchecking_gateway_clears_password_too(qtbot):
     assert dialog.connection().gateway_password is None
 
 
+def test_edit_dialog_prefills_prompt_for_password_checkbox(qtbot):
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
+        gateway_host="pvsrv-zabbixproxy", gateway_prompt_for_password=True,
+    )
+    dialog = _ConnectionEditDialog(connection)
+    qtbot.addWidget(dialog)
+
+    assert dialog._gateway_prompt_password_checkbox.isChecked() is True
+    assert dialog._gateway_password_edit.isEnabled() is False
+    assert dialog.connection() == connection
+
+
+def test_checking_prompt_for_password_disables_and_clears_the_stored_field(qtbot):
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
+        gateway_host="pvsrv-zabbixproxy", gateway_password="hunter2",
+    )
+    dialog = _ConnectionEditDialog(connection)
+    qtbot.addWidget(dialog)
+
+    dialog._gateway_prompt_password_checkbox.setChecked(True)
+
+    assert dialog._gateway_password_edit.isEnabled() is False
+    assert dialog._gateway_password_edit.text() == ""
+    updated = dialog.connection()
+    assert updated.gateway_password is None
+    assert updated.gateway_prompt_for_password is True
+
+
 def test_unchecking_gateway_clears_it_from_the_resulting_connection(qtbot):
     connection = ManualConnection(
         name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",

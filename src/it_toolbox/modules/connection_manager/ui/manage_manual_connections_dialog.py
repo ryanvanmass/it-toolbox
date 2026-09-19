@@ -96,19 +96,26 @@ class _ConnectionEditDialog(QDialog):
         )
         self._gateway_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._gateway_password_edit.setPlaceholderText("leave blank to use keys/agent instead")
-
-        gateway_form = QFormLayout()
-        gateway_form.addRow("Gateway host:", self._gateway_host_edit)
-        gateway_form.addRow("Gateway port:", self._gateway_port_spin)
-        gateway_form.addRow("Gateway username:", self._gateway_username_edit)
-        gateway_form.addRow("Gateway password:", self._gateway_password_edit)
         gateway_password_note = QLabel(
             "Only needed if the gateway doesn't accept this app's SSH key -- stored as plain "
             "text (this app has no credential vault)."
         )
         gateway_password_note.setWordWrap(True)
         gateway_password_note.setStyleSheet("color: gray;")
+
+        self._gateway_prompt_password_checkbox = QCheckBox("Prompt for it instead of storing it")
+        self._gateway_prompt_password_checkbox.setChecked(
+            has_gateway and connection.gateway_prompt_for_password
+        )
+        self._gateway_prompt_password_checkbox.toggled.connect(self._on_gateway_prompt_password_toggled)
+
+        gateway_form = QFormLayout()
+        gateway_form.addRow("Gateway host:", self._gateway_host_edit)
+        gateway_form.addRow("Gateway port:", self._gateway_port_spin)
+        gateway_form.addRow("Gateway username:", self._gateway_username_edit)
+        gateway_form.addRow("Gateway password:", self._gateway_password_edit)
         gateway_form.addRow("", gateway_password_note)
+        gateway_form.addRow("", self._gateway_prompt_password_checkbox)
         gateway_box_layout = QVBoxLayout()
         gateway_box_layout.addWidget(self._gateway_checkbox)
         gateway_box_layout.addLayout(gateway_form)
@@ -131,7 +138,27 @@ class _ConnectionEditDialog(QDialog):
         self._gateway_host_edit.setEnabled(checked)
         self._gateway_port_spin.setEnabled(checked)
         self._gateway_username_edit.setEnabled(checked)
-        self._gateway_password_edit.setEnabled(checked)
+        self._gateway_prompt_password_checkbox.setEnabled(checked)
+        # The password field's own enabled state is also gated on the
+        # "prompt instead" checkbox -- re-derive it here rather than just
+        # setting it to `checked`, so re-enabling the gateway section
+        # doesn't also re-enable a field "prompt instead" says to leave
+        # alone.
+        self._on_gateway_prompt_password_toggled(self._gateway_prompt_password_checkbox.isChecked())
+
+    def _on_gateway_prompt_password_toggled(self, checked: bool) -> None:
+        gateway_enabled = self._gateway_checkbox.isChecked()
+        self._gateway_password_edit.setEnabled(gateway_enabled and not checked)
+        if checked:
+            # Prompting each time means never storing one -- clear any
+            # value left over from before this was checked, rather than
+            # just hiding a stale password that would otherwise get
+            # silently written back out to disk (connection() would return
+            # None for it regardless, since it's gated on this same
+            # checkbox, but leaving stale text in a disabled field the
+            # user can't see is exactly the kind of thing that no longer
+            # reflects what's actually stored being confusing later).
+            self._gateway_password_edit.clear()
 
     def _on_kind_changed(self, index: int) -> None:
         # Only auto-fill the port when it still matches the *other*
@@ -157,6 +184,9 @@ class _ConnectionEditDialog(QDialog):
             ),
             gateway_password=(
                 self._gateway_password_edit.text() or None if gateway_enabled else None
+            ),
+            gateway_prompt_for_password=(
+                gateway_enabled and self._gateway_prompt_password_checkbox.isChecked()
             ),
         )
 

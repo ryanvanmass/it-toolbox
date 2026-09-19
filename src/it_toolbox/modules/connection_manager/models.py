@@ -217,7 +217,10 @@ class ManualConnection:
     denied (publickey,password)"). Stored as plain text in
     manual_connections.json -- this app has no credential-vault story
     anywhere else either, so this isn't a new weaker link, just an
-    explicit one worth flagging.
+    explicit one worth flagging. gateway_prompt_for_password sidesteps
+    that entirely (mirrors the RDP password, which was already always
+    prompted, never stored): when set, gateway_password is ignored and
+    the connect flow asks for it fresh each time instead.
     """
 
     name: str
@@ -229,3 +232,4 @@ class ManualConnection:
     gateway_port: int = SSH_PORT
     gateway_username: str | None = None
     gateway_password: str | None = None
+    gateway_prompt_for_password: bool = False

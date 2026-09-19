@@ -660,6 +660,7 @@ class ConnectionManagerView(QWidget):
                 gateway_port=c.get("gateway_port", SSH_PORT),
                 gateway_username=c.get("gateway_username"),
                 gateway_password=c.get("gateway_password"),
+                gateway_prompt_for_password=c.get("gateway_prompt_for_password", False),
             )
             for c in settings.load_manual_connections()
         ]
@@ -678,6 +679,7 @@ class ConnectionManagerView(QWidget):
                     "gateway_port": c.gateway_port,
                     "gateway_username": c.gateway_username,
                     "gateway_password": c.gateway_password,
+                    "gateway_prompt_for_password": c.gateway_prompt_for_password,
                 }
                 for c in connections
             ]
@@ -1466,8 +1468,19 @@ class ConnectionManagerView(QWidget):
                 return
 
         if connection.gateway_host:
+            gateway_password = connection.gateway_password
+            if connection.gateway_prompt_for_password:
+                gateway_target = connection.gateway_username or "the SSH gateway"
+                gateway_password, ok = QInputDialog.getText(
+                    self,
+                    "SSH Gateway Password",
+                    f"Password for {gateway_target}@{connection.gateway_host}:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if not ok:
+                    return
             async_utils.run_in_background(
-                lambda: self._start_manual_gateway_tunnel(connection),
+                lambda: self._start_manual_gateway_tunnel(connection, gateway_password),
                 on_result=lambda tunnel: self._on_manual_gateway_tunnel_ready(
                     tunnel, connection, username, password
                 ),
@@ -1489,7 +1502,7 @@ class ConnectionManagerView(QWidget):
         self._active_sessions_dialog.add_session(session_id, label)
 
     @staticmethod
-    def _start_manual_gateway_tunnel(connection: ManualConnection) -> SshTunnel:
+    def _start_manual_gateway_tunnel(connection: ManualConnection, gateway_password: str | None) -> SshTunnel:
         gateway_target = (
             f"{connection.gateway_username}@{connection.gateway_host}"
             if connection.gateway_username
@@ -1500,7 +1513,7 @@ class ConnectionManagerView(QWidget):
             connection.host,
             connection.port,
             ssh_port=connection.gateway_port,
-            password=connection.gateway_password,
+            password=gateway_password,
         )
         tunnel.start()
         return tunnel
