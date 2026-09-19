@@ -180,8 +180,13 @@ class _FilePaneWidget(QWidget):
 class _TransferSignals(QObject):
     # (transfer_id, bytes_transferred, total_bytes) -- emitted from the
     # background transfer thread, delivered to the main thread via Qt's
-    # normal cross-thread queued-connection behavior.
-    progress = Signal(int, int, int)
+    # normal cross-thread queued-connection behavior. bytes_transferred/
+    # total_bytes are declared as `object`, not `int` -- a plain `int`
+    # Signal argument marshals through a 32-bit C int, which overflows
+    # (raising OverflowError on every single progress tick, not just
+    # once) for any transfer past ~2GB. `object` passes the Python int
+    # through as-is, with no such limit.
+    progress = Signal(int, object, object)
 
 
 # A recursive folder upload/download enqueues one of these per directory
@@ -264,12 +269,16 @@ class FtpBrowserWidget(QWidget):
         self._queue_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._queue_table.setMaximumHeight(_QUEUE_COLLAPSED_MAX_HEIGHT)
 
+        clear_completed_button = QPushButton("Clear Completed")
+        clear_completed_button.clicked.connect(self._clear_completed_transfers)
+
         self._queue_expanded = False
         self._queue_expand_button = QPushButton("Expand")
         self._queue_expand_button.clicked.connect(self._on_toggle_queue_expanded)
         queue_header = QHBoxLayout()
         queue_header.addWidget(QLabel("Transfers"))
         queue_header.addStretch(1)
+        queue_header.addWidget(clear_completed_button)
         queue_header.addWidget(self._queue_expand_button)
 
         layout = QVBoxLayout(self)
@@ -294,6 +303,26 @@ class FtpBrowserWidget(QWidget):
             _QUEUE_EXPANDED_MAX_HEIGHT if self._queue_expanded else _QUEUE_COLLAPSED_MAX_HEIGHT
         )
         self._queue_expand_button.setText("Collapse" if self._queue_expanded else "Expand")
+
+    def _clear_completed_transfers(self) -> None:
+        # Only rows marked "Done" -- a still-queued/in-progress job's row
+        # must not move out from under _transfer_rows while it's live,
+        # and a "Failed: ..." row is left for the user to actually see
+        # rather than silently disappearing.
+        removed_rows = [
+            row
+            for row in range(self._queue_table.rowCount())
+            if self._queue_table.item(row, 3) is not None and self._queue_table.item(row, 3).text() == "Done"
+        ]
+        for row in reversed(removed_rows):
+            self._queue_table.removeRow(row)
+
+        removed_set = set(removed_rows)
+        self._transfer_rows = {
+            transfer_id: row - sum(1 for removed in removed_rows if removed < row)
+            for transfer_id, row in self._transfer_rows.items()
+            if row not in removed_set
+        }
 
     # -- Connect ------------------------------------------------------
 

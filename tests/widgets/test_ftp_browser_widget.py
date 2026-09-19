@@ -369,6 +369,57 @@ def test_expand_button_hides_panes_and_grows_the_queue(qtbot):
     assert browser._queue_expand_button.text() == "Expand"
 
 
+def test_progress_signal_handles_byte_counts_past_32_bit_int_range(qtbot):
+    # Regression test: bytes_transferred/total_bytes used to be declared
+    # `int` (a 32-bit C int under the hood) on the Qt signal -- emitting
+    # a real byte count for anything past ~2GB raised OverflowError on
+    # every single progress tick, flooding stderr for the whole transfer.
+    entries = {"/home/alice": []}
+    browser, session = _make_browser(qtbot, entries)
+    over_32_bit = 5_000_000_000  # a real ~5GB file's byte count
+
+    received = []
+    browser._transfer_signals.progress.connect(lambda *args: received.append(args))
+    browser._transfer_signals.progress.emit(0, over_32_bit, over_32_bit)  # must not raise
+
+    assert received == [(0, over_32_bit, over_32_bit)]
+
+
+def test_clear_completed_removes_only_done_rows_and_keeps_others_addressable(qtbot):
+    entries = {"/home/alice": []}
+    browser, session = _make_browser(qtbot, entries)
+    qtbot.waitUntil(lambda: browser._remote_path == "/home/alice", timeout=2000)
+
+    browser._enqueue_transfer("upload", "done.txt", "/l/done.txt", "/r/done.txt", 1)
+    browser._enqueue_transfer("upload", "still-queued.txt", "/l/q.txt", "/r/q.txt", 1)
+    done_id = 0
+    browser._set_transfer_status(done_id, "Done")
+
+    browser._clear_completed_transfers()
+
+    assert browser._queue_table.rowCount() == 1
+    assert browser._queue_table.item(0, 0).text() == "still-queued.txt"
+    # The surviving job's row index shifted from 1 to 0 -- confirm
+    # _transfer_rows was updated to match, not left pointing at the
+    # now-removed "done.txt" row.
+    still_queued_id = 1
+    assert browser._transfer_rows == {still_queued_id: 0}
+
+
+def test_clear_completed_leaves_failed_rows_alone(qtbot):
+    entries = {"/home/alice": []}
+    browser, session = _make_browser(qtbot, entries)
+    qtbot.waitUntil(lambda: browser._remote_path == "/home/alice", timeout=2000)
+
+    browser._enqueue_transfer("upload", "failed.txt", "/l/f.txt", "/r/f.txt", 1)
+    browser._set_transfer_status(0, "Failed: boom")
+
+    browser._clear_completed_transfers()
+
+    assert browser._queue_table.rowCount() == 1
+    assert browser._queue_table.item(0, 3).text() == "Failed: boom"
+
+
 def test_close_session_closes_the_underlying_connection(qtbot):
     entries = {"/home/alice": []}
     browser, session = _make_browser(qtbot, entries)

@@ -243,6 +243,20 @@ this sandbox for reasons unrelated to this change — see below).
 - **Recursive folder upload/download is implemented** (this used to say
   it wasn't) — see "Recursive folder transfers" below for the details
   and the concurrency bug it surfaced and fixed along the way.
+- **Fixed: transfers over ~2GB flooded the console with `OverflowError`**
+  — `_TransferSignals.progress` declared its byte-count arguments as
+  plain `int`, which Qt marshals through a 32-bit C `int`; any real byte
+  count past `2**31-1` raised `OverflowError` on every single progress
+  tick for the whole transfer (reported from real usage, reproduced and
+  fixed). Now declared as `object`, which passes the Python int through
+  with no such limit. `tests/widgets/test_ftp_browser_widget.py` has a
+  regression test for this, confirmed to fail with the old `int`
+  declaration and pass with `object`.
+- **"Expand" and "Clear Completed" buttons** on the transfer queue —
+  Expand hides the local/remote panes so the queue table fills the tab
+  (for a big recursive transfer with many rows); Clear Completed removes
+  only rows marked "Done" (queued/in-progress/failed rows are left
+  alone — a failure stays visible until the user's actually seen it).
 - **No drag-and-drop** between panes or from the OS file manager — only
   double-click (files only — double-clicking a folder navigates into
   it) and the context menu's Download/Upload actions (which do accept
