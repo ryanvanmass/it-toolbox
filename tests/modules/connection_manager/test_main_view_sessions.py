@@ -1646,6 +1646,57 @@ def test_qemu_power_action_calls_client_and_refreshes_vm_list(qtbot, monkeypatch
     assert host_item.child(0).text(0) == "(no VMs)"
 
 
+def test_qemu_reset_asks_for_confirmation_first(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.qemu_client, "power_action", lambda host, vm_name, action: calls.append(action)
+    )
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.No,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_reset_clicked(host, vm)
+
+    assert calls == []  # declining the confirmation must not call the API
+
+
+def test_qemu_reset_calls_power_action_once_confirmed(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "power_action",
+        lambda host, vm_name, action: calls.append((host, vm_name, action)),
+    )
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    view._qemu_root_item = QTreeWidgetItem(["QEMU"])
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+    view._qemu_root_item.addChild(host_item)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_reset_clicked(host, vm)
+
+    qtbot.waitUntil(lambda: calls == [(host, "myvm", "reset")], timeout=2000)
+
+
 def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
@@ -1762,8 +1813,8 @@ def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, mo
     class _FakeConfigureVmDialog:
         DialogCode = ConfigureVmDialog.DialogCode
 
-        def __init__(self, host, vm, vcpus, memory_mib, display_device, parent=None):
-            captured["args"] = (host, vm, vcpus, memory_mib, display_device)
+        def __init__(self, host, vm, vcpus, memory_mib, display_device, boot_order, parent=None):
+            captured["args"] = (host, vm, vcpus, memory_mib, display_device, boot_order)
 
         def exec(self):
             return self.DialogCode.Accepted
@@ -1772,6 +1823,9 @@ def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, mo
     monkeypatch.setattr(main_view_module.qemu_provisioning, "get_vm_resources", lambda host, name: (4, 8192))
     monkeypatch.setattr(
         main_view_module.qemu_provisioning, "get_vm_display_device", lambda host, name: "spice"
+    )
+    monkeypatch.setattr(
+        main_view_module.qemu_provisioning, "get_boot_order", lambda host, name: ["hd", "cdrom"]
     )
     monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
 
@@ -1788,7 +1842,7 @@ def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, mo
     view._on_configure_vm_clicked(vm_item, host, vm)
 
     qtbot.waitUntil(lambda: "args" in captured, timeout=2000)
-    assert captured["args"] == (host, vm, 4, 8192, "spice")
+    assert captured["args"] == (host, vm, 4, 8192, "spice", ["hd", "cdrom"])
     qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
     assert host_item.child(0).text(0) == "(no VMs)"
 

@@ -438,6 +438,15 @@ def set_display_device(host: QemuHost, vm_name: str, graphics_type: str) -> None
     # device fall back to libvirt's own (public) default listen address.
     graphics.set("listen", "127.0.0.1")
 
+    _redefine(host, root)
+
+
+def _redefine(host: QemuHost, root: ET.Element) -> None:
+    """Writes `root` to a temp file and `virsh define`s it back -- the
+    only way to change something (like a device's type, or the OS boot
+    order) that virsh has no dedicated attach/detach/set convenience call
+    for. Shared by set_display_device and set_boot_order.
+    """
     with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
         f.write(ET.tostring(root, encoding="unicode"))
         temp_path = f.name
@@ -445,6 +454,78 @@ def set_display_device(host: QemuHost, vm_name: str, graphics_type: str) -> None
         run_virsh(host, "define", temp_path)
     finally:
         os.unlink(temp_path)
+
+
+_BOOT_DEVICES = ("hd", "cdrom", "network", "fd")
+# <os>'s own child elements that must precede any <boot dev='...'/>
+# entries -- confirmed against libvirt's domain XML schema/docs, not
+# assumed: <type> is required and always first; <loader>/<nvram> (UEFI
+# firmware) and <bootloader>/<bootloader_args> (paravirt-only, not used
+# by this app) come next when present. Inserting new <boot> elements
+# right after whichever of these actually exist -- rather than just
+# appending them at the very end of <os> -- keeps them ahead of
+# <bootmenu>/<bios>/<smbios>, which must come after.
+_OS_ELEMENTS_BEFORE_BOOT = ("type", "loader", "nvram", "bootloader", "bootloader_args")
+
+
+def get_boot_order(host: QemuHost, vm_name: str) -> list[str]:
+    """The VM's current boot device order, as libvirt boot device names
+    ("hd", "cdrom", "network", "fd"), read from the OS-level
+    <os><boot dev='...'/></os> list -- the simpler of libvirt's two boot-
+    order schemes (the other being a per-device <boot order='N'/> on
+    individual disks/interfaces) and what virt-install itself uses for
+    VMs this app creates. Empty if none are set (the VM boots whatever
+    its firmware's own natural device order picks, unmanaged by this
+    app).
+    """
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
+    os_el = root.find("os")
+    if os_el is None:
+        return []
+    return [dev for boot_el in os_el.findall("boot") if (dev := boot_el.get("dev")) is not None]
+
+
+def set_boot_order(host: QemuHost, vm_name: str, order: list[str]) -> None:
+    """Rewrites the VM's OS-level boot device order. Not a live change --
+    like set_display_device, this only rewrites the persistent
+    definition (there's no meaningful "change what the running guest
+    boots from next" short of a reboot, which makes this moot anyway);
+    it takes effect the VM's next (re)start.
+
+    libvirt refuses to mix the OS-level <os><boot dev='...'/></os> scheme
+    with a per-device <boot order='N'/> on individual disks/interfaces --
+    since this app only ever manages the OS-level scheme, any leftover
+    per-device order (e.g. set outside this app, by virt-manager or a
+    hand edit) is stripped from every device first so the two can't
+    conflict.
+    """
+    invalid = [d for d in order if d not in _BOOT_DEVICES]
+    if invalid:
+        raise QemuApiError(f"Unsupported boot device(s): {invalid!r}")
+
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
+    os_el = root.find("os")
+    if os_el is None:
+        raise QemuApiError(f"{vm_name} has no <os> section to set a boot order on.")
+
+    for boot_el in os_el.findall("boot"):
+        os_el.remove(boot_el)
+    insert_at = 0
+    for i, child in enumerate(os_el):
+        if child.tag in _OS_ELEMENTS_BEFORE_BOOT:
+            insert_at = i + 1
+    for offset, dev in enumerate(order):
+        os_el.insert(insert_at + offset, ET.Element("boot", {"dev": dev}))
+
+    devices = root.find("devices")
+    if devices is not None:
+        for device_el in devices:
+            for boot_el in device_el.findall("boot"):
+                device_el.remove(boot_el)
+
+    _redefine(host, root)
 
 
 def change_cdrom_media(host: QemuHost, vm_name: str, target: str, iso_path: str | None, *, live: bool = False) -> None:

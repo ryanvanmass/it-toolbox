@@ -31,6 +31,11 @@ _POWER_ACTIONS = {
     "shutdown": "shutdown",
     "pause": "suspend",
     "resume": "resume",
+    # Forcibly resets the guest -- the same as pressing a physical
+    # machine's reset button; the guest OS gets no chance to shut down
+    # cleanly first. Distinct from "shutdown" (a graceful ACPI request)
+    # and from "start" (which does nothing to an already-running VM).
+    "reset": "reset",
 }
 
 

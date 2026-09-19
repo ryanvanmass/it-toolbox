@@ -163,6 +163,7 @@ def test_diagnose_missing_spice_port_reports_no_graphics_at_all(monkeypatch):
         ("shutdown", "shutdown"),
         ("pause", "suspend"),
         ("resume", "resume"),
+        ("reset", "reset"),
     ],
 )
 def test_power_action_maps_to_virsh_command(monkeypatch, action, expected_virsh_command):
