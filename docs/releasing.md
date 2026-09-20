@@ -100,8 +100,11 @@ confirmed working against a real Windows environment.
 ## Linux packages
 
 `packaging/linux/build.sh` builds both packages by vendoring a full venv
-(`pip install`'d packages, not a from-scratch Python interpreter — a
-system `python3 (>= 3.11)` is still a real dependency) at its actual
+(`pip install`'d packages, not a from-scratch Python interpreter — the
+system `python3` is still a real dependency, pinned to the exact minor
+version the venv was built with, since the venv's `bin/python3` is just a
+symlink to the system interpreter and its `site-packages` lives under
+`lib/pythonX.Y/`) at its actual
 final install path (`/usr/share/it-toolbox/venv`), then wraps it with
 [`fpm`](https://github.com/jordansissel/fpm) plus a `.desktop` entry
 (`packaging/linux/it-toolbox.desktop`) and the app's own icon
@@ -111,8 +114,14 @@ packaging step). It's runnable standalone (needs `python3`,
 `fpm`, and `rpm` on `PATH`, plus `sudo` — it writes to real `/usr/share`
 on the build host, which is fine on a CI runner or anything else you're
 treating as disposable for the build) — useful for iterating on the
-packaging itself without needing a real tag push;
-`.github/workflows/package-linux.yml` runs the exact same script and can
+packaging itself without needing a real tag push. Because of that
+Python-version tie, the `.deb` must be built on Debian/Ubuntu and the
+`.rpm` on Fedora (`build.sh deb` / `build.sh rpm`); building both on one
+distro produces an RPM that dies at launch with `ModuleNotFoundError: No
+module named 'it_toolbox'` on any Fedora with a different Python.
+`.github/workflows/package-linux.yml` does this as two jobs (`deb` on
+`ubuntu-latest`, `rpm` in a pinned `fedora:NN` container — bump it
+deliberately when Fedora moves Python) running the same script, and can
 be triggered manually (`workflow_dispatch`, no release side effect) to
 test changes in CI before they ever touch `release.yml`.
 

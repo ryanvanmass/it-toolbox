@@ -4,8 +4,13 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# Two separate jobs because the vendored venv is tied to the build host's
+# Python minor version (see the header of packaging/linux/build.sh): the
+# .deb has to be built against Ubuntu's Python and the .rpm against
+# Fedora's, or the installed package fails at launch with
+# "ModuleNotFoundError: No module named 'it_toolbox'".
 jobs:
-  package:
+  deb:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,13 +28,38 @@ jobs:
             gobject-introspection python3-dev
           sudo gem install --no-document fpm
 
-      - name: Build .deb and .rpm
-        run: bash packaging/linux/build.sh
+      - name: Build .deb
+        run: bash packaging/linux/build.sh deb
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-packages
-          path: |
-            dist/packages/*.deb
-            dist/packages/*.rpm
+          name: linux-deb
+          path: dist/packages/*.deb
+          if-no-files-found: error
+
+  rpm:
+    runs-on: ubuntu-latest
+    # Pinned, not `latest`: a new Fedora release usually bumps Python, and
+    # the package pins the exact Python it was built against, so bump this
+    # deliberately.
+    container: fedora:44
+    steps:
+      - name: Install build tooling
+        run: |
+          dnf install -y \
+            git sudo rpm-build ruby ruby-devel rubygems gcc gcc-c++ make \
+            redhat-rpm-config pkgconf-pkg-config \
+            python3 python3-pip python3-devel \
+            cairo-devel cairo-gobject-devel gobject-introspection-devel
+          gem install --no-document fpm
+
+      - uses: actions/checkout@v4
+
+      - name: Build .rpm
+        run: bash packaging/linux/build.sh rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm
+          path: dist/packages/*.rpm
           if-no-files-found: error
