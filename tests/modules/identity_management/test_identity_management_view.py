@@ -37,6 +37,17 @@ def _make_view(qtbot, monkeypatch, api_key="jca_test", devices=(), users=()):
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.list_users",
         lambda key: list(users),
     )
+    # Selecting a device row (which populating the table can do on its own)
+    # kicks off a detail fetch -- without this default it would hit the real
+    # JumpCloud API with the fake key. Tests that care about the detail data
+    # patch get_device again themselves.
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: next(
+            (d for d in devices if d.id == device_id),
+            Device(id=device_id, display_name=device_id, os=""),
+        ),
+    )
     view = IdentityManagementView()
     qtbot.addWidget(view)
     return view
