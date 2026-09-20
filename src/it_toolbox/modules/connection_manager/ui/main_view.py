@@ -1,16 +1,15 @@
 import base64
 import platform
 
+import shiboken6
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QHBoxLayout,
     QInputDialog,
     QLineEdit,
     QMenu,
     QMessageBox,
-    QPushButton,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils, ftp_client, settings
 from it_toolbox.core.auth import gcp_auth
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
 from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
 from it_toolbox.core.ssh_tunnel import SshTunnel
@@ -182,13 +182,6 @@ class ConnectionManagerView(QWidget):
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
 
-        self._sign_in_button = QPushButton("Sign in with gcloud")
-        self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
-
-        top_bar = QHBoxLayout()
-        top_bar.addStretch()
-        top_bar.addWidget(self._sign_in_button)
-
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Connections"])
         self._tree.itemExpanded.connect(self._on_item_expanded)
@@ -208,7 +201,6 @@ class ConnectionManagerView(QWidget):
             self._tabs.currentChanged.connect(self._on_session_tab_changed)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(top_bar)
         if self._owns_tabs:
             layout.addWidget(self._tabs, 1)
 
@@ -233,15 +225,13 @@ class ConnectionManagerView(QWidget):
         self._populate_manual_connections()
         self._populate_glinet_hosts()
 
+        # Signing in/out happens in Settings, not here — this view only
+        # reacts to it (see _on_account_changed).
+        auth_events.account_changed.connect(self._on_account_changed)
+
         if not gcp_auth.is_available():
-            self._sign_in_button.setEnabled(False)
-            self._sign_in_button.setToolTip(
-                f"gcloud CLI not found — install it from {gcp_auth.INSTALL_URL} "
-                "and relaunch."
-            )
             return
 
-        self._sign_in_button.setEnabled(False)
         async_utils.run_in_background(
             gcp_auth.get_active_account,
             on_result=self._on_startup_account_checked,
@@ -259,28 +249,24 @@ class ConnectionManagerView(QWidget):
     # -- Sign in / out -----------------------------------------------------
 
     def _on_startup_account_checked(self, account: str | None) -> None:
-        self._sign_in_button.setEnabled(True)
         if account is not None:
             self._set_signed_in(account)
 
-    def _on_sign_in_clicked(self) -> None:
-        self._sign_in_button.setEnabled(False)
-        async_utils.run_in_background(
-            gcp_auth.sign_in,
-            on_result=self._set_signed_in,
-            on_error=self._on_auth_error,
-        )
+    def _on_account_changed(self, account: str | None) -> None:
+        if account is None:
+            self._set_signed_out()
+        else:
+            self._set_signed_in(account)
 
     def _do_sign_out(self) -> None:
         async_utils.run_in_background(
             gcp_auth.sign_out,
-            on_result=lambda _: self._set_signed_out(),
+            on_result=lambda _: auth_events.account_changed.emit(None),
             on_error=self._on_auth_error,
         )
 
     def _set_signed_in(self, account: str) -> None:
         self._account = account
-        self._sign_in_button.setVisible(False)
         async_utils.run_in_background(
             lambda: gcp_client.list_projects(gcp_auth.get_credentials()),
             on_result=self._populate_projects,
@@ -290,12 +276,19 @@ class ConnectionManagerView(QWidget):
     def _set_signed_out(self) -> None:
         self._account = None
         self._all_projects = []
+        # tree.clear() destroys every top-level item, QEMU/Manual/GL.iNet
+        # roots included — rebuild those (they're independent of GCP
+        # sign-in), same as _apply_project_selection does.
         self._tree.clear()
-        self._sign_in_button.setEnabled(True)
-        self._sign_in_button.setVisible(True)
+        self._gcp_root_item = None
+        self._qemu_root_item = None
+        self._manual_root_item = None
+        self._glinet_root_item = None
+        self._populate_qemu_hosts()
+        self._populate_manual_connections()
+        self._populate_glinet_hosts()
 
     def _on_auth_error(self, error: Exception) -> None:
-        self._sign_in_button.setEnabled(True)
         QMessageBox.warning(self, "gcloud auth failed", str(error))
 
     # -- Project / instance tree --------------------------------------------
@@ -461,10 +454,16 @@ class ConnectionManagerView(QWidget):
             )
 
     def _on_category_loaded(self, item: QTreeWidgetItem, populate, data) -> None:
+        # The tree can be cleared (sign-out, re-selecting projects) while a
+        # request is still in flight — the item is gone, so drop the result.
+        if not shiboken6.isValid(item):
+            return
         item.setData(0, IS_LOADING_ROLE, False)
         populate(item, data)
 
     def _on_category_load_failed(self, item: QTreeWidgetItem, error: Exception) -> None:
+        if not shiboken6.isValid(item):
+            return
         item.setData(0, IS_LOADING_ROLE, False)
         self._populate_category_error(item, error)
 

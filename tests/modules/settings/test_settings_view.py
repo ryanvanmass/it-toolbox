@@ -2,6 +2,7 @@ import subprocess
 
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.auth import gcp_auth
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager import (
     glinet_client,
     qemu_client,
@@ -483,6 +484,44 @@ def test_gcloud_sign_out_updates_status(qtbot, monkeypatch):
     view._on_gcloud_sign_out_clicked()
 
     qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+
+def test_gcloud_sign_in_broadcasts_account_changed(qtbot, monkeypatch):
+    # Connection Manager has no sign-in button of its own — it learns about
+    # a Settings sign-in via this signal.
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: None)
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+    monkeypatch.setattr(gcp_auth, "sign_in", lambda: "someone@example.com")
+    with qtbot.waitSignal(auth_events.account_changed, timeout=5000) as blocker:
+        view._on_gcloud_sign_in_clicked()
+
+    assert blocker.args == ["someone@example.com"]
+
+
+def test_gcloud_sign_out_broadcasts_account_changed(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: "someone@example.com")
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "someone@example.com" in view._gcloud_status_label.text())
+
+    monkeypatch.setattr(gcp_auth, "sign_out", lambda: None)
+    with qtbot.waitSignal(auth_events.account_changed, timeout=5000) as blocker:
+        view._on_gcloud_sign_out_clicked()
+
+    assert blocker.args == [None]
+
+
+def test_gcloud_status_follows_account_changed_from_elsewhere(qtbot, monkeypatch):
+    # e.g. Connection Manager's GCP tree "Sign out" menu action.
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: "someone@example.com")
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "someone@example.com" in view._gcloud_status_label.text())
+
+    auth_events.account_changed.emit(None)
+
+    assert view._gcloud_status_label.text() == "Not signed in"
+    assert not view._gcloud_sign_out_button.isEnabled()
 
 
 def test_gcp_ssh_key_section_shows_resolved_public_key(qtbot, monkeypatch):
