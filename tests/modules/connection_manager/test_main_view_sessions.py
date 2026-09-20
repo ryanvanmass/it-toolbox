@@ -1,7 +1,8 @@
 import pytest
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QDialog, QTreeWidgetItem, QWidget
+from PySide6.QtWidgets import QDialog, QPushButton, QTreeWidgetItem, QWidget
 
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager.models import (
     SSH_PORT,
     GcpProject,
@@ -996,6 +997,80 @@ def test_closing_a_bucket_browser_tab_just_removes_it(qtbot, monkeypatch):
 
     assert view._tabs.count() == 0
     assert view._active_sessions == {}  # not tracked as a session
+
+
+def test_view_has_no_sign_in_button(qtbot, monkeypatch):
+    # Signing in happens only in Settings — never from the main screen.
+    view = _make_view(qtbot, monkeypatch)
+
+    assert not hasattr(view, "_sign_in_button")
+    assert not [b for b in view.findChildren(QPushButton) if "gcloud" in b.text().lower()]
+
+
+def test_account_changed_signal_signs_in_and_loads_projects(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_client.list_projects",
+        lambda creds: [GcpProject(project_id="p1", display_name="Project One")],
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings.load_selected_project_ids",
+        lambda: {"p1"},
+    )
+    view = _make_view(qtbot, monkeypatch)
+
+    auth_events.account_changed.emit("me@example.com")
+
+    assert view._account == "me@example.com"
+    qtbot.waitUntil(
+        lambda: view._gcp_root_item is not None and view._gcp_root_item.childCount() == 1
+    )
+    assert view._gcp_root_item.child(0).text(0) == "Project One"
+
+
+def test_account_changed_to_none_signs_out(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    assert view._tree.topLevelItem(0).text(0) == "GCP"
+
+    auth_events.account_changed.emit(None)
+
+    assert view._account is None
+    assert view._all_projects == []
+    # Only the GCP root goes away — QEMU/Manual/GL.iNet don't depend on
+    # gcloud sign-in, so they must survive a sign-out (e.g. from Settings).
+    roots = [view._tree.topLevelItem(i).text(0) for i in range(view._tree.topLevelItemCount())]
+    assert roots == ["QEMU", "Manual", "GL.iNet"]
+
+
+def test_category_results_arriving_after_the_tree_was_cleared_are_dropped(qtbot, monkeypatch):
+    # A sign-out clears the tree while VM/bucket requests may still be in
+    # flight — their callbacks then get a deleted QTreeWidgetItem.
+    view = _make_view(qtbot, monkeypatch)
+    item = QTreeWidgetItem(["VMs"])
+    view._tree.addTopLevelItem(item)
+    view._tree.clear()
+
+    populated = []
+    view._on_category_loaded(item, lambda i, data: populated.append(data), [])
+    view._on_category_load_failed(item, RuntimeError("boom"))
+
+    assert populated == []
+
+
+def test_tree_sign_out_broadcasts_account_changed(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.sign_out", lambda: None
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+
+    with qtbot.waitSignal(auth_events.account_changed, timeout=5000) as blocker:
+        view._do_sign_out()
+
+    assert blocker.args == [None]
+    assert view._account is None
 
 
 def test_gcp_root_context_menu_offers_select_projects_and_sign_out(qtbot, monkeypatch):

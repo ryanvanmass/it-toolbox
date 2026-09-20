@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager import (
     glinet_client,
     qemu_client,
@@ -510,6 +511,11 @@ class SettingsView(QWidget):
         layout.addWidget(self._gcloud_status_label)
         layout.addLayout(button_row)
 
+        # Sign-in/out happens here (Connection Manager has no sign-in
+        # button of its own) — but Connection Manager's tree menu can
+        # still sign out, so keep this status in sync with it too.
+        auth_events.account_changed.connect(self._set_gcloud_account)
+
         if gcp_auth.is_available():
             self._gcloud_status_label.setText("Checking sign-in status…")
             self._gcloud_sign_in_button.setEnabled(False)
@@ -541,7 +547,7 @@ class SettingsView(QWidget):
         self._gcloud_status_label.setText("Signing in…")
         run_in_background(
             gcp_auth.sign_in,
-            on_result=self._set_gcloud_account,
+            on_result=auth_events.account_changed.emit,
             on_error=self._on_gcloud_error,
         )
 
@@ -550,7 +556,7 @@ class SettingsView(QWidget):
         self._gcloud_status_label.setText("Signing out…")
         run_in_background(
             gcp_auth.sign_out,
-            on_result=lambda _: self._set_gcloud_account(None),
+            on_result=lambda _: auth_events.account_changed.emit(None),
             on_error=self._on_gcloud_error,
         )
 
