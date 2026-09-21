@@ -31,6 +31,26 @@ class _FakeTunnel:
         self.stopped = True
 
 
+class _FakePasswordResetDialog:
+    """Stands in for the modal PasswordResetDialog (an unstubbed exec() would
+    block headless) and records what it would have shown, the plaintext
+    password included, which the real dialog masks."""
+
+    shown: list[dict] = []
+
+    def __init__(self, instance_name, username, password, note="", parent=None):
+        self.args = {
+            "instance_name": instance_name,
+            "username": username,
+            "password": password,
+            "note": note,
+        }
+
+    def exec(self):
+        type(self).shown.append(self.args)
+        return QDialog.DialogCode.Accepted
+
+
 def _make_view(
     qtbot,
     monkeypatch,
@@ -113,6 +133,12 @@ def _make_view(
         "it_toolbox.modules.connection_manager.ui.main_view.settings."
         "decrypt_instance_rdp_password",
         lambda encrypted, passphrase=None: encrypted.removeprefix(b"enc:").decode(),
+    )
+    # Set Password…'s result dialog is modal: record it instead of opening it.
+    _FakePasswordResetDialog.shown = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.PasswordResetDialog",
+        _FakePasswordResetDialog,
     )
     # _apply_project_selection now pre-loads every project's VMs/buckets
     # in the background immediately (not just on first expand) — stub
@@ -499,20 +525,15 @@ def test_set_instance_password_shows_returned_credentials(qtbot, monkeypatch):
         lambda creds, project_id, zone, name, username: calls.append(username)
         or ("alice", "s3cr3t!"),
     )
-    shown = []
-    monkeypatch.setattr(
-        main_view_module.QMessageBox,
-        "information",
-        lambda parent, title, text: shown.append((title, text)),
-    )
 
     view._on_set_instance_password_clicked(instance)
 
-    qtbot.waitUntil(lambda: len(shown) == 1, timeout=2000)
+    qtbot.waitUntil(lambda: len(_FakePasswordResetDialog.shown) == 1, timeout=2000)
     assert calls == ["alice"]
-    title, text = shown[0]
-    assert "alice" in text
-    assert "s3cr3t!" in text
+    (dialog,) = _FakePasswordResetDialog.shown
+    assert dialog["instance_name"] == "vm-1"
+    assert dialog["username"] == "alice"
+    assert dialog["password"] == "s3cr3t!"
 
 
 @contextlib.contextmanager
@@ -549,8 +570,6 @@ def test_set_instance_password_shows_progress_in_the_status_bar_then_restores_it
             ("alice", "s3cr3t!"),
         )[1],
     )
-    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *args, **kwargs: None)
-
     with _in_main_window(qtbot, view) as window:
         view._on_set_instance_password_clicked(instance)
 
@@ -3001,7 +3020,8 @@ def test_saved_rdp_login_does_not_leak_into_ssh(qtbot, monkeypatch):
 
 
 def _run_set_password(qtbot, monkeypatch, view, reset_result=("alice", "s3cr3t!")):
-    """Drives Set Password… to completion; returns the shown dialog texts."""
+    """Drives Set Password… to completion; returns what the result dialog was
+    given (a list of dicts with instance_name/username/password/note)."""
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
     monkeypatch.setattr(
@@ -3012,15 +3032,9 @@ def _run_set_password(qtbot, monkeypatch, view, reset_result=("alice", "s3cr3t!"
         "reset_windows_password",
         lambda creds, project_id, zone, name, username: reset_result,
     )
-    shown = []
-    monkeypatch.setattr(
-        main_view_module.QMessageBox,
-        "information",
-        lambda parent, title, text: shown.append(text),
-    )
     view._on_set_instance_password_clicked(_windows_vm())
-    qtbot.waitUntil(lambda: len(shown) == 1, timeout=2000)
-    return shown
+    qtbot.waitUntil(lambda: len(_FakePasswordResetDialog.shown) == 1, timeout=2000)
+    return _FakePasswordResetDialog.shown
 
 
 def test_set_password_saves_the_new_login_as_the_vms_rdp_credentials(qtbot, monkeypatch):
@@ -3034,11 +3048,13 @@ def test_set_password_saves_the_new_login_as_the_vms_rdp_credentials(qtbot, monk
         lambda credentials: saved.append(dict(credentials)),
     )
 
-    (text,) = _run_set_password(qtbot, monkeypatch, view)
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
 
     assert saved[-1] == {_VM_KEY: _saved_login("alice", b"enc:s3cr3t!")}
-    assert "s3cr3t!" in text  # still shown: it's the only time it appears in plain text
-    assert "Saved as this VM's RDP login" in text
+    # Still handed to the dialog (masked, but copyable): this is the only time
+    # the plain-text password is available.
+    assert dialog["password"] == "s3cr3t!"
+    assert "Saved as this VM's RDP login" in dialog["note"]
 
 
 def test_connect_via_rdp_after_set_password_signs_in_without_prompting(qtbot, monkeypatch):
@@ -3068,10 +3084,11 @@ def test_set_password_still_shows_the_password_when_it_cannot_be_saved(qtbot, mo
 
     monkeypatch.setattr(main_view_module.settings, "encrypt_instance_rdp_password", no_ssh_key)
 
-    (text,) = _run_set_password(qtbot, monkeypatch, view)
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
 
-    assert "s3cr3t!" in text
-    assert "Couldn't save it as this VM's RDP login" in text and "No SSH key found" in text
+    assert dialog["password"] == "s3cr3t!"
+    assert "Couldn't save it as this VM's RDP login" in dialog["note"]
+    assert "No SSH key found" in dialog["note"]
     assert view._instance_rdp_credentials == {}
 
 
@@ -3085,9 +3102,10 @@ def test_set_password_still_shows_the_password_when_the_disk_write_fails(qtbot, 
 
     monkeypatch.setattr(main_view_module.settings, "save_instance_rdp_credentials", disk_full)
 
-    (text,) = _run_set_password(qtbot, monkeypatch, view)
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
 
-    assert "s3cr3t!" in text and "disk full" in text
+    assert dialog["password"] == "s3cr3t!"
+    assert "disk full" in dialog["note"]
 
 
 class _FakeRdpCredentialsDialog:

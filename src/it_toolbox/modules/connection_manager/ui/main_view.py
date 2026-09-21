@@ -63,6 +63,9 @@ from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import (
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
 )
+from it_toolbox.modules.connection_manager.ui.password_reset_dialog import (
+    PasswordResetDialog,
+)
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
@@ -1450,12 +1453,9 @@ class ConnectionManagerView(QWidget):
                 "Saved as this VM's RDP login (password encrypted with your SSH key), so "
                 "Connect via RDP signs in automatically. Change it under RDP Credentials…"
             )
-        QMessageBox.information(
-            self,
-            "Password Reset",
-            f"New login for {instance.name} — shown once:\n\n"
-            f"Username: {username}\nPassword: {password}\n\n{saved_note}",
-        )
+        # The password is masked (with a Copy button) rather than printed: see
+        # PasswordResetDialog.
+        PasswordResetDialog(instance.name, username, password, saved_note, parent=self).exec()
 
     def _store_instance_rdp_credentials(
         self, instance: Instance, username: str, password_encrypted: bytes | None
