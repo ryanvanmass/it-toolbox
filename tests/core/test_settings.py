@@ -462,3 +462,121 @@ def test_save_and_load_include_prerelease_updates(monkeypatch, tmp_path):
     assert settings.load_include_prerelease_updates() is True
     settings.save_include_prerelease_updates(False)
     assert settings.load_include_prerelease_updates() is False
+
+
+# -- Per-GCP-instance RDP credentials ------------------------------------------
+
+_VM = ("proj", "us-central1-a", "vm-1")
+
+
+def test_instance_rdp_credentials_empty_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_instance_rdp_credentials() == {}
+
+
+def test_save_and_load_instance_rdp_credentials_round_trips(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    credentials = {
+        _VM: settings.InstanceRdpCredentials("alice", b"\x00\x01ciphertext\xff"),
+        ("proj", "europe-west1-b", "vm-2"): settings.InstanceRdpCredentials("bob", None),
+    }
+
+    settings.save_instance_rdp_credentials(credentials)
+
+    assert settings.load_instance_rdp_credentials() == credentials
+
+
+def test_instance_rdp_credentials_are_keyed_by_project_zone_and_name(monkeypatch, tmp_path):
+    # A VM name is only unique within its project and zone.
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_instance_rdp_credentials(
+        {
+            ("proj-a", "z", "web"): settings.InstanceRdpCredentials("alice", None),
+            ("proj-b", "z", "web"): settings.InstanceRdpCredentials("bob", None),
+        }
+    )
+
+    loaded = settings.load_instance_rdp_credentials()
+
+    assert loaded[("proj-a", "z", "web")].username == "alice"
+    assert loaded[("proj-b", "z", "web")].username == "bob"
+
+
+def test_instance_rdp_credentials_ignore_a_malformed_file(monkeypatch, tmp_path):
+    # Same "fail soft" treatment as the other JSON settings files.
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.instance_rdp_credentials_path().write_text("{not json")
+    assert settings.load_instance_rdp_credentials() == {}
+
+
+def test_instance_rdp_credentials_skip_a_malformed_entry_but_keep_the_rest(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.instance_rdp_credentials_path().write_text(
+        '[{"project_id": "proj"},'
+        ' "not a dict",'
+        ' {"project_id": "proj", "zone": "z", "name": "bad", "username": "x",'
+        '  "password_encrypted": "!!!not base64!!!"},'
+        ' {"project_id": "proj", "zone": "z", "name": "good", "username": "alice",'
+        '  "password_encrypted": null}]'
+    )
+
+    assert settings.load_instance_rdp_credentials() == {
+        ("proj", "z", "good"): settings.InstanceRdpCredentials("alice", None)
+    }
+
+
+def test_instance_rdp_password_round_trips_through_real_encryption(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path)
+    monkeypatch.setattr(settings, "resolve_instance_rdp_ssh_key_path", lambda: key_path)
+
+    encrypted = settings.encrypt_instance_rdp_password("Sup3r-s3cret!")
+
+    assert b"Sup3r-s3cret!" not in encrypted
+    assert settings.decrypt_instance_rdp_password(encrypted) == "Sup3r-s3cret!"
+
+
+def test_saved_instance_rdp_password_is_never_written_to_disk_in_plaintext(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path)
+    monkeypatch.setattr(settings, "resolve_instance_rdp_ssh_key_path", lambda: key_path)
+    encrypted = settings.encrypt_instance_rdp_password("Sup3r-s3cret!")
+
+    settings.save_instance_rdp_credentials({_VM: settings.InstanceRdpCredentials("alice", encrypted)})
+
+    on_disk = settings.instance_rdp_credentials_path().read_text()
+    assert "Sup3r-s3cret!" not in on_disk
+    # ...and the saved blob still decrypts to it after the JSON round trip.
+    reloaded = settings.load_instance_rdp_credentials()[_VM]
+    assert settings.decrypt_instance_rdp_password(reloaded.password_encrypted) == "Sup3r-s3cret!"
+
+
+def test_decrypt_instance_rdp_password_with_passphrase_protected_ssh_key(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    key_path = _write_ssh_keypair(tmp_path, passphrase=b"hunter2")
+    monkeypatch.setattr(settings, "resolve_instance_rdp_ssh_key_path", lambda: key_path)
+    encrypted = settings.encrypt_instance_rdp_password("Sup3r-s3cret!")
+
+    assert settings.decrypt_instance_rdp_password(encrypted, passphrase="hunter2") == "Sup3r-s3cret!"
+    with pytest.raises(settings.SecretDecryptionError):
+        settings.decrypt_instance_rdp_password(encrypted)  # no passphrase
+
+
+def test_decrypt_instance_rdp_password_with_a_different_key_raises(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    original = _write_ssh_keypair(tmp_path, name="id_ed25519_a")
+    other = _write_ssh_keypair(tmp_path, name="id_ed25519_b")
+    monkeypatch.setattr(settings, "resolve_instance_rdp_ssh_key_path", lambda: original)
+    encrypted = settings.encrypt_instance_rdp_password("Sup3r-s3cret!")
+    monkeypatch.setattr(settings, "resolve_instance_rdp_ssh_key_path", lambda: other)
+
+    with pytest.raises(settings.SecretDecryptionError):
+        settings.decrypt_instance_rdp_password(encrypted)
+
+
+def test_encrypt_instance_rdp_password_without_any_ssh_key_raises(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "resolve_instance_rdp_ssh_key_path", lambda: None)
+
+    with pytest.raises(settings.SecretDecryptionError, match="No SSH key found"):
+        settings.encrypt_instance_rdp_password("Sup3r-s3cret!")
