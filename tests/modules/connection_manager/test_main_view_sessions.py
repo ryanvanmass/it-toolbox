@@ -1,6 +1,8 @@
+import contextlib
+
 import pytest
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QDialog, QPushButton, QTreeWidgetItem, QWidget
+from PySide6.QtWidgets import QDialog, QMainWindow, QPushButton, QTreeWidgetItem, QWidget
 
 from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager.models import (
@@ -488,6 +490,81 @@ def test_set_instance_password_shows_returned_credentials(qtbot, monkeypatch):
     assert "s3cr3t!" in text
 
 
+@contextlib.contextmanager
+def _in_main_window(qtbot, view):
+    """Hosts `view` in a QMainWindow whose status bar reads "Ready", as in the
+    real app. The window is given the view back on exit so only qtbot's own
+    registration of the view (see _make_view) ever deletes it."""
+    window = QMainWindow()
+    window.setCentralWidget(view)
+    qtbot.addWidget(window)
+    window.statusBar().showMessage("Ready")
+    try:
+        yield window
+    finally:
+        window.takeCentralWidget()
+
+
+def test_set_instance_password_shows_progress_in_the_status_bar_then_restores_it(qtbot, monkeypatch):
+    import threading
+
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: ("alice", True)
+    )
+    reset_may_finish = threading.Event()
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "reset_windows_password",
+        lambda creds, project_id, zone, name, username: (
+            reset_may_finish.wait(5),
+            ("alice", "s3cr3t!"),
+        )[1],
+    )
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *args, **kwargs: None)
+
+    with _in_main_window(qtbot, view) as window:
+        view._on_set_instance_password_clicked(instance)
+
+        # The reset is a round trip through the guest agent and can take a
+        # minute — the user has to be told something is happening.
+        assert "Resetting the password for alice on vm-1" in window.statusBar().currentMessage()
+
+        reset_may_finish.set()
+        qtbot.waitUntil(lambda: window.statusBar().currentMessage() == "Ready", timeout=2000)
+
+
+def test_set_instance_password_failure_restores_the_status_and_shows_the_error(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: ("alice", True)
+    )
+
+    def failing_reset(creds, project_id, zone, name, username):
+        raise RuntimeError("the guest agent never answered")
+
+    monkeypatch.setattr(main_view_module.gcp_client, "reset_windows_password", failing_reset)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text: warnings.append((title, text)),
+    )
+
+    with _in_main_window(qtbot, view) as window:
+        view._on_set_instance_password_clicked(instance)
+
+        qtbot.waitUntil(lambda: len(warnings) == 1, timeout=2000)
+        assert "the guest agent never answered" in warnings[0][1]
+        assert window.statusBar().currentMessage() == "Ready"
+
+
 def test_double_clicking_a_bucket_opens_a_browser_tab(qtbot, monkeypatch):
     import it_toolbox.widgets.bucket_browser_widget as browser_module
 
@@ -563,7 +640,7 @@ def test_resolve_double_click_kind_windows_os_hint_never_asks(qtbot, monkeypatch
     assert view._resolve_double_click_kind(instance) == "rdp"
 
 
-# -- Set Password: Windows-only (resetWindowsPassword 404s on Linux) --------
+# -- Set Password: Windows-only (needs the Windows guest agent to answer) ----
 
 
 def test_instance_supports_password_reset_is_true_for_windows(qtbot, monkeypatch):
