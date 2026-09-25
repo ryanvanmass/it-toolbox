@@ -31,6 +31,26 @@ class _FakeTunnel:
         self.stopped = True
 
 
+class _FakePasswordResetDialog:
+    """Stands in for the modal PasswordResetDialog (an unstubbed exec() would
+    block headless) and records what it would have shown, the plaintext
+    password included, which the real dialog masks."""
+
+    shown: list[dict] = []
+
+    def __init__(self, instance_name, username, password, note="", parent=None):
+        self.args = {
+            "instance_name": instance_name,
+            "username": username,
+            "password": password,
+            "note": note,
+        }
+
+    def exec(self):
+        type(self).shown.append(self.args)
+        return QDialog.DialogCode.Accepted
+
+
 def _make_view(
     qtbot,
     monkeypatch,
@@ -42,6 +62,7 @@ def _make_view(
     qemu_available=True,
     glinet_available=True,
     instance_ssh_username_overrides=None,
+    instance_rdp_credentials=None,
 ):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
@@ -88,6 +109,36 @@ def _make_view(
         "it_toolbox.modules.connection_manager.ui.main_view.settings."
         "save_instance_ssh_username_overrides",
         lambda overrides: None,
+    )
+    # Per-VM RDP logins: same hermeticity reasoning -- no real data dir. The
+    # password "encryption" is a reversible stand-in so these tests need no
+    # SSH key on the machine running them; the real age round trip is
+    # covered in tests/core/test_settings.py.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "load_instance_rdp_credentials",
+        lambda: dict(instance_rdp_credentials or {}),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "save_instance_rdp_credentials",
+        lambda credentials: None,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "encrypt_instance_rdp_password",
+        lambda password: b"enc:" + password.encode(),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "decrypt_instance_rdp_password",
+        lambda encrypted, passphrase=None: encrypted.removeprefix(b"enc:").decode(),
+    )
+    # Set Password…'s result dialog is modal: record it instead of opening it.
+    _FakePasswordResetDialog.shown = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.PasswordResetDialog",
+        _FakePasswordResetDialog,
     )
     # _apply_project_selection now pre-loads every project's VMs/buckets
     # in the background immediately (not just on first expand) — stub
@@ -474,20 +525,15 @@ def test_set_instance_password_shows_returned_credentials(qtbot, monkeypatch):
         lambda creds, project_id, zone, name, username: calls.append(username)
         or ("alice", "s3cr3t!"),
     )
-    shown = []
-    monkeypatch.setattr(
-        main_view_module.QMessageBox,
-        "information",
-        lambda parent, title, text: shown.append((title, text)),
-    )
 
     view._on_set_instance_password_clicked(instance)
 
-    qtbot.waitUntil(lambda: len(shown) == 1, timeout=2000)
+    qtbot.waitUntil(lambda: len(_FakePasswordResetDialog.shown) == 1, timeout=2000)
     assert calls == ["alice"]
-    title, text = shown[0]
-    assert "alice" in text
-    assert "s3cr3t!" in text
+    (dialog,) = _FakePasswordResetDialog.shown
+    assert dialog["instance_name"] == "vm-1"
+    assert dialog["username"] == "alice"
+    assert dialog["password"] == "s3cr3t!"
 
 
 @contextlib.contextmanager
@@ -524,8 +570,6 @@ def test_set_instance_password_shows_progress_in_the_status_bar_then_restores_it
             ("alice", "s3cr3t!"),
         )[1],
     )
-    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *args, **kwargs: None)
-
     with _in_main_window(qtbot, view) as window:
         view._on_set_instance_password_clicked(instance)
 
@@ -2858,3 +2902,403 @@ def test_glinet_dashboard_tab_closes_via_try_close_tab(qtbot, monkeypatch):
     assert view.try_close_tab(widget) is True
     assert view._tabs.count() == 0
     assert widget not in view._owned_tab_widgets
+
+
+# -- Per-VM RDP credentials (GCP) --------------------------------------------
+
+_VM_KEY = ("p1", "us-central1-a", "vm-1")
+
+
+def _windows_vm(name="vm-1"):
+    return Instance(
+        name=name, zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="windows"
+    )
+
+
+def _saved_login(username="alice", password=b"enc:s3cr3t!"):
+    from it_toolbox.core.settings import InstanceRdpCredentials
+
+    return InstanceRdpCredentials(username=username, password_encrypted=password)
+
+
+def _capture_connects(view, monkeypatch):
+    calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: calls.append(kwargs))
+    return calls
+
+
+def test_rdp_uses_the_saved_login_without_prompting(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    # The saved username must beat the global default.
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    prompts = []
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *a, **k: prompts.append(a) or ("x", True)
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert connects[0]["username"] == "alice"
+    assert connects[0]["password"] == "s3cr3t!"
+    assert prompts == []
+
+
+def test_rdp_with_only_a_saved_username_prompts_for_the_password(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(
+        qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login(password=None)}
+    )
+    prompts = []
+
+    def fake_get_text(parent, title, label, *args, **kwargs):
+        prompts.append(label)
+        return ("typed-pw", True)
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", fake_get_text)
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert connects[0]["username"] == "alice"
+    assert connects[0]["password"] == "typed-pw"
+    assert len(prompts) == 1 and "alice@vm-1" in prompts[0]
+
+
+def test_rdp_falls_back_to_the_prompt_when_the_saved_password_cannot_be_decrypted(
+    qtbot, monkeypatch
+):
+    # e.g. a passphrase-protected SSH key, or one replaced since the save.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+
+    def cannot_decrypt(encrypted, passphrase=None):
+        raise main_view_module.settings.SecretDecryptionError("wrong key")
+
+    monkeypatch.setattr(main_view_module.settings, "decrypt_instance_rdp_password", cannot_decrypt)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *a, **k: ("typed-pw", True)
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert connects[0]["username"] == "alice"
+    assert connects[0]["password"] == "typed-pw"
+
+
+def test_saved_rdp_login_belongs_to_one_vm_only(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *a, **k: ("typed-pw", True)
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm("vm-2"), "rdp")
+
+    assert connects[0]["username"] == "root"
+    assert connects[0]["password"] == "typed-pw"
+
+
+def test_saved_rdp_login_does_not_leak_into_ssh(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "ssh")
+
+    assert connects[0]["username"] == "root"
+
+
+def _run_set_password(qtbot, monkeypatch, view, reset_result=("alice", "s3cr3t!")):
+    """Drives Set Password… to completion; returns what the result dialog was
+    given (a list of dicts with instance_name/username/password/note)."""
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: ("alice", True)
+    )
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "reset_windows_password",
+        lambda creds, project_id, zone, name, username: reset_result,
+    )
+    view._on_set_instance_password_clicked(_windows_vm())
+    qtbot.waitUntil(lambda: len(_FakePasswordResetDialog.shown) == 1, timeout=2000)
+    return _FakePasswordResetDialog.shown
+
+
+def test_set_password_saves_the_new_login_as_the_vms_rdp_credentials(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_rdp_credentials",
+        lambda credentials: saved.append(dict(credentials)),
+    )
+
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
+
+    assert saved[-1] == {_VM_KEY: _saved_login("alice", b"enc:s3cr3t!")}
+    # Still handed to the dialog (masked, but copyable): this is the only time
+    # the plain-text password is available.
+    assert dialog["password"] == "s3cr3t!"
+    assert "Saved as this VM's RDP login" in dialog["note"]
+
+
+def test_connect_via_rdp_after_set_password_signs_in_without_prompting(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+    _run_set_password(qtbot, monkeypatch, view)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog,
+        "getText",
+        lambda *a, **k: pytest.fail("should not prompt: the reset saved this VM's login"),
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert (connects[0]["username"], connects[0]["password"]) == ("alice", "s3cr3t!")
+
+
+def test_set_password_still_shows_the_password_when_it_cannot_be_saved(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    def no_ssh_key(password):
+        raise main_view_module.settings.SecretDecryptionError("No SSH key found to encrypt with.")
+
+    monkeypatch.setattr(main_view_module.settings, "encrypt_instance_rdp_password", no_ssh_key)
+
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
+
+    assert dialog["password"] == "s3cr3t!"
+    assert "Couldn't save it as this VM's RDP login" in dialog["note"]
+    assert "No SSH key found" in dialog["note"]
+    assert view._instance_rdp_credentials == {}
+
+
+def test_set_password_still_shows_the_password_when_the_disk_write_fails(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    def disk_full(credentials):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(main_view_module.settings, "save_instance_rdp_credentials", disk_full)
+
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
+
+    assert dialog["password"] == "s3cr3t!"
+    assert "disk full" in dialog["note"]
+
+
+class _FakeRdpCredentialsDialog:
+    """Stands in for RdpCredentialsDialog; records how the view built it."""
+
+    accept = True
+    username_value = ""
+    password_value = ""
+    cleared_value = False
+    built_with = None
+
+    def __init__(self, instance_name, **kwargs):
+        type(self).built_with = {"instance_name": instance_name, **kwargs}
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted if type(self).accept else QDialog.DialogCode.Rejected
+
+    def username(self):
+        return type(self).username_value
+
+    def password(self):
+        return type(self).password_value
+
+    def cleared(self):
+        return type(self).cleared_value
+
+
+def _use_fake_rdp_dialog(monkeypatch, username="", password="", cleared=False, accept=True):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    _FakeRdpCredentialsDialog.username_value = username
+    _FakeRdpCredentialsDialog.password_value = password
+    _FakeRdpCredentialsDialog.cleared_value = cleared
+    _FakeRdpCredentialsDialog.accept = accept
+    _FakeRdpCredentialsDialog.built_with = None
+    monkeypatch.setattr(main_view_module, "RdpCredentialsDialog", _FakeRdpCredentialsDialog)
+
+
+def test_rdp_credentials_action_saves_the_username_and_an_encrypted_password(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="pw-1")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    # Stored only via the encrypt seam (stubbed as an "enc:" prefix here),
+    # never as the bare password.
+    assert view._instance_rdp_credentials == {_VM_KEY: _saved_login("bob", b"enc:pw-1")}
+
+
+def test_rdp_credentials_dialog_is_prefilled_from_what_is_saved(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login("alice")})
+    _use_fake_rdp_dialog(monkeypatch, username="alice", accept=False)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    built = _FakeRdpCredentialsDialog.built_with
+    assert built["username"] == "alice"
+    assert built["has_saved"] is True and built["has_saved_password"] is True
+
+
+def test_rdp_credentials_dialog_defaults_the_username_when_nothing_is_saved(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    _use_fake_rdp_dialog(monkeypatch, accept=False)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    built = _FakeRdpCredentialsDialog.built_with
+    assert built["username"] == "root"
+    assert built["has_saved"] is False and built["has_saved_password"] is False
+
+
+def test_rdp_credentials_blank_password_keeps_the_saved_one_for_the_same_username(
+    qtbot, monkeypatch
+):
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login("alice")})
+    _use_fake_rdp_dialog(monkeypatch, username="alice", password="")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials[_VM_KEY] == _saved_login("alice", b"enc:s3cr3t!")
+
+
+def test_rdp_credentials_changing_the_username_drops_the_old_password(qtbot, monkeypatch):
+    # The saved password belonged to "alice"; pairing it with "bob" would only
+    # produce a failed login, so it's discarded and the password is prompted.
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login("alice")})
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials[_VM_KEY] == _saved_login("bob", None)
+
+
+def test_rdp_credentials_clear_removes_the_saved_login(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_rdp_credentials",
+        lambda credentials: saved.append(dict(credentials)),
+    )
+    _use_fake_rdp_dialog(monkeypatch, username="alice", cleared=True)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials == {}
+    assert saved == [{}]
+
+
+def test_rdp_credentials_cancel_changes_nothing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="new", accept=False)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials == {_VM_KEY: _saved_login()}
+
+
+def test_rdp_credentials_not_saved_when_the_password_cannot_be_encrypted(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    def no_ssh_key(password):
+        raise main_view_module.settings.SecretDecryptionError("No SSH key found to encrypt with.")
+
+    monkeypatch.setattr(main_view_module.settings, "encrypt_instance_rdp_password", no_ssh_key)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text: warnings.append((title, text)),
+    )
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="pw-1")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials == {}
+    assert len(warnings) == 1 and "No SSH key found" in warnings[0][1]
+
+
+def _instance_menu_texts(qtbot, monkeypatch, instance, choose):
+    """Right-clicks `instance` in the tree; returns the menu's action texts
+    and lets the 'user' pick the action whose text is `choose` (or None)."""
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    view = _make_view(qtbot, monkeypatch)
+    item = QTreeWidgetItem([instance.name])
+    item.setData(0, main_view_module.INSTANCE_ROLE, instance)
+    monkeypatch.setattr(view._tree, "itemAt", lambda pos: item)
+    seen = []
+
+    # A real QMenu.exec() opens a blocking popup nothing can dismiss
+    # headless; overriding it in a Python subclass (patching the C++ class's
+    # method doesn't take) records the actions and "clicks" one instead.
+    class _AutoPickMenu(QMenu):
+        def exec(self, *args):
+            seen.extend(action.text() for action in self.actions() if action.text())
+            return next((a for a in self.actions() if choose and a.text() == choose), None)
+
+    monkeypatch.setattr(main_view_module, "QMenu", _AutoPickMenu)
+    opened = []
+    monkeypatch.setattr(view, "_on_rdp_credentials_clicked", lambda inst: opened.append(inst))
+
+    view._on_tree_context_menu(QPoint(0, 0))
+    return seen, opened
+
+
+def test_instance_menu_offers_rdp_credentials_and_it_opens_the_dialog(qtbot, monkeypatch):
+    instance = Instance(name="vm-1", zone="z", project_id="p1", status="RUNNING", os_hint=None)
+
+    texts, opened = _instance_menu_texts(qtbot, monkeypatch, instance, "RDP Credentials…")
+
+    assert texts.index("Set Password…") < texts.index("RDP Credentials…")
+    assert texts.index("RDP Credentials…") < texts.index("Upload Public Key…")
+    assert opened == [instance]
+
+
+def test_instance_menu_offers_rdp_credentials_for_windows_and_linux_alike(qtbot, monkeypatch):
+    windows = Instance(name="w", zone="z", project_id="p1", status="RUNNING", os_hint="windows")
+    linux = Instance(name="l", zone="z", project_id="p1", status="RUNNING", os_hint="linux")
+
+    windows_texts, _ = _instance_menu_texts(qtbot, monkeypatch, windows, None)
+    linux_texts, _ = _instance_menu_texts(qtbot, monkeypatch, linux, None)
+
+    # "Connect via RDP" is offered for both, so its credentials are too; the
+    # OS-specific Set Password…/Upload Public Key… gating is unchanged.
+    assert "RDP Credentials…" in windows_texts and "Upload Public Key…" not in windows_texts
+    assert "RDP Credentials…" in linux_texts and "Set Password…" not in linux_texts

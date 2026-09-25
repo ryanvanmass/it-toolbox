@@ -63,8 +63,14 @@ from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import (
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
 )
+from it_toolbox.modules.connection_manager.ui.password_reset_dialog import (
+    PasswordResetDialog,
+)
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
+)
+from it_toolbox.modules.connection_manager.ui.rdp_credentials_dialog import (
+    RdpCredentialsDialog,
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
 from it_toolbox.widgets.ftp_browser_widget import FtpBrowserWidget
@@ -124,6 +130,12 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
 
 
+def _instance_key(instance: Instance) -> tuple[str, str, str]:
+    """What per-VM settings (SSH username overrides, saved RDP logins) are
+    keyed by: a VM name is only unique within its project and zone."""
+    return (instance.project_id, instance.zone, instance.name)
+
+
 def _instance_supports_password_reset(instance: Instance) -> bool:
     """gcp_client.reset_windows_password() works by asking the Windows
     guest agent inside the VM to (re)create the account, so it only means
@@ -174,6 +186,10 @@ class ConnectionManagerView(QWidget):
         # forgetting the account to connect as on every relaunch would
         # just reintroduce the same failure this override exists to fix.
         self._instance_ssh_username_overrides = settings.load_instance_ssh_username_overrides()
+        # Per-VM RDP logins (username + encrypted password), keyed the same
+        # way. Set by hand via "RDP Credentials…" or automatically after a
+        # successful "Set Password…"; see _start_session_from_instance.
+        self._instance_rdp_credentials = settings.load_instance_rdp_credentials()
         self._qemu_vm_ip_overrides = settings.load_qemu_vm_ip_overrides()
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
@@ -922,12 +938,12 @@ class ConnectionManagerView(QWidget):
         show_key_upload = _instance_supports_ssh_key_upload(instance)
         set_password_action = None
         upload_key_action = None
-        if show_password_reset or show_key_upload:
-            menu.addSeparator()
-            if show_password_reset:
-                set_password_action = menu.addAction("Set Password…")
-            if show_key_upload:
-                upload_key_action = menu.addAction("Upload Public Key…")
+        menu.addSeparator()
+        if show_password_reset:
+            set_password_action = menu.addAction("Set Password…")
+        rdp_credentials_action = menu.addAction("RDP Credentials…")
+        if show_key_upload:
+            upload_key_action = menu.addAction("Upload Public Key…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
@@ -943,6 +959,8 @@ class ConnectionManagerView(QWidget):
             self._run_instance_power_action(instance, "force_stop")
         elif set_password_action is not None and chosen is set_password_action:
             self._on_set_instance_password_clicked(instance)
+        elif chosen is rdp_credentials_action:
+            self._on_rdp_credentials_clicked(instance)
         elif upload_key_action is not None and chosen is upload_key_action:
             self._on_upload_ssh_key_clicked(instance)
 
@@ -1236,11 +1254,13 @@ class ConnectionManagerView(QWidget):
             )
             return
 
+        key = _instance_key(instance)
+        saved_rdp = self._instance_rdp_credentials.get(key) if kind == "rdp" else None
         username = None
-        if kind in ("ssh", "sftp"):
-            username = self._instance_ssh_username_overrides.get(
-                (instance.project_id, instance.zone, instance.name)
-            )
+        if saved_rdp is not None:
+            username = saved_rdp.username
+        elif kind in ("ssh", "sftp"):
+            username = self._instance_ssh_username_overrides.get(key)
         if username is None:
             username = settings.load_default_username()
         if username is None:
@@ -1255,18 +1275,21 @@ class ConnectionManagerView(QWidget):
         key_path = None
         key_passphrase = None
         if kind == "rdp":
-            # Not persisted anywhere (no keyring integration in this app) —
-            # the embedded RDP client needs it upfront for the NLA
+            # The embedded RDP client needs the password upfront for the NLA
             # handshake, unlike external mstsc/xfreerdp which prompt in
-            # their own window.
-            password, ok = QInputDialog.getText(
-                self,
-                "Password",
-                f"Password for {username or 'RDP'}@{instance.name}:",
-                QLineEdit.EchoMode.Password,
-            )
-            if not ok:
-                return
+            # their own window. Use the one saved for this VM (via "RDP
+            # Credentials…" or an earlier "Set Password…") when there is
+            # one; otherwise ask, and don't persist what's typed here.
+            password = self._saved_rdp_password(saved_rdp)
+            if password is None:
+                password, ok = QInputDialog.getText(
+                    self,
+                    "Password",
+                    f"Password for {username or 'RDP'}@{instance.name}:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if not ok:
+                    return
         elif kind == "sftp":
             # Same "never persisted for a GCP instance" reasoning as RDP's
             # password above -- there's no ManualConnection here to
@@ -1411,12 +1434,81 @@ class ConnectionManagerView(QWidget):
     ) -> None:
         self._restore_status(previous_status)
         username, password = credential
-        QMessageBox.information(
-            self,
-            "Password Reset",
-            f"New login for {instance.name} — shown once, not stored anywhere:\n\n"
-            f"Username: {username}\nPassword: {password}",
+        # The new login is what "Connect via RDP" needs from now on, so save
+        # it for this VM rather than making the user copy it into a prompt.
+        # Saving is best-effort (no SSH key to encrypt with, say) and must
+        # never stop the credentials being shown: this dialog is the only
+        # place the password ever appears in plain text.
+        try:
+            self._store_instance_rdp_credentials(
+                instance, username, settings.encrypt_instance_rdp_password(password)
+            )
+        except (settings.SecretDecryptionError, OSError) as exc:
+            saved_note = (
+                f"Couldn't save it as this VM's RDP login: {exc}\n"
+                "Copy it now; you'll be asked for the password on the next RDP connection."
+            )
+        else:
+            saved_note = (
+                "Saved as this VM's RDP login (password encrypted with your SSH key), so "
+                "Connect via RDP signs in automatically. Change it under RDP Credentials…"
+            )
+        # The password is masked (with a Copy button) rather than printed: see
+        # PasswordResetDialog.
+        PasswordResetDialog(instance.name, username, password, saved_note, parent=self).exec()
+
+    def _store_instance_rdp_credentials(
+        self, instance: Instance, username: str, password_encrypted: bytes | None
+    ) -> None:
+        self._instance_rdp_credentials[_instance_key(instance)] = settings.InstanceRdpCredentials(
+            username=username, password_encrypted=password_encrypted
         )
+        settings.save_instance_rdp_credentials(self._instance_rdp_credentials)
+
+    def _saved_rdp_password(self, saved: settings.InstanceRdpCredentials | None) -> str | None:
+        """The saved RDP password, or None when there isn't one or it can't
+        be decrypted (no SSH key, a passphrase-protected key, a key that was
+        replaced since) -- the caller then just prompts, as it always did."""
+        if saved is None or saved.password_encrypted is None:
+            return None
+        try:
+            return settings.decrypt_instance_rdp_password(saved.password_encrypted)
+        except settings.SecretDecryptionError:
+            return None
+
+    def _on_rdp_credentials_clicked(self, instance: Instance) -> None:
+        key = _instance_key(instance)
+        saved = self._instance_rdp_credentials.get(key)
+        dialog = RdpCredentialsDialog(
+            instance.name,
+            username=saved.username if saved else (settings.load_default_username() or ""),
+            has_saved=saved is not None,
+            has_saved_password=saved is not None and saved.password_encrypted is not None,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if dialog.cleared():
+            self._instance_rdp_credentials.pop(key, None)
+            settings.save_instance_rdp_credentials(self._instance_rdp_credentials)
+            return
+
+        username = dialog.username()
+        password = dialog.password()
+        if password:
+            try:
+                encrypted = settings.encrypt_instance_rdp_password(password)
+            except settings.SecretDecryptionError as exc:
+                QMessageBox.warning(self, "Couldn't save password", str(exc))
+                return
+        elif saved is not None and saved.username == username:
+            encrypted = saved.password_encrypted  # blank means "keep what's saved"
+        else:
+            # A new username (or nothing saved yet): a leftover password
+            # belonged to somebody else, so it would only cause a failed login.
+            encrypted = None
+        self._store_instance_rdp_credentials(instance, username, encrypted)
 
     def _on_instance_action_error(self, error: Exception) -> None:
         QMessageBox.warning(self, "Instance action failed", str(error))
