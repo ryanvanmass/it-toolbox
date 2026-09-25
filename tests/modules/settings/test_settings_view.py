@@ -27,6 +27,7 @@ def _make_view(
     rclone_available=False,
     rclone_override=None,
     gcloud_available=False,
+    gcloud_version="540.0.0",
     platform_system="Linux",
     qemu_available=False,
     glinet_available=False,
@@ -65,6 +66,13 @@ def _make_view(
     monkeypatch.setattr(settings, "load_gcp_ssh_key_path", lambda: gcp_ssh_key_override)
     monkeypatch.setattr(settings, "resolve_gcp_ssh_public_key", lambda: gcp_ssh_public_key)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
+
+    def _get_gcloud_version():
+        if isinstance(gcloud_version, Exception):
+            raise gcloud_version
+        return gcloud_version
+
+    monkeypatch.setattr(gcp_auth, "get_version", _get_gcloud_version)
     monkeypatch.setattr(qemu_client, "is_available", lambda: qemu_available)
     monkeypatch.setattr(glinet_client, "is_available", lambda: glinet_available)
     monkeypatch.setattr(qemu_provisioning, "is_available", lambda: virt_install_available)
@@ -522,6 +530,98 @@ def test_gcloud_status_follows_account_changed_from_elsewhere(qtbot, monkeypatch
 
     assert view._gcloud_status_label.text() == "Not signed in"
     assert not view._gcloud_sign_out_button.isEnabled()
+
+
+def _make_gcloud_view(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: None)
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True, gcloud_version="540.0.0")
+    qtbot.waitUntil(lambda: view._gcloud_version_label.text() == "gcloud version: 540.0.0")
+    return view
+
+
+def test_gcloud_section_shows_installed_version(qtbot, monkeypatch):
+    view = _make_gcloud_view(qtbot, monkeypatch)
+
+    assert view._gcloud_update_button.isEnabled()
+
+
+def test_gcloud_version_shows_unknown_when_lookup_fails(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: None)
+    view = _make_view(
+        qtbot, monkeypatch, gcloud_available=True, gcloud_version=RuntimeError("boom")
+    )
+
+    qtbot.waitUntil(lambda: view._gcloud_version_label.text() == "gcloud version: unknown")
+
+
+def test_gcloud_update_hidden_and_disabled_when_gcloud_missing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, gcloud_available=False)
+
+    assert view._gcloud_version_label.isHidden()
+    assert not view._gcloud_update_button.isEnabled()
+
+
+def test_gcloud_update_reports_new_version(qtbot, monkeypatch):
+    view = _make_gcloud_view(qtbot, monkeypatch)
+    monkeypatch.setattr(gcp_auth, "update", lambda: ("540.0.0", "541.0.0"))
+
+    view._on_gcloud_update_clicked()
+
+    assert not view._gcloud_update_button.isEnabled()
+    qtbot.waitUntil(lambda: "541.0.0" in view._gcloud_version_label.text())
+    assert "updated from 540.0.0" in view._gcloud_version_label.text()
+    assert view._gcloud_update_button.isEnabled()
+
+
+def test_gcloud_update_reports_already_up_to_date(qtbot, monkeypatch):
+    view = _make_gcloud_view(qtbot, monkeypatch)
+    monkeypatch.setattr(gcp_auth, "update", lambda: ("540.0.0", "540.0.0"))
+
+    view._on_gcloud_update_clicked()
+
+    qtbot.waitUntil(lambda: "already up to date" in view._gcloud_version_label.text())
+    assert view._gcloud_update_button.isEnabled()
+
+
+def test_gcloud_update_shows_package_manager_command(qtbot, monkeypatch):
+    view = _make_gcloud_view(qtbot, monkeypatch)
+
+    def _raise():
+        raise gcp_auth.GcloudUpdateUnsupported("disabled", "sudo dnf upgrade google-cloud-cli")
+
+    monkeypatch.setattr(gcp_auth, "update", _raise)
+    view._on_gcloud_update_clicked()
+
+    qtbot.waitUntil(lambda: "package manager" in view._gcloud_version_label.text())
+    assert "sudo dnf upgrade google-cloud-cli" in view._gcloud_version_label.text()
+    assert view._gcloud_update_button.isEnabled()
+
+
+def test_gcloud_update_package_manager_without_command(qtbot, monkeypatch):
+    view = _make_gcloud_view(qtbot, monkeypatch)
+
+    def _raise():
+        raise gcp_auth.GcloudUpdateUnsupported("disabled", None)
+
+    monkeypatch.setattr(gcp_auth, "update", _raise)
+    view._on_gcloud_update_clicked()
+
+    qtbot.waitUntil(lambda: "package manager" in view._gcloud_version_label.text())
+    assert "\n" not in view._gcloud_version_label.text()
+
+
+def test_gcloud_update_shows_other_errors(qtbot, monkeypatch):
+    view = _make_gcloud_view(qtbot, monkeypatch)
+
+    def _raise():
+        raise RuntimeError("Permission denied")
+
+    monkeypatch.setattr(gcp_auth, "update", _raise)
+    view._on_gcloud_update_clicked()
+
+    qtbot.waitUntil(lambda: "Couldn't update gcloud" in view._gcloud_version_label.text())
+    assert "Permission denied" in view._gcloud_version_label.text()
+    assert view._gcloud_update_button.isEnabled()
 
 
 def test_gcp_ssh_key_section_shows_resolved_public_key(qtbot, monkeypatch):
