@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
-    QPushButton,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -19,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils, settings
 from it_toolbox.core.auth import gcp_auth
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager import gcp_client
 from it_toolbox.modules.connection_manager.models import GcpIamBinding, GcpProject
 from it_toolbox.modules.identity_management import jumpcloud_client
@@ -79,11 +79,11 @@ class IdentityManagementView(QWidget):
     VMs/Buckets split -- this module is a read-only "who has access"
     view, not project/instance management).
 
-    GCP auth is a real sign-in/out action (unlike JumpCloud's static API
-    key) via the shared core.auth.gcp_auth gcloud-CLI flow -- also used
-    by Connection Manager, with zero dependency on it. Since gcloud's
-    login state is genuinely global, signing in from either module's
-    tree is visible to the other without a separate sign-in.
+    GCP uses the app-wide gcloud sign-in (core.auth.gcp_auth), which only
+    Settings offers -- like Connection Manager, this view has no sign-in
+    button of its own and just follows auth_events.account_changed. Its
+    GCP root menu can still sign out, broadcasting the same signal so
+    Settings and Connection Manager follow too.
 
     The tree itself stays deliberately uncluttered: Devices/Users
     categories never list every item as a permanent child (an org with
@@ -113,6 +113,9 @@ class IdentityManagementView(QWidget):
         self._users: list[User] = []
 
         self._gcp_signed_in = False
+        # Set once an account_changed arrives, so a slower startup check
+        # can't overwrite the newer state it reported.
+        self._gcp_account_event_seen = False
         self._gcp_projects: list[GcpProject] = []
         self._selected_gcp_project: GcpProject | None = None
         self._gcp_iam_bindings: list[GcpIamBinding] = []
@@ -258,11 +261,6 @@ class IdentityManagementView(QWidget):
         self._gcp_projects_status_label = QLabel("Checking sign-in status…")
         self._gcp_projects_status_label.setWordWrap(True)
         layout.addWidget(self._gcp_projects_status_label)
-
-        self._gcp_sign_in_button = QPushButton("Sign in with Google")
-        self._gcp_sign_in_button.clicked.connect(self._on_gcp_sign_in_clicked)
-        self._gcp_sign_in_button.hide()
-        layout.addWidget(self._gcp_sign_in_button)
 
         self._gcp_projects_table = QTableWidget(0, 2)
         self._gcp_projects_table.setHorizontalHeaderLabels(["Project", "Project ID"])
@@ -728,8 +726,10 @@ class IdentityManagementView(QWidget):
             self._gcp_projects_status_label.setText(
                 f"gcloud CLI not found — install it from {gcp_auth.INSTALL_URL} and relaunch."
             )
-            self._gcp_sign_in_button.hide()
             return
+        # Sign-in/out happens in Settings (or another module's sign-out),
+        # so just follow it.
+        auth_events.account_changed.connect(self._on_gcp_account_changed)
         async_utils.run_in_background(
             gcp_auth.get_active_account,
             on_result=self._on_startup_gcp_account_checked,
@@ -737,43 +737,45 @@ class IdentityManagementView(QWidget):
         )
 
     def _on_startup_gcp_account_checked(self, account: str | None) -> None:
-        if account is not None:
-            self._set_gcp_signed_in(account)
-        else:
-            self._set_gcp_signed_out()
+        if not self._gcp_account_event_seen:
+            self._apply_gcp_account(account)
 
-    def _on_gcp_sign_in_clicked(self) -> None:
-        self._gcp_sign_in_button.setEnabled(False)
-        async_utils.run_in_background(
-            gcp_auth.sign_in,
-            on_result=self._set_gcp_signed_in,
-            on_error=self._on_gcp_auth_error,
-        )
+    def _on_gcp_account_changed(self, account: str | None) -> None:
+        self._gcp_account_event_seen = True
+        self._apply_gcp_account(account)
+
+    def _apply_gcp_account(self, account: str | None) -> None:
+        try:
+            if account is not None:
+                self._set_gcp_signed_in(account)
+            else:
+                self._set_gcp_signed_out()
+        except RuntimeError:
+            pass  # widget torn down, signal still connected
 
     def _do_gcp_sign_out(self) -> None:
         async_utils.run_in_background(
             gcp_auth.sign_out,
-            on_result=lambda _: self._set_gcp_signed_out(),
+            on_result=lambda _: auth_events.account_changed.emit(None),
             on_error=self._on_gcp_auth_error,
         )
 
     def _set_gcp_signed_in(self, account: str) -> None:
         self._gcp_signed_in = True
-        self._gcp_sign_in_button.hide()
         self._refresh_gcp_projects()
 
     def _set_gcp_signed_out(self) -> None:
         self._gcp_signed_in = False
         self._gcp_projects = []
         self._gcp_projects_table.setRowCount(0)
-        self._gcp_projects_status_label.setText("Sign in with Google to browse GCP projects.")
-        self._gcp_sign_in_button.setEnabled(True)
-        self._gcp_sign_in_button.show()
+        self._gcp_projects_status_label.setText(
+            "Not signed in to gcloud — sign in from Settings → Integrations → gcloud "
+            "to browse GCP projects."
+        )
         self._on_search_text_changed(self._search_box.text())
 
     def _on_gcp_auth_error(self, error: Exception) -> None:
         try:
-            self._gcp_sign_in_button.setEnabled(True)
             QMessageBox.warning(self, "gcloud auth failed", str(error))
         except RuntimeError:
             pass  # widget torn down mid-flight
@@ -788,6 +790,8 @@ class IdentityManagementView(QWidget):
 
     def _populate_gcp_projects(self, projects: list[GcpProject]) -> None:
         try:
+            if not self._gcp_signed_in:
+                return  # signed out while the list was loading
             self._gcp_projects = projects
             self._gcp_projects_status_label.setText("" if projects else "No projects found.")
             self._gcp_projects_table.setRowCount(len(projects))
