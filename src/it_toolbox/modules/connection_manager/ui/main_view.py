@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QInputDialog,
     QLineEdit,
+    QMainWindow,
     QMenu,
     QMessageBox,
     QTabWidget,
@@ -124,9 +125,10 @@ _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
 
 
 def _instance_supports_password_reset(instance: Instance) -> bool:
-    """gcp_client.reset_windows_password() calls Compute Engine's
-    resetWindowsPassword API, which only exists for Windows instances —
-    it 404s against a Linux one. Gate the "Set Password…" menu item on
+    """gcp_client.reset_windows_password() works by asking the Windows
+    guest agent inside the VM to (re)create the account, so it only means
+    something for a Windows instance — against a Linux one the request
+    would just never be answered. Gate the "Set Password…" menu item on
     the same os_hint used to pick RDP/SSH defaults elsewhere
     (_resolve_double_click_kind) rather than always offering an action
     that's certain to fail for a known-Linux VM. An instance with no
@@ -1366,15 +1368,48 @@ class ConnectionManagerView(QWidget):
             return
         username = username.strip()
 
+        # The reset is a round trip through the guest agent inside the VM
+        # and can take a minute or more, so say so rather than looking hung.
+        previous_status = self._show_status(
+            f"Resetting the password for {username} on {instance.name} — this can take a minute…"
+        )
         async_utils.run_in_background(
             lambda: gcp_client.reset_windows_password(
                 gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name, username
             ),
-            on_result=lambda credential: self._on_password_reset(instance, credential),
-            on_error=self._on_instance_action_error,
+            on_result=lambda credential: self._on_password_reset(instance, credential, previous_status),
+            on_error=lambda error: self._on_password_reset_failed(error, previous_status),
         )
 
-    def _on_password_reset(self, instance: Instance, credential: tuple[str, str]) -> None:
+    def _show_status(self, message: str) -> str | None:
+        """Shows `message` in the main window's status bar and returns what
+        it replaced (None when there's no main window, e.g. standalone)."""
+        window = self.window()
+        if not isinstance(window, QMainWindow):
+            return None
+        status_bar = window.statusBar()
+        previous = status_bar.currentMessage()
+        status_bar.showMessage(message)
+        return previous
+
+    def _restore_status(self, previous: str | None) -> None:
+        if previous is None:
+            return
+        try:
+            window = self.window()
+            if isinstance(window, QMainWindow):
+                window.statusBar().showMessage(previous)
+        except RuntimeError:
+            pass  # window torn down before the reset finished
+
+    def _on_password_reset_failed(self, error: Exception, previous_status: str | None) -> None:
+        self._restore_status(previous_status)
+        self._on_instance_action_error(error)
+
+    def _on_password_reset(
+        self, instance: Instance, credential: tuple[str, str], previous_status: str | None = None
+    ) -> None:
+        self._restore_status(previous_status)
         username, password = credential
         QMessageBox.information(
             self,
