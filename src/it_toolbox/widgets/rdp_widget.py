@@ -14,12 +14,17 @@ clamped, for clicks that land in the letterbox bars) from widget-space
 to the remote desktop's native resolution before being sent.
 """
 
+import logging
+
 from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QWidget
 
+from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
+
+logger = logging.getLogger(__name__)
 
 _BUTTON_NAMES = {
     Qt.MouseButton.LeftButton: "left",
@@ -46,6 +51,7 @@ class RdpWidget(QWidget):
         password: str,
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
+        keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -78,7 +84,9 @@ class RdpWidget(QWidget):
         self._resize_debounce.setInterval(250)
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
-        self._worker = RdpSessionWorker(host, port, username, password, domain, desktop_size)
+        self._worker = RdpSessionWorker(
+            host, port, username, password, domain, desktop_size, keyboard_layout
+        )
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
         self._worker.signals.error.connect(self._on_error)
@@ -274,12 +282,33 @@ class RdpWidget(QWidget):
 
     def _forward_key_event(self, event, down: bool) -> None:
         key = Qt.Key(event.key())
+        modifiers = event.modifiers()
+
+        # REVERTED: routing printable keys through send_key_unicode (RDP's
+        # "Unicode" keyboard input, which Windows synthesizes as a
+        # VK_PACKET key event) broke typing in PowerShell/cmd *entirely* --
+        # not just Shift+symbol. Windows console input is built around real
+        # scancode events; VK_PACKET is a documented weak spot for raw
+        # console input specifically (unlike GUI controls, which handle it
+        # fine via WM_CHAR). So scancode has to stay the primary path for
+        # everything with a SCANCODES entry, unicode only as the true
+        # fallback for characters with no dedicated Qt key constant at all
+        # -- back to this file's original shape. The actual Shift+symbol-
+        # in-console bug (confirmed real, and still open) needs a different
+        # fix than swapping the transport.
         scancode = SCANCODES.get(key)
         if scancode is not None:
             code, extended = scancode
+            logger.debug(
+                "key %s modifiers=%s -> scancode=0x%02X extended=%s down=%s",
+                key, modifiers, code, extended, down,
+            )
             self._worker.send_key_scancode(code, extended, down)
             return
         text = event.text()
         for char in text:
             if char.isprintable():
+                logger.debug(
+                    "key %s modifiers=%s -> unicode=%r down=%s", key, modifiers, char, down
+                )
                 self._worker.send_key_unicode(ord(char), down)

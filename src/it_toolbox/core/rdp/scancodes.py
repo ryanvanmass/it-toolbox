@@ -112,4 +112,38 @@ SCANCODES: dict[Qt.Key, tuple[int, bool]] = {
     Qt.Key.Key_Right: (0x4D, True),
     Qt.Key.Key_Up: (0x48, True),
     Qt.Key.Key_Down: (0x50, True),
+    # Shift+symbol keys (Shift+; -> ":", Shift+1 -> "!", ...) -- Qt (at
+    # least on Windows) reports these as their own distinct Key_* constants,
+    # not as the unshifted key with a Shift modifier, confirmed from a real
+    # live capture (IT_TOOLBOX_LOG_LEVEL=DEBUG showed Key_Colon/Key_QuoteDbl/
+    # Key_Exclam/etc., not Key_Semicolon/Key_Apostrophe/Key_1). With no
+    # entry here they fell through to the send_key_unicode() fallback below
+    # -- fine in a GUI text field, but confirmed broken in a Windows console
+    # (PowerShell/cmd): Windows synthesizes RDP's Unicode keyboard input as
+    # a VK_PACKET key event, which raw console input doesn't reliably treat
+    # as a real keystroke. Mapped to the same scancode as the physical
+    # (unshifted) key instead, since Shift's own press/release is already
+    # sent as its own separate scancode event -- the exact mechanism that
+    # already works correctly for plain letters and unshifted symbols.
+    Qt.Key.Key_Exclam: (0x02, False),  # Shift+1
+    Qt.Key.Key_At: (0x03, False),  # Shift+2
+    Qt.Key.Key_NumberSign: (0x04, False),  # Shift+3
+    Qt.Key.Key_Dollar: (0x05, False),  # Shift+4
+    Qt.Key.Key_Percent: (0x06, False),  # Shift+5
+    Qt.Key.Key_AsciiCircum: (0x07, False),  # Shift+6
+    Qt.Key.Key_Ampersand: (0x08, False),  # Shift+7
+    Qt.Key.Key_Asterisk: (0x09, False),  # Shift+8
+    Qt.Key.Key_ParenLeft: (0x0A, False),  # Shift+9
+    Qt.Key.Key_ParenRight: (0x0B, False),  # Shift+0
+    Qt.Key.Key_Underscore: (0x0C, False),  # Shift+-
+    Qt.Key.Key_Plus: (0x0D, False),  # Shift+=
+    Qt.Key.Key_BraceLeft: (0x1A, False),  # Shift+[
+    Qt.Key.Key_BraceRight: (0x1B, False),  # Shift+]
+    Qt.Key.Key_Colon: (0x27, False),  # Shift+;
+    Qt.Key.Key_QuoteDbl: (0x28, False),  # Shift+'
+    Qt.Key.Key_AsciiTilde: (0x29, False),  # Shift+`
+    Qt.Key.Key_Bar: (0x2B, False),  # Shift+\
+    Qt.Key.Key_Less: (0x33, False),  # Shift+,
+    Qt.Key.Key_Greater: (0x34, False),  # Shift+.
+    Qt.Key.Key_Question: (0x35, False),  # Shift+/
 }

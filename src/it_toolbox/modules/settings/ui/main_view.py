@@ -1,5 +1,23 @@
-"""App-wide Settings page — a single scrollable page, not tab/session-based
-like the other modules, so it never touches the shared session-tab pane.
+"""App-wide Settings page — categorized (not tab/session-based like the
+other modules, so it never touches the shared session-tab pane). A
+category list (General/Integrations/Remote Desktop/Terminal) selects
+which per-category scrollable page shows in the main content area,
+instead of one long flat scroll through all eleven sections at once --
+the same categorization idea app.py's own top-level module list already
+uses, one level down.
+
+The category list itself lives in the app's *own* sidebar column (see
+sidebar_widget below and SettingsModule.create_sidebar_widget()), not in
+this view's own layout -- matching every other module with its own
+navigation (Connection Manager's sidebar_tree, Identity Management's
+sidebar_widget, ...) instead of bundling nav + content into one
+QSplitter the way an earlier version of this page did. It's a
+QTreeWidget used flat (no children), not a QListWidget, purely for the
+free "Categories" header row -- matches every other module's sidebar
+widget (Connection Manager's "Connections", Cloud Storage's "Remotes",
+Identity Management's "Providers", Shell Launcher's "Shells"), giving
+this list the exact same section-header look as the rest of the app
+instead of a QListWidget with no header concept at all.
 """
 
 import os
@@ -7,15 +25,23 @@ import platform
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QComboBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -23,9 +49,17 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
-from it_toolbox.modules.connection_manager import qemu_client
+from it_toolbox.core.auth.auth_events import auth_events
+from it_toolbox.modules.connection_manager import (
+    glinet_client,
+    qemu_client,
+    qemu_provisioning,
+)
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
-from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
+from it_toolbox.widgets.rclone_location_picker import (
+    clear_rclone_path,
+    prompt_for_rclone_path,
+)
 
 # FreeRDP DLL loading happens as an import-time side effect in
 # core/rdp/freerdp_client.py (raises OSError there if the libraries
@@ -40,6 +74,21 @@ except (ImportError, OSError):
 
 _FREERDP_FETCH_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "fetch_freerdp_windows.ps1"
 _FREERDP_DEST_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
+
+
+class _DownloadProgressSignal(QObject):
+    """update_checker.download_and_install_windows_update's on_progress
+    runs on a background thread -- a QObject's Signal is the standard
+    safe way to get that back to the main thread (Qt auto-queues
+    delivery across threads), the same underlying mechanism
+    async_utils._WorkerSignals already relies on for on_result/on_error.
+    A tiny one-off QObject here rather than a change to the shared
+    run_in_background helper, since progress reporting is specific to
+    this one call site, not a general capability every background task
+    needs.
+    """
+
+    progress = Signal(int, int)  # bytes_downloaded, total_bytes (0 if unknown)
 
 # (dropdown label, stored value) — None means "match window size", the
 # default. See settings.load_default_rdp_resolution()'s docstring for why
@@ -61,30 +110,134 @@ DOUBLE_CLICK_ACTION_PRESETS: list[tuple[str, str]] = [
     ("SSH", "ssh"),
 ]
 
+# (dropdown label, stored value) — None means the default monospace size
+# (TerminalWidget leaves the font's point size unset). See
+# settings.load_terminal_font_size()'s docstring.
+TERMINAL_FONT_SIZE_PRESETS: list[tuple[str, int | None]] = [
+    ("Default", None),
+    ("10", 10),
+    ("12", 12),
+    ("14", 14),
+    ("16", 16),
+    ("18", 18),
+    ("20", 20),
+]
+
+# (dropdown label, stored value) — the Windows keyboard layout ID declared
+# to the RDP server (see settings.load_rdp_keyboard_layout()'s docstring).
+# The *server* needs the declared layout actually installed to interpret
+# scancodes with it, so this is only worth changing away from English (US)
+# when a specific target VM doesn't have that layout available -- not an
+# attempt to cover every layout in existence.
+RDP_KEYBOARD_LAYOUT_PRESETS: list[tuple[str, int]] = [
+    ("English (US)", 0x0409),
+    ("English (UK)", 0x0809),
+    ("French", 0x040C),
+    ("German", 0x0407),
+    ("Spanish", 0x040A),
+    ("Italian", 0x0410),
+    ("Portuguese (Brazil)", 0x0416),
+    ("Dutch", 0x0413),
+    ("Swedish", 0x041D),
+    ("Japanese", 0x0411),
+]
+
 
 class SettingsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
+        # Each _build_x_section() below is unchanged from before this
+        # reorganization -- still a self-contained QGroupBox wiring its own
+        # widgets/signals onto self._foo attributes, same as ever. All that
+        # changed is *where* they land: grouped onto one of four category
+        # pages instead of a single eleven-section scroll. Grouping (not
+        # the individual sections' own content) was the actual usability
+        # problem -- rclone/gcloud/JumpCloud/GCP SSH key/QEMU are all "is
+        # this external tool set up", RDP/FreeRDP are all "how embedded RDP
+        # behaves", etc., but nothing distinguished them from each other or
+        # from a one-off like "Double-Click Action" in the old flat list.
+        categories: list[tuple[str, list[QGroupBox]]] = [
+            ("General", [self._build_updates_section(), self._build_double_click_action_section()]),
+            (
+                "Integrations",
+                [
+                    self._build_rclone_section(),
+                    self._build_gcloud_section(),
+                    self._build_gcp_ssh_key_section(),
+                    self._build_jumpcloud_section(),
+                    self._build_qemu_section(),
+                    self._build_glinet_section(),
+                ],
+            ),
+            (
+                "Remote Desktop",
+                [
+                    self._build_rdp_display_section(),
+                    self._build_rdp_keyboard_layout_section(),
+                    self._build_freerdp_section(),
+                ],
+            ),
+            ("Terminal", [self._build_terminal_font_size_section()]),
+        ]
+
+        # A QTreeWidget (not QListWidget), used flat with no children --
+        # matches every other module's sidebar widget (Connection
+        # Manager's "Connections" header, Cloud Storage's "Remotes",
+        # Identity Management's "Providers", Shell Launcher's "Shells")
+        # purely for the free, pixel-identical header row that gives this
+        # list the same section-header look as the rest of the app,
+        # rather than a plain QListWidget with no header concept at all.
+        self._category_tree = QTreeWidget()
+        self._category_tree.setHeaderLabels(["Categories"])
+        self._category_stack = QStackedWidget()
+        for name, sections in categories:
+            self._category_tree.addTopLevelItem(QTreeWidgetItem([name]))
+            self._category_stack.addWidget(self._build_category_page(sections))
+
+        self._category_tree.currentItemChanged.connect(self._on_category_changed)
+        self._category_tree.setCurrentItem(self._category_tree.topLevelItem(0))
+
+        # The category tree itself lives in the app's own sidebar column
+        # (see sidebar_widget below), not in this view's own layout --
+        # matches every other module (Connection Manager's sidebar_tree,
+        # Identity Management's sidebar_widget, ...), rather than this
+        # page alone bundling its nav + content into one QSplitter.
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(self._category_stack)
+
+    def _on_category_changed(
+        self, current: QTreeWidgetItem | None, previous: QTreeWidgetItem | None
+    ) -> None:
+        if current is not None:
+            self._category_stack.setCurrentIndex(self._category_tree.indexOfTopLevelItem(current))
+
+    @property
+    def sidebar_widget(self) -> QWidget:
+        """The category tree (General/Integrations/Remote Desktop/
+        Terminal), hosted in the app sidebar (nested under this module's
+        entry) rather than in this view's own layout -- see
+        SettingsModule.create_sidebar_widget().
+        """
+        return self._category_tree
+
+    @staticmethod
+    def _build_category_page(sections: list[QGroupBox]) -> QScrollArea:
+        """One category's own scrollable page -- each category can still
+        grow long (Integrations already has five sections) without
+        affecting any other category's height or requiring the whole page
+        to scroll past unrelated sections to reach it."""
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        for section in sections:
+            content_layout.addWidget(section)
+        content_layout.addStretch(1)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        outer_layout.addWidget(scroll_area)
-
-        content = QWidget()
-        self._content_layout = QVBoxLayout(content)
-        self._content_layout.addWidget(self._build_updates_section())
-        self._content_layout.addWidget(self._build_rclone_section())
-        self._content_layout.addWidget(self._build_gcloud_section())
-        self._content_layout.addWidget(self._build_jumpcloud_section())
-        self._content_layout.addWidget(self._build_qemu_section())
-        self._content_layout.addWidget(self._build_rdp_display_section())
-        self._content_layout.addWidget(self._build_double_click_action_section())
-        self._content_layout.addWidget(self._build_freerdp_section())
-        self._content_layout.addStretch(1)
         scroll_area.setWidget(content)
+        return scroll_area
 
     def _build_updates_section(self) -> QGroupBox:
         box = QGroupBox("App Updates")
@@ -98,24 +251,59 @@ class SettingsView(QWidget):
         self._update_link_button.clicked.connect(self._open_latest_release)
         self._latest_release_url: str | None = None
 
+        # Windows-only for now -- the Linux .deb/.rpm packages need root,
+        # with no one clean unprivileged elevation path the way Inno
+        # Setup's requireAdministrator manifest gives Windows (see
+        # update_checker.download_and_install_windows_update).
+        self._install_update_button = QPushButton("Download && Install")
+        self._install_update_button.hide()
+        self._install_update_button.clicked.connect(self._on_install_update_clicked)
+        self._pending_installer_url: str | None = None
+
         self._check_updates_button = QPushButton("Check for Updates")
         self._check_updates_button.clicked.connect(self._on_check_updates_clicked)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self._check_updates_button)
         button_row.addWidget(self._update_link_button)
+        button_row.addWidget(self._install_update_button)
         button_row.addStretch(1)
+
+        # Hidden outside an active download -- there's nothing else in
+        # this flow with meaningful progress to show (the silent install
+        # step that follows has no observable progress of its own, and is
+        # normally quick), so this only ever tracks the download.
+        self._update_download_progress_bar = QProgressBar()
+        self._update_download_progress_bar.hide()
+
+        # Off by default -- GitHub's /releases/latest (the plain,
+        # non-opted-in path in update_checker.get_latest_release) never
+        # returns a pre-release on its own, so this only changes anything
+        # once someone deliberately wants to beta-test.
+        self._include_prerelease_checkbox = QCheckBox("Include pre-release (beta) updates")
+        self._include_prerelease_checkbox.setChecked(settings.load_include_prerelease_updates())
+        self._include_prerelease_checkbox.checkStateChanged.connect(
+            self._on_include_prerelease_changed
+        )
 
         layout.addWidget(self._update_status_label)
         layout.addLayout(button_row)
+        layout.addWidget(self._update_download_progress_bar)
+        layout.addWidget(self._include_prerelease_checkbox)
         return box
+
+    def _on_include_prerelease_changed(self) -> None:
+        settings.save_include_prerelease_updates(self._include_prerelease_checkbox.isChecked())
 
     def _on_check_updates_clicked(self) -> None:
         self._check_updates_button.setEnabled(False)
         self._update_status_label.setText("Checking for updates…")
         self._update_link_button.hide()
+        self._install_update_button.hide()
+        self._update_download_progress_bar.hide()
+        include_prerelease = self._include_prerelease_checkbox.isChecked()
         run_in_background(
-            update_checker.get_latest_release,
+            lambda: update_checker.get_latest_release(include_prerelease=include_prerelease),
             on_result=self._on_latest_release_checked,
             on_error=self._on_check_updates_error,
         )
@@ -136,6 +324,9 @@ class SettingsView(QWidget):
             )
             self._latest_release_url = release.html_url
             self._update_link_button.show()
+            if platform.system() == "Windows" and release.windows_installer_url is not None:
+                self._pending_installer_url = release.windows_installer_url
+                self._install_update_button.show()
         else:
             self._update_status_label.setText(f"Up to date (v{installed_version})")
 
@@ -146,6 +337,86 @@ class SettingsView(QWidget):
     def _open_latest_release(self) -> None:
         if self._latest_release_url is not None:
             QDesktopServices.openUrl(QUrl(self._latest_release_url))
+
+    def _on_install_update_clicked(self) -> None:
+        if self._pending_installer_url is None:
+            return
+        choice = QMessageBox.question(
+            self,
+            "Install Update",
+            "IT Toolbox will close to install the update, then reopen. "
+            "Windows may ask you to approve the installer.\n\n"
+            "Continue?",
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+
+        self._check_updates_button.setEnabled(False)
+        self._update_link_button.setEnabled(False)
+        self._install_update_button.setEnabled(False)
+        self._update_status_label.setText("Downloading update…")
+        self._update_download_progress_bar.setRange(0, 0)  # indeterminate until a total is known
+        self._update_download_progress_bar.setValue(0)
+        self._update_download_progress_bar.show()
+        installer_url = self._pending_installer_url
+
+        # Kept alive on self, not just a local -- this QObject must
+        # outlive the background download for its signal to have anywhere
+        # to deliver to; a local variable would be eligible for GC as soon
+        # as this method returns, well before the download finishes.
+        self._update_download_progress_signal = _DownloadProgressSignal()
+        self._update_download_progress_signal.progress.connect(self._on_update_download_progress)
+        report_progress = self._update_download_progress_signal.progress.emit
+
+        run_in_background(
+            lambda: update_checker.download_and_install_windows_update(
+                installer_url, on_progress=report_progress
+            ),
+            on_result=self._on_update_installed,
+            on_error=self._on_update_install_error,
+        )
+
+    def _on_update_download_progress(self, downloaded: int, total: int) -> None:
+        downloaded_mb = downloaded / (1024 * 1024)
+        if total > 0:
+            self._update_download_progress_bar.setRange(0, total)
+            self._update_download_progress_bar.setValue(downloaded)
+            percent = downloaded * 100 // total
+            total_mb = total / (1024 * 1024)
+            self._update_status_label.setText(
+                f"Downloading update… {percent}% ({downloaded_mb:.1f} / {total_mb:.1f} MB)"
+            )
+        else:
+            # No Content-Length from the server -- indeterminate bar
+            # (already the state _on_install_update_clicked left it in),
+            # just keep the byte count moving.
+            self._update_status_label.setText(f"Downloading update… ({downloaded_mb:.1f} MB)")
+
+    def _on_update_installed(self, _result: None) -> None:
+        # The installer is now running detached, about to replace this
+        # very process's own files -- this process's only job left is to
+        # quit immediately and get out of its way (see
+        # download_and_install_windows_update's docstring for why it no
+        # longer waits around to relaunch the app itself; Inno Setup's
+        # own postinstall [Run] entry does that instead once it's done).
+        # Split into its own method (rather than calling
+        # QApplication.instance().quit() directly here) so tests can
+        # monkeypatch this one instance's behavior instead of the real,
+        # test-session-wide QApplication singleton that pytest-qt's own
+        # internals also depend on.
+        self._quit_application()
+
+    def _quit_application(self) -> None:
+        QApplication.instance().quit()
+
+    def _on_update_install_error(self, error: Exception) -> None:
+        self._check_updates_button.setEnabled(True)
+        self._update_link_button.setEnabled(True)
+        self._install_update_button.setEnabled(True)
+        self._update_download_progress_bar.hide()
+        self._update_status_label.setText(
+            f"Update install failed: {error} — you can still install it manually via View Release."
+        )
 
     # -- rclone -----------------------------------------------------------
 
@@ -240,6 +511,11 @@ class SettingsView(QWidget):
         layout.addWidget(self._gcloud_status_label)
         layout.addLayout(button_row)
 
+        # Sign-in/out happens here (Connection Manager has no sign-in
+        # button of its own) — but Connection Manager's tree menu can
+        # still sign out, so keep this status in sync with it too.
+        auth_events.account_changed.connect(self._set_gcloud_account)
+
         if gcp_auth.is_available():
             self._gcloud_status_label.setText("Checking sign-in status…")
             self._gcloud_sign_in_button.setEnabled(False)
@@ -271,7 +547,7 @@ class SettingsView(QWidget):
         self._gcloud_status_label.setText("Signing in…")
         run_in_background(
             gcp_auth.sign_in,
-            on_result=self._set_gcloud_account,
+            on_result=auth_events.account_changed.emit,
             on_error=self._on_gcloud_error,
         )
 
@@ -280,7 +556,7 @@ class SettingsView(QWidget):
         self._gcloud_status_label.setText("Signing out…")
         run_in_background(
             gcp_auth.sign_out,
-            on_result=lambda _: self._set_gcloud_account(None),
+            on_result=lambda _: auth_events.account_changed.emit(None),
             on_error=self._on_gcloud_error,
         )
 
@@ -288,6 +564,62 @@ class SettingsView(QWidget):
         self._gcloud_sign_in_button.setEnabled(True)
         self._gcloud_sign_out_button.setEnabled(True)
         self._gcloud_status_label.setText(f"gcloud error: {error}")
+
+    # -- GCP SSH key ------------------------------------------------------------
+
+    def _build_gcp_ssh_key_section(self) -> QGroupBox:
+        box = QGroupBox("GCP SSH Key")
+        layout = QVBoxLayout(box)
+
+        self._gcp_ssh_key_status_label = QLabel()
+        self._gcp_ssh_key_status_label.setWordWrap(True)
+        layout.addWidget(self._gcp_ssh_key_status_label)
+
+        self._gcp_ssh_key_button = QPushButton()
+        self._gcp_ssh_key_button.clicked.connect(self._on_set_gcp_ssh_key_clicked)
+
+        self._gcp_ssh_key_clear_button = QPushButton("Use Default (~/.ssh)")
+        self._gcp_ssh_key_clear_button.clicked.connect(self._on_clear_gcp_ssh_key_clicked)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self._gcp_ssh_key_button)
+        button_row.addWidget(self._gcp_ssh_key_clear_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._refresh_gcp_ssh_key_status()
+        return box
+
+    def _refresh_gcp_ssh_key_status(self) -> None:
+        override = settings.load_gcp_ssh_key_path()
+        public_key = settings.resolve_gcp_ssh_public_key()
+        if public_key is not None:
+            source = f"configured key ({override})" if override else "default (~/.ssh)"
+            preview = public_key if len(public_key) <= 60 else f"{public_key[:60]}…"
+            self._gcp_ssh_key_status_label.setText(
+                f"Prefilled in Connection Manager's \"Upload Public Key…\" action, from "
+                f"the {source}:\n{preview}"
+            )
+        else:
+            self._gcp_ssh_key_status_label.setText(
+                "No SSH public key found — set one below, or place one at "
+                "~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub."
+            )
+        self._gcp_ssh_key_button.setText("Change Key…" if override else "Set Key…")
+        self._gcp_ssh_key_clear_button.setVisible(override is not None)
+
+    def _on_set_gcp_ssh_key_clicked(self) -> None:
+        current = settings.load_gcp_ssh_key_path()
+        start_dir = str(current) if current else str(Path.home() / ".ssh")
+        path, _ = QFileDialog.getOpenFileName(self, "Locate your SSH public key", start_dir)
+        if not path:
+            return
+        settings.save_gcp_ssh_key_path(path)
+        self._refresh_gcp_ssh_key_status()
+
+    def _on_clear_gcp_ssh_key_clicked(self) -> None:
+        settings.save_gcp_ssh_key_path(None)
+        self._refresh_gcp_ssh_key_status()
 
     # -- JumpCloud ------------------------------------------------------------
 
@@ -346,6 +678,44 @@ class SettingsView(QWidget):
             )
         layout.addWidget(self._qemu_status_label)
 
+        # Separate from virsh -- deploying a new VM ("Deploy VM…") needs
+        # virt-install specifically, which a virsh-only install (just
+        # libvirt-clients, no virt-install/virtinst) won't have, even
+        # though VM discovery/power control above works fine without it.
+        if qemu_provisioning.is_available():
+            self._virt_install_status_label = QLabel(
+                "virt-install found — deploying new VMs is available."
+            )
+        else:
+            self._virt_install_status_label = QLabel(
+                "virt-install not found — VM discovery/power control above still work, "
+                "but \"Deploy VM…\" also needs it:\n"
+                "  Debian/Ubuntu: sudo apt install virtinst\n"
+                "  Fedora/RHEL:   sudo dnf install virt-install"
+            )
+        layout.addWidget(self._virt_install_status_label)
+
+        return box
+
+    # -- GL.iNet --------------------------------------------------------------
+
+    def _build_glinet_section(self) -> QGroupBox:
+        box = QGroupBox("GL.iNet")
+        layout = QVBoxLayout(box)
+
+        if glinet_client.is_available():
+            self._glinet_status_label = QLabel(
+                "python-glinet found — GL.iNet router dashboards are available."
+            )
+        else:
+            self._glinet_status_label = QLabel(
+                "python-glinet not installed — GL.iNet dashboards won't work until it's "
+                "installed (pip install python-glinet; GPLv3-licensed, so it isn't bundled "
+                "with it-toolbox — see docs/glinet-dashboard-status.md)."
+            )
+            self._glinet_status_label.setWordWrap(True)
+        layout.addWidget(self._glinet_status_label)
+
         return box
 
     # -- RDP display --------------------------------------------------------
@@ -381,6 +751,77 @@ class SettingsView(QWidget):
     def _on_rdp_resolution_changed(self, index: int) -> None:
         _, resolution = RDP_RESOLUTION_PRESETS[index]
         settings.save_default_rdp_resolution(resolution)
+
+    # -- RDP keyboard layout --------------------------------------------------
+
+    def _build_rdp_keyboard_layout_section(self) -> QGroupBox:
+        box = QGroupBox("RDP Keyboard Layout")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Keyboard layout declared to the RDP server for embedded RDP sessions. "
+            "English (US) works for most VMs, but the server needs that layout "
+            "actually installed to interpret keystrokes with it — a non-English "
+            "Windows image may not have it, which shows up as Shift+punctuation "
+            "(e.g. \" or :) typing the wrong character or nothing at all. Change "
+            "this only if that happens on a specific VM."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._rdp_keyboard_layout_combo = QComboBox()
+        for label, _ in RDP_KEYBOARD_LAYOUT_PRESETS:
+            self._rdp_keyboard_layout_combo.addItem(label)
+
+        current = settings.load_rdp_keyboard_layout()
+        for index, (_, value) in enumerate(RDP_KEYBOARD_LAYOUT_PRESETS):
+            if value == current:
+                self._rdp_keyboard_layout_combo.setCurrentIndex(index)
+                break
+
+        self._rdp_keyboard_layout_combo.currentIndexChanged.connect(
+            self._on_rdp_keyboard_layout_changed
+        )
+        layout.addWidget(self._rdp_keyboard_layout_combo)
+        return box
+
+    def _on_rdp_keyboard_layout_changed(self, index: int) -> None:
+        _, layout_id = RDP_KEYBOARD_LAYOUT_PRESETS[index]
+        settings.save_rdp_keyboard_layout(layout_id)
+
+    # -- Terminal font size ---------------------------------------------------
+
+    def _build_terminal_font_size_section(self) -> QGroupBox:
+        box = QGroupBox("Terminal Font Size")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Font size for embedded terminal sessions — both Shell Launcher and "
+            "Connection Manager's Connect via SSH. Applies to new sessions; already-open "
+            "terminal tabs keep the size they were opened with."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._terminal_font_size_combo = QComboBox()
+        for label, _ in TERMINAL_FONT_SIZE_PRESETS:
+            self._terminal_font_size_combo.addItem(label)
+
+        current = settings.load_terminal_font_size()
+        for index, (_, value) in enumerate(TERMINAL_FONT_SIZE_PRESETS):
+            if value == current:
+                self._terminal_font_size_combo.setCurrentIndex(index)
+                break
+
+        self._terminal_font_size_combo.currentIndexChanged.connect(
+            self._on_terminal_font_size_changed
+        )
+        layout.addWidget(self._terminal_font_size_combo)
+        return box
+
+    def _on_terminal_font_size_changed(self, index: int) -> None:
+        _, size = TERMINAL_FONT_SIZE_PRESETS[index]
+        settings.save_terminal_font_size(size)
 
     # -- Double-click action --------------------------------------------------
 

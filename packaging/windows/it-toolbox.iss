@@ -24,14 +24,32 @@ AppPublisher=IT Toolbox
 AppPublisherURL=https://github.com/ryanvanmass/it-toolbox
 DefaultDirName={autopf}\IT Toolbox
 DefaultGroupName=IT Toolbox
-UninstallDisplayIcon={app}\Scripts\{#MyAppExeName}
+UninstallDisplayIcon={app}\it-toolbox.ico
 OutputDir=dist\packages
 OutputBaseFilename=it-toolbox-{#MyAppVersion}-setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
-SetupIconFile=packaging\windows\icons\it-toolbox.ico
+SetupIconFile=src\it_toolbox\resources\icons\it-toolbox.ico
+
+[InstallDelete]
+; Every release's build\pyembed tree is a complete, freshly-regenerated
+; Python environment (build.ps1 wipes and rebuilds it from scratch every
+; time), never an incremental patch onto a prior one -- mirrors
+; packaging/linux/build.sh's own `sudo rm -rf "$PREFIX"` before
+; rebuilding. Without this, [Files] below only ever *adds*/overwrites
+; files present in the new payload; it never removes anything an older
+; version left behind that the new one doesn't have. Confirmed
+; concretely: pip creates a *versioned* dist-info folder per install
+; (it_toolbox-X.Y.Zb.dist-info), so upgrading in place left both the old
+; and new version's dist-info sitting side by side in site-packages --
+; importlib.metadata.version() (core/update_checker.py's
+; get_installed_version(), shown in Settings and used to decide whether
+; an update is even available) has no guaranteed preference for the
+; newer one when duplicates exist, reproducing exactly "the app still
+; shows the previous version after updating."
+Type: filesandordirs; Name: "{app}"
 
 [Files]
 ; The embeddable Python distribution, with it-toolbox and its
@@ -39,10 +57,38 @@ SetupIconFile=packaging\windows\icons\it-toolbox.ico
 ; Not a frozen/PyInstaller-style single binary: still a plain,
 ; unmodified interpreter running normal .py files.
 Source: "build\pyembed\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+; Not referenced by [Files] anywhere above -- pip's own console/gui-script
+; launcher stubs don't carry a custom icon, and {app}\Scripts\it-toolbox.exe
+; (see the [Icons]/[Run] comment below for why that launcher is avoided
+; entirely) isn't used for anything else that would've brought this in.
+; The single canonical copy lives inside the package itself so the
+; *running app* can also load it at runtime for its own window icon
+; (app.py) -- not duplicated, just reused for this installer too.
+Source: "src\it_toolbox\resources\icons\it-toolbox.ico"; DestDir: "{app}"
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\Scripts\{#MyAppExeName}"; IconFilename: "{app}\Scripts\{#MyAppExeName}"
+; Deliberately {app}\pythonw.exe -m it_toolbox, not
+; {app}\Scripts\{#MyAppExeName} (the [project.gui-scripts] launcher pip
+; generated at build time) -- that launcher is a small stub with the
+; *absolute* interpreter path used at `pip install` time hardcoded
+; inside it (pip/distlib's console/gui-script format is not
+; relocatable). build.ps1 installs into build\pyembed on the CI runner,
+; then this installer copies that whole tree to wherever the user
+; chooses (this .iss doesn't disable the destination-picker page, so
+; that's not even always the same DefaultDirName) -- the stub keeps
+; pointing at the original, now-nonexistent CI path, which is exactly
+; what "Unable to create process using ...build\pyembed\pythonw.exe"
+; turned out to mean on a real install. `-m it_toolbox` has no baked-in
+; path at all: it resolves the module fresh, every launch, against
+; whatever python(w).exe actually ran it.
+Name: "{group}\{#MyAppName}"; Filename: "{app}\pythonw.exe"; Parameters: "-m it_toolbox"; IconFilename: "{app}\it-toolbox.ico"; WorkingDir: "{app}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\Scripts\{#MyAppExeName}"; Description: "Launch IT Toolbox"; Flags: nowait postinstall skipifsilent
+; Deliberately no skipifsilent: the in-app updater (see
+; core/update_checker.py's download_and_install_windows_update) relies on
+; this to relaunch the app after a /SILENT install, since the process
+; that ran the update can't safely do it itself anymore -- see that
+; function's docstring for why. A plain interactive install still shows
+; this as the usual "Launch IT Toolbox" finish-page checkbox.
+Filename: "{app}\pythonw.exe"; Parameters: "-m it_toolbox"; Description: "Launch IT Toolbox"; Flags: nowait postinstall

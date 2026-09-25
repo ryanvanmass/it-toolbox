@@ -1,10 +1,15 @@
+import contextlib
+
 import pytest
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QTreeWidgetItem, QWidget
+from PySide6.QtWidgets import QDialog, QMainWindow, QPushButton, QTreeWidgetItem, QWidget
 
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager.models import (
+    SSH_PORT,
     GcpProject,
     GcsBucket,
+    GlinetHost,
     Instance,
     ManualConnection,
     QemuHost,
@@ -26,29 +31,59 @@ class _FakeTunnel:
         self.stopped = True
 
 
+class _FakePasswordResetDialog:
+    """Stands in for the modal PasswordResetDialog (an unstubbed exec() would
+    block headless) and records what it would have shown, the plaintext
+    password included, which the real dialog masks."""
+
+    shown: list[dict] = []
+
+    def __init__(self, instance_name, username, password, note="", parent=None):
+        self.args = {
+            "instance_name": instance_name,
+            "username": username,
+            "password": password,
+            "note": note,
+        }
+
+    def exec(self):
+        type(self).shown.append(self.args)
+        return QDialog.DialogCode.Accepted
+
+
 def _make_view(
     qtbot,
     monkeypatch,
     qemu_hosts=(),
     manual_connections=(),
+    glinet_hosts=(),
     instances=(),
     buckets=(),
     qemu_available=True,
+    glinet_available=True,
+    instance_ssh_username_overrides=None,
+    instance_rdp_credentials=None,
 ):
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
     )
-    # The QEMU root only appears when virsh is installed — default True
-    # here so existing tests (written before this gating existed) don't
-    # depend on whether this sandbox happens to have virsh on PATH.
+    # The QEMU/GL.iNet roots only appear when their respective dependency
+    # (virsh / python-glinet) is available — default True here so existing
+    # tests (written before this gating existed) don't depend on whether
+    # this sandbox happens to have either installed.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.qemu_client.is_available",
         lambda: qemu_available,
     )
-    # QEMU hosts and manual connections are loaded unconditionally
-    # (independent of GCP sign-in) — stub both out so tests don't depend
-    # on this machine's real qemu_hosts.json/manual_connections.json.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.glinet_client.is_available",
+        lambda: glinet_available,
+    )
+    # QEMU hosts, manual connections, and GL.iNet hosts are loaded
+    # unconditionally (independent of GCP sign-in) — stub all three out so
+    # tests don't depend on this machine's real qemu_hosts.json/
+    # manual_connections.json/glinet_hosts.json.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.settings.load_qemu_hosts",
         lambda: list(qemu_hosts),
@@ -56,6 +91,54 @@ def _make_view(
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.settings.load_manual_connections",
         lambda: list(manual_connections),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings.load_glinet_hosts",
+        lambda: list(glinet_hosts),
+    )
+    # Same hermeticity reasoning as above — stub both the load (so a
+    # stale real instance_ssh_username_overrides.json on this machine
+    # can't leak into a test) and the save (so a test exercising the
+    # Upload Public Key flow doesn't write one for real).
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "load_instance_ssh_username_overrides",
+        lambda: dict(instance_ssh_username_overrides or {}),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "save_instance_ssh_username_overrides",
+        lambda overrides: None,
+    )
+    # Per-VM RDP logins: same hermeticity reasoning -- no real data dir. The
+    # password "encryption" is a reversible stand-in so these tests need no
+    # SSH key on the machine running them; the real age round trip is
+    # covered in tests/core/test_settings.py.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "load_instance_rdp_credentials",
+        lambda: dict(instance_rdp_credentials or {}),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "save_instance_rdp_credentials",
+        lambda credentials: None,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "encrypt_instance_rdp_password",
+        lambda password: b"enc:" + password.encode(),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "decrypt_instance_rdp_password",
+        lambda encrypted, passphrase=None: encrypted.removeprefix(b"enc:").decode(),
+    )
+    # Set Password…'s result dialog is modal: record it instead of opening it.
+    _FakePasswordResetDialog.shown = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.PasswordResetDialog",
+        _FakePasswordResetDialog,
     )
     # _apply_project_selection now pre-loads every project's VMs/buckets
     # in the background immediately (not just on first expand) — stub
@@ -86,9 +169,10 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
 
     view._apply_project_selection({"p1"})
 
-    # GCP, QEMU, and Manual are independent top-level roots (QEMU/Manual
-    # lists are empty here, but the roots themselves are always present).
-    assert view._tree.topLevelItemCount() == 3
+    # GCP, QEMU, Manual, and GL.iNet are independent top-level roots
+    # (QEMU/Manual/GL.iNet lists are empty here, but the roots themselves
+    # are always present).
+    assert view._tree.topLevelItemCount() == 4
     gcp_category = view._tree.topLevelItem(0)
     assert gcp_category.text(0) == "GCP"
     assert gcp_category.isExpanded()
@@ -101,6 +185,9 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
 
     manual_category = view._tree.topLevelItem(2)
     assert manual_category.text(0) == "Manual"
+
+    glinet_category = view._tree.topLevelItem(3)
+    assert glinet_category.text(0) == "GL.iNet"
 
 
 def test_projects_are_listed_alphabetically_case_insensitive(qtbot, monkeypatch):
@@ -438,20 +525,88 @@ def test_set_instance_password_shows_returned_credentials(qtbot, monkeypatch):
         lambda creds, project_id, zone, name, username: calls.append(username)
         or ("alice", "s3cr3t!"),
     )
-    shown = []
-    monkeypatch.setattr(
-        main_view_module.QMessageBox,
-        "information",
-        lambda parent, title, text: shown.append((title, text)),
-    )
 
     view._on_set_instance_password_clicked(instance)
 
-    qtbot.waitUntil(lambda: len(shown) == 1, timeout=2000)
+    qtbot.waitUntil(lambda: len(_FakePasswordResetDialog.shown) == 1, timeout=2000)
     assert calls == ["alice"]
-    title, text = shown[0]
-    assert "alice" in text
-    assert "s3cr3t!" in text
+    (dialog,) = _FakePasswordResetDialog.shown
+    assert dialog["instance_name"] == "vm-1"
+    assert dialog["username"] == "alice"
+    assert dialog["password"] == "s3cr3t!"
+
+
+@contextlib.contextmanager
+def _in_main_window(qtbot, view):
+    """Hosts `view` in a QMainWindow whose status bar reads "Ready", as in the
+    real app. The window is given the view back on exit so only qtbot's own
+    registration of the view (see _make_view) ever deletes it."""
+    window = QMainWindow()
+    window.setCentralWidget(view)
+    qtbot.addWidget(window)
+    window.statusBar().showMessage("Ready")
+    try:
+        yield window
+    finally:
+        window.takeCentralWidget()
+
+
+def test_set_instance_password_shows_progress_in_the_status_bar_then_restores_it(qtbot, monkeypatch):
+    import threading
+
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: ("alice", True)
+    )
+    reset_may_finish = threading.Event()
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "reset_windows_password",
+        lambda creds, project_id, zone, name, username: (
+            reset_may_finish.wait(5),
+            ("alice", "s3cr3t!"),
+        )[1],
+    )
+    with _in_main_window(qtbot, view) as window:
+        view._on_set_instance_password_clicked(instance)
+
+        # The reset is a round trip through the guest agent and can take a
+        # minute — the user has to be told something is happening.
+        assert "Resetting the password for alice on vm-1" in window.statusBar().currentMessage()
+
+        reset_may_finish.set()
+        qtbot.waitUntil(lambda: window.statusBar().currentMessage() == "Ready", timeout=2000)
+
+
+def test_set_instance_password_failure_restores_the_status_and_shows_the_error(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: ("alice", True)
+    )
+
+    def failing_reset(creds, project_id, zone, name, username):
+        raise RuntimeError("the guest agent never answered")
+
+    monkeypatch.setattr(main_view_module.gcp_client, "reset_windows_password", failing_reset)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text: warnings.append((title, text)),
+    )
+
+    with _in_main_window(qtbot, view) as window:
+        view._on_set_instance_password_clicked(instance)
+
+        qtbot.waitUntil(lambda: len(warnings) == 1, timeout=2000)
+        assert "the guest agent never answered" in warnings[0][1]
+        assert window.statusBar().currentMessage() == "Ready"
 
 
 def test_double_clicking_a_bucket_opens_a_browser_tab(qtbot, monkeypatch):
@@ -527,6 +682,357 @@ def test_resolve_double_click_kind_windows_os_hint_never_asks(qtbot, monkeypatch
                          os_hint="windows")
 
     assert view._resolve_double_click_kind(instance) == "rdp"
+
+
+# -- Set Password: Windows-only (needs the Windows guest agent to answer) ----
+
+
+def test_instance_supports_password_reset_is_true_for_windows(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_password_reset,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="windows"
+    )
+
+    assert _instance_supports_password_reset(instance) is True
+
+
+def test_instance_supports_password_reset_is_false_for_linux(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_password_reset,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+
+    assert _instance_supports_password_reset(instance) is False
+
+
+def test_instance_supports_password_reset_is_true_when_os_hint_unknown(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_password_reset,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint=None
+    )
+
+    assert _instance_supports_password_reset(instance) is True
+
+
+# -- Upload Public Key: not offered for known-Windows instances -------------
+
+
+def test_instance_supports_ssh_key_upload_is_true_for_linux(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_ssh_key_upload,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+
+    assert _instance_supports_ssh_key_upload(instance) is True
+
+
+def test_instance_supports_ssh_key_upload_is_false_for_windows(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_ssh_key_upload,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="windows"
+    )
+
+    assert _instance_supports_ssh_key_upload(instance) is False
+
+
+def test_instance_supports_ssh_key_upload_is_true_when_os_hint_unknown(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        _instance_supports_ssh_key_upload,
+    )
+
+    instance = Instance(
+        name="vm", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint=None
+    )
+
+    assert _instance_supports_ssh_key_upload(instance) is True
+
+
+def test_upload_ssh_key_prompt_is_prefilled_with_default_username(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "alice")
+    prefill_seen = []
+
+    def fake_get_text(parent, title, label, mode, text=""):
+        prefill_seen.append(text)
+        return "", False  # cancel — this test only cares what it was prefilled with
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", fake_get_text)
+
+    view._on_upload_ssh_key_clicked(instance)
+
+    assert prefill_seen == ["alice"]
+
+
+def test_upload_ssh_key_public_key_prompt_is_prefilled_from_settings(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: None)
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "resolve_gcp_ssh_public_key",
+        lambda: "ssh-ed25519 AAAA alice@laptop",
+    )
+    prefills = []
+
+    def fake_get_text(parent, title, label, mode, text=""):
+        prefills.append(text)
+        return ("alice", True) if len(prefills) == 1 else ("", False)
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", fake_get_text)
+
+    view._on_upload_ssh_key_clicked(instance)
+
+    assert prefills == ["", "ssh-ed25519 AAAA alice@laptop"]
+
+
+def test_upload_ssh_key_cancel_at_username_does_not_call_the_api(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "add_ssh_key",
+        lambda creds, project_id, zone, name, username, public_key: calls.append(username),
+    )
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: ("someone", False)
+    )
+
+    view._on_upload_ssh_key_clicked(instance)
+
+    assert calls == []
+
+
+def test_upload_ssh_key_cancel_at_public_key_does_not_call_the_api(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "add_ssh_key",
+        lambda creds, project_id, zone, name, username, public_key: calls.append(username),
+    )
+    responses = iter([("alice", True), ("", False)])
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: next(responses)
+    )
+
+    view._on_upload_ssh_key_clicked(instance)
+
+    assert calls == []
+
+
+def test_upload_ssh_key_calls_the_api_and_shows_confirmation(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+
+    responses = iter([("alice", True), ("ssh-ed25519 AAAA alice@laptop", True)])
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: next(responses)
+    )
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "add_ssh_key",
+        lambda creds, project_id, zone, name, username, public_key: calls.append(
+            (project_id, zone, name, username, public_key)
+        ),
+    )
+    shown = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "information",
+        lambda parent, title, text: shown.append((title, text)),
+    )
+
+    view._on_upload_ssh_key_clicked(instance)
+
+    qtbot.waitUntil(lambda: len(shown) == 1, timeout=2000)
+    assert calls == [("p1", "us-central1-a", "vm-1", "alice", "ssh-ed25519 AAAA alice@laptop")]
+    title, text = shown[0]
+    assert "alice" in text
+    assert "vm-1" in text
+
+
+def test_upload_ssh_key_override_is_used_for_a_subsequent_ssh_connection(qtbot, monkeypatch):
+    # Uploading a key for an account other than the global default means
+    # the default likely has no access on this instance at all -- a
+    # following "Connect via SSH" should use the account we just granted
+    # access to, not silently try (and fail under) the unrelated default.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    connect_calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: connect_calls.append(kwargs))
+
+    view._start_session_from_instance(instance, "ssh")
+
+    assert connect_calls[0]["username"] == "alice"
+
+
+def test_upload_ssh_key_override_does_not_affect_rdp_connections(qtbot, monkeypatch):
+    # The override is SSH-specific (Upload Public Key only ever grants SSH
+    # access) -- an RDP connection to the same instance must still use the
+    # global default/prompt, not the unrelated Linux account.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="windows"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    view._on_ssh_key_uploaded(instance, "alice")  # simulate a prior override having been recorded
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", lambda *a, **k: ("ignored", True))
+
+    connect_calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: connect_calls.append(kwargs))
+
+    view._start_session_from_instance(instance, "rdp")
+
+    assert connect_calls[0]["username"] == "root"
+
+
+def test_upload_ssh_key_matching_the_default_username_creates_no_override(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "alice")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    assert view._instance_ssh_username_overrides == {}
+
+
+def test_upload_ssh_key_override_is_persisted_to_disk(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_ssh_username_overrides",
+        lambda overrides: saved.append(dict(overrides)),
+    )
+
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    assert saved == [{("p1", "us-central1-a", "vm-1"): "alice"}]
+
+
+def test_matching_username_upload_does_not_write_to_disk(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    instance = Instance(
+        name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="linux"
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "alice")
+    monkeypatch.setattr(main_view_module.QMessageBox, "information", lambda *a: None)
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_ssh_username_overrides",
+        lambda overrides: saved.append(overrides),
+    )
+
+    view._on_ssh_key_uploaded(instance, "alice")
+
+    assert saved == []
+
+
+def test_view_loads_persisted_ssh_username_overrides_on_startup(qtbot, monkeypatch):
+    stored = {("p1", "us-central1-a", "vm-1"): "alice"}
+
+    view = _make_view(qtbot, monkeypatch, instance_ssh_username_overrides=stored)
+
+    assert view._instance_ssh_username_overrides == stored
 
 
 def test_double_clicking_a_gcp_instance_starts_a_session_with_resolved_kind(qtbot, monkeypatch):
@@ -612,6 +1118,80 @@ def test_closing_a_bucket_browser_tab_just_removes_it(qtbot, monkeypatch):
 
     assert view._tabs.count() == 0
     assert view._active_sessions == {}  # not tracked as a session
+
+
+def test_view_has_no_sign_in_button(qtbot, monkeypatch):
+    # Signing in happens only in Settings — never from the main screen.
+    view = _make_view(qtbot, monkeypatch)
+
+    assert not hasattr(view, "_sign_in_button")
+    assert not [b for b in view.findChildren(QPushButton) if "gcloud" in b.text().lower()]
+
+
+def test_account_changed_signal_signs_in_and_loads_projects(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_client.list_projects",
+        lambda creds: [GcpProject(project_id="p1", display_name="Project One")],
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings.load_selected_project_ids",
+        lambda: {"p1"},
+    )
+    view = _make_view(qtbot, monkeypatch)
+
+    auth_events.account_changed.emit("me@example.com")
+
+    assert view._account == "me@example.com"
+    qtbot.waitUntil(
+        lambda: view._gcp_root_item is not None and view._gcp_root_item.childCount() == 1
+    )
+    assert view._gcp_root_item.child(0).text(0) == "Project One"
+
+
+def test_account_changed_to_none_signs_out(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    assert view._tree.topLevelItem(0).text(0) == "GCP"
+
+    auth_events.account_changed.emit(None)
+
+    assert view._account is None
+    assert view._all_projects == []
+    # Only the GCP root goes away — QEMU/Manual/GL.iNet don't depend on
+    # gcloud sign-in, so they must survive a sign-out (e.g. from Settings).
+    roots = [view._tree.topLevelItem(i).text(0) for i in range(view._tree.topLevelItemCount())]
+    assert roots == ["QEMU", "Manual", "GL.iNet"]
+
+
+def test_category_results_arriving_after_the_tree_was_cleared_are_dropped(qtbot, monkeypatch):
+    # A sign-out clears the tree while VM/bucket requests may still be in
+    # flight — their callbacks then get a deleted QTreeWidgetItem.
+    view = _make_view(qtbot, monkeypatch)
+    item = QTreeWidgetItem(["VMs"])
+    view._tree.addTopLevelItem(item)
+    view._tree.clear()
+
+    populated = []
+    view._on_category_loaded(item, lambda i, data: populated.append(data), [])
+    view._on_category_load_failed(item, RuntimeError("boom"))
+
+    assert populated == []
+
+
+def test_tree_sign_out_broadcasts_account_changed(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.sign_out", lambda: None
+    )
+    view = _make_view(qtbot, monkeypatch)
+    view._account = "me@example.com"
+
+    with qtbot.waitSignal(auth_events.account_changed, timeout=5000) as blocker:
+        view._do_sign_out()
+
+    assert blocker.args == [None]
+    assert view._account is None
 
 
 def test_gcp_root_context_menu_offers_select_projects_and_sign_out(qtbot, monkeypatch):
@@ -803,7 +1383,7 @@ def test_ssh_connect_gives_the_terminal_keyboard_focus(qtbot, monkeypatch):
     # shell exercises the same focus-wiring path deterministically instead.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
-        lambda argv: TerminalWidget(["/bin/sh"]),
+        lambda argv, font_point_size=None: TerminalWidget(["/bin/sh"]),
     )
 
     view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
@@ -820,9 +1400,10 @@ class _FakeTerminalWidget(QWidget):
 
     finished = Signal()
 
-    def __init__(self, argv):
+    def __init__(self, argv, font_point_size=None):
         super().__init__()
         self.argv = argv
+        self.font_point_size = font_point_size
 
     def close_session(self):
         pass
@@ -849,6 +1430,22 @@ def test_ssh_connect_via_gcp_tunnel_skips_host_key_checking(qtbot, monkeypatch):
     assert any(arg.startswith("UserKnownHostsFile=") for arg in argv)
 
 
+def test_ssh_connect_passes_the_configured_terminal_font_size(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.TerminalWidget",
+        _FakeTerminalWidget,
+    )
+    monkeypatch.setattr(main_view_module.settings, "load_terminal_font_size", lambda: 16)
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "ssh", None)
+
+    assert view._tabs.widget(0).font_point_size == 16
+
+
 def test_closing_tab_disconnects_and_stops_tunnel(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
     tunnel = _FakeTunnel()
@@ -871,10 +1468,11 @@ class _FakeRdpWidget(QWidget):
 
     finished = Signal()
 
-    def __init__(self, host, port, username, password, domain="", desktop_size=None):
+    def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None):
         super().__init__()
         self.host, self.port, self.username, self.password = host, port, username, password
         self.desktop_size = desktop_size
+        self.keyboard_layout = keyboard_layout
 
     def close_session(self):
         pass
@@ -929,6 +1527,19 @@ def test_rdp_connect_defaults_to_matching_window_size(qtbot, monkeypatch):
     assert view._tabs.widget(0).desktop_size is None
 
 
+def test_rdp_connect_passes_the_configured_keyboard_layout(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(main_view_module.settings, "load_rdp_keyboard_layout", lambda: 0x040C)
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice", "secret")
+
+    assert view._tabs.widget(0).keyboard_layout == 0x040C
+
+
 def test_rdp_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):
     # Covers both a connect failure and the remote side dropping the
     # connection — RdpWidget.finished fires in either case, and main_view
@@ -957,7 +1568,7 @@ def test_populate_qemu_hosts_creates_lazy_loading_host_items(qtbot, monkeypatch)
     host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
     view = _make_view(qtbot, monkeypatch, qemu_hosts=[{"name": host.name, "uri": host.uri}])
 
-    assert view._tree.topLevelItemCount() == 2  # gcloud unavailable, so QEMU + Manual only
+    assert view._tree.topLevelItemCount() == 3  # gcloud unavailable, so QEMU + Manual + GL.iNet only
     qemu_root = view._tree.topLevelItem(0)
     assert qemu_root.text(0) == "QEMU"
     assert qemu_root.childCount() == 1
@@ -975,9 +1586,10 @@ def test_qemu_root_is_hidden_when_virsh_unavailable(qtbot, monkeypatch):
         monkeypatch,
         qemu_hosts=[{"name": host.name, "uri": host.uri}],
         qemu_available=False,
+        glinet_available=False,
     )
 
-    # gcloud unavailable too, so Manual is the only root left.
+    # gcloud/GL.iNet unavailable too, so Manual is the only root left.
     assert view._tree.topLevelItemCount() == 1
     assert view._tree.topLevelItem(0).text(0) == "Manual"
     assert view._qemu_root_item is None
@@ -1050,7 +1662,7 @@ def test_qemu_connect_embeds_widget_and_registers_session(qtbot, monkeypatch):
     tunnel = _FakeTunnel(port=5901)
     vm = QemuVm(id="1", name="myvm", state="running")
 
-    view._on_qemu_tunnel_ready(tunnel, vm)
+    view._on_qemu_spice_connection_ready((tunnel, tunnel.port), vm)
 
     assert view._tabs.count() == 1
     assert view._tabs.tabText(0) == "myvm"
@@ -1068,7 +1680,7 @@ def test_spice_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch)
     tunnel = _FakeTunnel(port=5901)
     vm = QemuVm(id="1", name="myvm", state="running")
 
-    view._on_qemu_tunnel_ready(tunnel, vm)
+    view._on_qemu_spice_connection_ready((tunnel, tunnel.port), vm)
     widget = view._tabs.widget(0)
     widget.finished.emit()
 
@@ -1077,15 +1689,71 @@ def test_spice_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch)
     qtbot.waitUntil(lambda: tunnel.stopped, timeout=2000)
 
 
-def test_start_qemu_tunnel_raises_when_no_spice_port(qtbot, monkeypatch):
+def test_qemu_connect_with_local_uri_skips_tunnel_and_registers_no_session_entry(qtbot, monkeypatch):
+    # Regression test: a QemuHost pointed at the *same* machine running
+    # it-toolbox (a bare "qemu:///system" URI, no ssh transport at all)
+    # previously always failed to connect -- _start_qemu_tunnel
+    # unconditionally tried to build an SSH tunnel for every QEMU host,
+    # regardless of whether the URI actually needed one.
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.SpiceWidget", _FakeSpiceWidget
+    )
+    view = _make_view(qtbot, monkeypatch)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_spice_connection_ready((None, 5901), vm)
+
+    assert view._tabs.count() == 1
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port) == ("127.0.0.1", 5901)
+    # No tunnel -- nothing registered to stop on disconnect.
+    assert view._active_sessions == {}
+
+
+def test_prepare_qemu_spice_connection_raises_when_no_spice_port(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
     monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: None)
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "diagnose_missing_spice_port",
+        lambda host, name, state: f"{name} is not running (state: {state}).",
+    )
     host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
     vm = QemuVm(id="1", name="myvm", state="shut off")
 
-    with pytest.raises(main_view_module.QemuApiError, match="no SPICE port"):
-        ConnectionManagerView._start_qemu_tunnel(host, vm)
+    with pytest.raises(main_view_module.QemuApiError, match="not running"):
+        ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
+
+
+def test_prepare_qemu_spice_connection_skips_tunnel_for_local_uri(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: 5901)
+    host = QemuHost(name="local", uri="qemu:///system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    tunnel, port = ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
+
+    assert tunnel is None
+    assert port == 5901
+
+
+def test_prepare_qemu_spice_connection_starts_tunnel_for_ssh_uri(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: 5901)
+    fake_tunnel = _FakeTunnel(port=6001)
+    monkeypatch.setattr(
+        main_view_module, "QemuTunnel", lambda uri, port: fake_tunnel
+    )
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    tunnel, port = ConnectionManagerView._prepare_qemu_spice_connection(host, vm)
+
+    assert tunnel is fake_tunnel
+    assert port == 6001
 
 
 def test_connect_qemu_warns_instead_of_crashing_when_spice_unavailable(qtbot, monkeypatch):
@@ -1175,6 +1843,57 @@ def test_qemu_power_action_calls_client_and_refreshes_vm_list(qtbot, monkeypatch
     assert host_item.child(0).text(0) == "(no VMs)"
 
 
+def test_qemu_reset_asks_for_confirmation_first(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.qemu_client, "power_action", lambda host, vm_name, action: calls.append(action)
+    )
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.No,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_reset_clicked(host, vm)
+
+    assert calls == []  # declining the confirmation must not call the API
+
+
+def test_qemu_reset_calls_power_action_once_confirmed(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_view_module.qemu_client,
+        "power_action",
+        lambda host, vm_name, action: calls.append((host, vm_name, action)),
+    )
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "question",
+        lambda *args, **kwargs: main_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    view._qemu_root_item = QTreeWidgetItem(["QEMU"])
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+    view._qemu_root_item.addChild(host_item)
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._on_qemu_reset_clicked(host, vm)
+
+    qtbot.waitUntil(lambda: calls == [(host, "myvm", "reset")], timeout=2000)
+
+
 def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
@@ -1187,7 +1906,142 @@ def test_manage_hosts_dialog_roundtrips_through_settings(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
     view._save_qemu_hosts([host])
 
-    assert saved["hosts"] == [{"name": "lab", "uri": "qemu+ssh://user@lab-host/system"}]
+    assert saved["hosts"] == [{
+        "name": "lab", "uri": "qemu+ssh://user@lab-host/system",
+        "default_memory_mib": None, "default_vcpus": None, "default_disk_gib": None,
+        "default_disk_pool": None, "default_network": None, "default_iso_pool": None,
+        "default_os_variant": None,
+    }]
+
+
+def test_manage_hosts_dialog_roundtrips_defaults_through_settings(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings, "save_qemu_hosts", lambda hosts: saved.setdefault("hosts", hosts)
+    )
+    host = QemuHost(
+        name="lab", uri="qemu+ssh://user@lab-host/system",
+        default_memory_mib=4096, default_vcpus=4, default_disk_gib=80,
+        default_disk_pool="fast-local", default_network="br0", default_iso_pool="iso-share",
+        default_os_variant="fedora40",
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_qemu_hosts([host])
+
+    assert saved["hosts"] == [{
+        "name": "lab", "uri": "qemu+ssh://user@lab-host/system",
+        "default_memory_mib": 4096, "default_vcpus": 4, "default_disk_gib": 80,
+        "default_disk_pool": "fast-local", "default_network": "br0", "default_iso_pool": "iso-share",
+        "default_os_variant": "fedora40",
+    }]
+
+    monkeypatch.setattr(main_view_module.settings, "load_qemu_hosts", lambda: saved["hosts"])
+    assert main_view_module.ConnectionManagerView._load_qemu_hosts() == [host]
+
+
+def test_deploy_vm_refreshes_host_vm_list_on_accept(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
+
+    captured = {}
+
+    class _FakeCreateVmDialog:
+        DialogCode = CreateVmDialog.DialogCode
+
+        def __init__(self, host, parent=None):
+            captured["host"] = host
+
+        def exec(self):
+            return self.DialogCode.Accepted
+
+    monkeypatch.setattr(main_view_module, "CreateVmDialog", _FakeCreateVmDialog)
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+
+    view._on_deploy_vm_clicked(host_item, host)
+
+    assert captured["host"] == host
+    qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
+    assert host_item.child(0).text(0) == "(no VMs)"
+
+
+def test_deploy_vm_does_not_refresh_when_dialog_cancelled(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
+
+    class _FakeCreateVmDialog:
+        DialogCode = CreateVmDialog.DialogCode
+
+        def __init__(self, host, parent=None):
+            pass
+
+        def exec(self):
+            return self.DialogCode.Rejected
+
+    list_vms_calls = []
+    monkeypatch.setattr(main_view_module, "CreateVmDialog", _FakeCreateVmDialog)
+    monkeypatch.setattr(
+        main_view_module.qemu_client, "list_vms", lambda host: list_vms_calls.append(host) or []
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+
+    view._on_deploy_vm_clicked(host_item, host)
+
+    assert list_vms_calls == []
+
+
+def test_configure_vm_reads_current_resources_then_refreshes_on_accept(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import ConfigureVmDialog
+
+    captured = {}
+
+    class _FakeConfigureVmDialog:
+        DialogCode = ConfigureVmDialog.DialogCode
+
+        def __init__(self, host, vm, vcpus, memory_mib, display_device, boot_order, parent=None):
+            captured["args"] = (host, vm, vcpus, memory_mib, display_device, boot_order)
+
+        def exec(self):
+            return self.DialogCode.Accepted
+
+    monkeypatch.setattr(main_view_module, "ConfigureVmDialog", _FakeConfigureVmDialog)
+    monkeypatch.setattr(main_view_module.qemu_provisioning, "get_vm_resources", lambda host, name: (4, 8192))
+    monkeypatch.setattr(
+        main_view_module.qemu_provisioning, "get_vm_display_device", lambda host, name: "spice"
+    )
+    monkeypatch.setattr(
+        main_view_module.qemu_provisioning, "get_boot_order", lambda host, name: ["hd", "cdrom"]
+    )
+    monkeypatch.setattr(main_view_module.qemu_client, "list_vms", lambda host: [])
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    host_item.setData(0, main_view_module.HOST_ROLE, host)
+    vm = QemuVm(id="-", name="myvm", state="shut off")
+    vm_item = QTreeWidgetItem([vm.name])
+    vm_item.setData(0, main_view_module.HOST_ROLE, host)
+    vm_item.setData(0, main_view_module.VM_ROLE, vm)
+    host_item.addChild(vm_item)
+
+    view._on_configure_vm_clicked(vm_item, host, vm)
+
+    qtbot.waitUntil(lambda: "args" in captured, timeout=2000)
+    assert captured["args"] == (host, vm, 4, 8192, "spice", ["hd", "cdrom"])
+    qtbot.waitUntil(lambda: host_item.childCount() == 1, timeout=2000)
+    assert host_item.child(0).text(0) == "(no VMs)"
 
 
 # -- Manually-configured RDP/SSH connections --------------------------------
@@ -1288,5 +2142,1163 @@ def test_manual_connections_roundtrip_through_settings(qtbot, monkeypatch):
     view._save_manual_connections([connection])
 
     assert saved["connections"] == [
-        {"name": "my-box", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": "alice"}
+        {
+            "name": "my-box",
+            "host": "10.0.0.5",
+            "port": 3389,
+            "kind": "rdp",
+            "username": "alice",
+            "password_encrypted": None,
+            "gateway_host": None,
+            "gateway_port": SSH_PORT,
+            "gateway_username": None,
+            "gateway_password": None,
+            "gateway_prompt_for_password": False,
+        }
     ]
+
+
+# -- SFTP/FTP -----------------------------------------------------------
+
+
+class _FakeFtpBrowserWidget(QWidget):
+    """Stands in for the real FtpBrowserWidget — it opens a real paramiko/
+    ftplib connection on construction (via a background thread), which a
+    unit test shouldn't depend on. Exposes the same contract main_view
+    relies on: close_session(), and captures the session it was given so
+    tests can inspect the credentials/host/port main_view resolved."""
+
+    def __init__(self, session, display_name):
+        super().__init__()
+        self.session = session
+        self.display_name = display_name
+
+    def close_session(self):
+        pass
+
+
+class _FakeFtpCredentialsDialog:
+    """Stands in for FtpCredentialsDialog — captures the constructor args
+    main_view passed it, and returns pre-set answers instead of actually
+    showing a modal dialog."""
+
+    last_instance = None
+
+    def __init__(self, kind, display_name, default_username="", show_remember=True, parent=None):
+        self.kind = kind
+        self.display_name = display_name
+        self.default_username = default_username
+        self.show_remember = show_remember
+        self._username = default_username
+        self._password = ""
+        self._key_path = None
+        self._key_passphrase = None
+        self._remember = False
+        self._accepted = True
+        _FakeFtpCredentialsDialog.last_instance = self
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted if self._accepted else QDialog.DialogCode.Rejected
+
+    def username(self):
+        return self._username
+
+    def password(self):
+        return self._password
+
+    def key_path(self):
+        return self._key_path
+
+    def key_passphrase(self):
+        return self._key_passphrase
+
+    def remember_password(self):
+        return self._remember
+
+
+@pytest.fixture(autouse=True)
+def _reset_fake_ftp_dialog():
+    _FakeFtpCredentialsDialog.last_instance = None
+    yield
+
+
+def _patch_ftp(monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "FtpBrowserWidget", _FakeFtpBrowserWidget)
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _FakeFtpCredentialsDialog)
+    return main_view_module
+
+
+def test_manual_sftp_connect_prompts_for_credentials_and_embeds_browser(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice")
+
+    view._start_session_from_manual_connection(connection)
+
+    dialog = _FakeFtpCredentialsDialog.last_instance
+    assert dialog.kind == "sftp"
+    assert dialog.default_username == "alice"
+    assert view._tabs.count() == 1
+    widget = view._tabs.widget(0)
+    assert isinstance(widget.session, main_view_module.ftp_client.SftpSession)
+    assert view._active_sessions == {}
+    assert len(view._session_tab_widgets) == 1
+
+
+def test_manual_ftp_connect_uses_plain_ftp_session(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=21, kind="ftp", username="bob")
+
+    view._start_session_from_manual_connection(connection)
+
+    widget = view._tabs.widget(0)
+    assert isinstance(widget.session, main_view_module.ftp_client.FtpSession)
+
+
+def test_manual_sftp_connect_cancelled_dialog_starts_nothing(qtbot, monkeypatch):
+    _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="sftp")
+
+    def _cancel(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._accepted = False
+        return dialog
+
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _cancel)
+
+    view._start_session_from_manual_connection(connection)
+
+    assert view._tabs.count() == 0
+
+
+def test_manual_sftp_connect_uses_stored_password_without_prompting(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.settings, "decrypt_manual_connection_password", lambda encrypted: "stored-secret"
+    )
+
+    def _fail_if_shown(*a, **k):
+        raise AssertionError("credentials dialog should not be shown when a password is stored")
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _fail_if_shown)
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice", password_encrypted=b"ciphertext"
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    widget = view._tabs.widget(0)
+    assert widget.session._password == "stored-secret"
+
+
+def test_manual_sftp_connect_falls_back_to_prompt_when_stored_password_undecryptable(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+
+    def _raise(*a, **k):
+        raise main_view_module.settings.SecretDecryptionError("no key")
+
+    monkeypatch.setattr(main_view_module.settings, "decrypt_manual_connection_password", _raise)
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice", password_encrypted=b"ciphertext"
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    assert _FakeFtpCredentialsDialog.last_instance is not None
+    assert view._tabs.count() == 1
+
+
+def test_manual_sftp_remember_password_encrypts_and_persists(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(
+        main_view_module.settings, "encrypt_manual_connection_password", lambda password: b"encrypted:" + password.encode()
+    )
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_manual_connections",
+        lambda connections: saved.setdefault("connections", connections),
+    )
+
+    def _make_dialog(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._password = "typed-secret"
+        dialog._remember = True
+        return dialog
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _make_dialog)
+    connection = ManualConnection(name="my-box", host="10.0.0.5", port=22, kind="sftp", username="alice")
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        manual_connections=[
+            {"name": connection.name, "host": connection.host, "port": connection.port, "kind": connection.kind, "username": connection.username}
+        ],
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    assert saved["connections"][0]["password_encrypted"] is not None
+
+
+def test_gcp_sftp_connect_via_tunnel_embeds_browser(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "sftp", "alice", "secret")
+
+    assert view._tabs.count() == 1
+    widget = view._tabs.widget(0)
+    session = widget.session
+    assert isinstance(session, main_view_module.ftp_client.SftpSession)
+    assert session._host == "127.0.0.1"
+    assert session._port == tunnel.port
+    assert session._skip_host_key_check is True
+    assert list(view._active_sessions.values())[0][0] == "sftp"
+
+
+def test_start_session_from_instance_sftp_shows_credentials_dialog_without_remember(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+
+    connect_calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: connect_calls.append(kwargs))
+
+    view._start_session_from_instance(instance, "sftp")
+
+    dialog = _FakeFtpCredentialsDialog.last_instance
+    assert dialog.show_remember is False
+    assert connect_calls[0]["kind"] == "sftp"
+
+
+def test_qemu_sftp_connect_discovers_ip_and_embeds_browser(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_ip_address", lambda host, name: "192.168.1.50")
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    widget = view._tabs.widget(0)
+    session = widget.session
+    assert isinstance(session, main_view_module.ftp_client.SftpSession)
+    assert session._host == "192.168.1.50"
+    assert session._port == main_view_module.SFTP_PORT
+    # A real external host (not an ephemeral IAP tunnel port) -- normal
+    # known_hosts checking must stay on, same as a Manual connection.
+    assert session._skip_host_key_check is False
+
+
+def test_qemu_sftp_connect_prompts_for_ip_when_discovery_fails_and_remembers_it(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_ip_address", lambda host, name: None)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("10.0.0.9", True))
+    )
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_qemu_vm_ip_overrides",
+        lambda overrides: saved.setdefault("overrides", dict(overrides)),
+    )
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    widget = view._tabs.widget(0)
+    assert widget.session._host == "10.0.0.9"
+    assert saved["overrides"][("lab", "myvm")] == "10.0.0.9"
+    assert view._qemu_vm_ip_overrides[("lab", "myvm")] == "10.0.0.9"
+
+
+def test_qemu_sftp_connect_uses_stored_ip_override_without_discovery(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+
+    def _fail_if_called(host, name):
+        raise AssertionError("should not attempt discovery when an override is stored")
+
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_ip_address", _fail_if_called)
+    view = _make_view(qtbot, monkeypatch)
+    view._qemu_vm_ip_overrides[("lab", "myvm")] = "10.0.0.5"
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.widget(0).session._host == "10.0.0.5"
+
+
+def test_set_qemu_vm_ip_stores_and_clears_override(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_qemu_vm_ip_overrides",
+        lambda overrides: saved.__setitem__("overrides", dict(overrides)),
+    )
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("10.0.0.5", True))
+    )
+    view._on_set_qemu_vm_ip_clicked(host, vm)
+    assert view._qemu_vm_ip_overrides[("lab", "myvm")] == "10.0.0.5"
+    assert saved["overrides"][("lab", "myvm")] == "10.0.0.5"
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("", True)))
+    view._on_set_qemu_vm_ip_clicked(host, vm)
+    assert ("lab", "myvm") not in view._qemu_vm_ip_overrides
+    assert ("lab", "myvm") not in saved["overrides"]
+
+
+def test_manual_connections_roundtrip_preserves_gateway(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_manual_connections",
+        lambda connections: saved.setdefault("connections", connections),
+    )
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp",
+        gateway_host="bastion.example.com", gateway_port=2222, gateway_username="bob",
+        gateway_password="hunter2",
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_manual_connections([connection])
+
+    assert saved["connections"] == [
+        {
+            "name": "internal-rdp", "host": "10.0.0.5", "port": 3389, "kind": "rdp", "username": None,
+            "password_encrypted": None,
+            "gateway_host": "bastion.example.com", "gateway_port": 2222, "gateway_username": "bob",
+            "gateway_password": "hunter2", "gateway_prompt_for_password": False,
+        }
+    ]
+
+    # _load_manual_connections reads settings.load_manual_connections(), not
+    # the "saved" dict above -- reuse the same raw shape to confirm the
+    # round trip the other direction too.
+    monkeypatch.setattr(
+        main_view_module.settings, "load_manual_connections", lambda: saved["connections"]
+    )
+    loaded = view._load_manual_connections()
+    assert loaded == [connection]
+
+
+def test_manual_gateway_connect_starts_tunnel_and_embeds_rdp(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("secret", True))
+    )
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="bastion.example.com", gateway_port=2222, gateway_username="bob",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    widget = view._tabs.widget(0)
+    assert (widget.host, widget.port, widget.username, widget.password) == (
+        "127.0.0.1", 6001, "alice", "secret",
+    )
+    assert tunnel_calls == [("bob@bastion.example.com", "10.0.0.5", 3389, 2222, None)]
+    assert list(view._active_sessions.values()) == [("rdp", tunnel)]
+
+
+def test_manual_gateway_connect_passes_gateway_password_to_tunnel(qtbot, monkeypatch):
+    # Regression test: a real gateway rejected key auth outright
+    # ("Permission denied (publickey,password)") -- gateway_password must
+    # actually reach SshTunnel, not just round-trip through settings.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("secret", True))
+    )
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_username="planview-admin",
+        gateway_password="hunter2",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    assert tunnel_calls == [
+        ("planview-admin@pvsrv-zabbixproxy", "10.0.0.5", 3389, SSH_PORT, "hunter2")
+    ]
+
+
+def test_manual_gateway_connect_prompts_for_password_when_configured(qtbot, monkeypatch):
+    # gateway_prompt_for_password mirrors the RDP password's own
+    # never-stored, ask-every-time convention -- confirm the prompt
+    # actually fires and its answer (not any stored gateway_password,
+    # which is None here anyway) reaches SshTunnel.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    prompts = []
+
+    def fake_get_text(parent, title, label, *args, **kwargs):
+        prompts.append((title, label))
+        if title == "SSH Gateway Password":
+            return "typed-at-runtime", True
+        return "rdp-secret", True
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", staticmethod(fake_get_text))
+    tunnel = _FakeTunnel(port=6001)
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: (
+            tunnel_calls.append((target, dest_host, dest_port, ssh_port, password)) or tunnel
+        ),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-rdp", host="10.0.0.5", port=3389, kind="rdp", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_username="planview-admin",
+        gateway_prompt_for_password=True,
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    assert tunnel_calls == [
+        ("planview-admin@pvsrv-zabbixproxy", "10.0.0.5", 3389, SSH_PORT, "typed-at-runtime")
+    ]
+    assert ("SSH Gateway Password", "Password for planview-admin@pvsrv-zabbixproxy:") in prompts
+
+
+def test_manual_gateway_connect_cancelling_password_prompt_aborts_connect(qtbot, monkeypatch):
+    # kind="ssh" and an explicit username so the SSH Gateway Password
+    # prompt is the *only* QInputDialog.getText call in this flow --
+    # otherwise an earlier username/RDP-password prompt returning "not
+    # ok" would abort for a different reason than the one under test.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "TerminalWidget", _FakeTerminalWidget)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False))
+    )
+    tunnel_calls = []
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda *a, **k: tunnel_calls.append(True),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-box", host="10.0.0.5", port=22, kind="ssh", username="alice",
+        gateway_host="pvsrv-zabbixproxy", gateway_prompt_for_password=True,
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    assert tunnel_calls == []
+    assert view._tabs.count() == 0
+
+
+def test_manual_gateway_connect_skips_host_key_checking_for_ssh(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "TerminalWidget", _FakeTerminalWidget)
+    tunnel = _FakeTunnel(port=6001)
+    monkeypatch.setattr(
+        main_view_module,
+        "SshTunnel",
+        lambda target, dest_host, dest_port, ssh_port=None, password=None: tunnel,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    connection = ManualConnection(
+        name="internal-box", host="10.0.0.5", port=22, kind="ssh", username="alice",
+        gateway_host="bastion.example.com",
+    )
+
+    view._start_session_from_manual_connection(connection)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1, timeout=2000)
+    argv = view._tabs.widget(0).argv
+    assert "StrictHostKeyChecking=no" in argv
+
+
+
+
+# -- GL.iNet hosts / dashboard ------------------------------------------------
+
+
+def test_populate_glinet_hosts_creates_items(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import GLINET_HOST_ROLE
+
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        glinet_hosts=[
+            {"name": host.name, "url": host.url, "username": host.username,
+             "verify_ssl": host.verify_ssl, "password_encrypted": None}
+        ],
+    )
+
+    glinet_root = None
+    for i in range(view._tree.topLevelItemCount()):
+        if view._tree.topLevelItem(i).text(0) == "GL.iNet":
+            glinet_root = view._tree.topLevelItem(i)
+    assert glinet_root is not None
+    assert glinet_root.childCount() == 1
+    item = glinet_root.child(0)
+    assert item.text(0) == "Travel Router"
+    assert item.data(0, GLINET_HOST_ROLE) == host
+
+
+def test_glinet_root_is_hidden_when_pyglinet_unavailable(qtbot, monkeypatch):
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        glinet_hosts=[
+            {"name": host.name, "url": host.url, "username": host.username,
+             "verify_ssl": host.verify_ssl, "password_encrypted": None}
+        ],
+        glinet_available=False,
+    )
+
+    for i in range(view._tree.topLevelItemCount()):
+        assert view._tree.topLevelItem(i).text(0) != "GL.iNet"
+    assert view._glinet_root_item is None
+
+
+def test_glinet_root_disappears_if_pyglinet_becomes_unavailable_on_repopulate(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, glinet_available=True)
+    assert view._glinet_root_item is not None
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.glinet_client.is_available",
+        lambda: False,
+    )
+    view._populate_glinet_hosts()
+
+    assert view._glinet_root_item is None
+    for i in range(view._tree.topLevelItemCount()):
+        assert view._tree.topLevelItem(i).text(0) != "GL.iNet"
+
+
+def test_glinet_hosts_roundtrip_through_settings(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    saved = {}
+    monkeypatch.setattr(
+        main_view_module.settings, "save_glinet_hosts", lambda hosts: saved.setdefault("hosts", hosts)
+    )
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
+
+    view = _make_view(qtbot, monkeypatch)
+    view._save_glinet_hosts([host])
+
+    assert saved["hosts"] == [
+        {"name": "Travel Router", "url": "https://192.168.8.1/rpc", "username": "root",
+         "verify_ssl": False, "password_encrypted": None}
+    ]
+
+
+def test_load_glinet_hosts_decodes_base64_password(qtbot, monkeypatch):
+    import base64
+
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        glinet_hosts=[
+            {"name": "Travel Router", "url": "https://192.168.8.1/rpc", "username": "root",
+             "verify_ssl": False, "password_encrypted": base64.b64encode(b"ciphertext").decode()}
+        ],
+    )
+
+    (host,) = view._load_glinet_hosts()
+
+    assert host.password_encrypted == b"ciphertext"
+
+
+def test_opening_glinet_dashboard_uses_stored_decrypted_password(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
+    monkeypatch.setattr(
+        main_view_module.settings, "decrypt_glinet_password", lambda encrypted: "routerpass"
+    )
+
+    captured = {}
+
+    class _FakeDashboard(QWidget):
+        def __init__(self, host, password):
+            super().__init__()
+            captured["host"] = host
+            captured["password"] = password
+
+    monkeypatch.setattr(main_view_module, "GlinetDashboardWidget", _FakeDashboard)
+
+    view = _make_view(qtbot, monkeypatch)
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc", password_encrypted=b"x")
+
+    view._open_glinet_dashboard(host)
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "Travel Router"
+    assert captured["password"] == "routerpass"
+
+
+def test_opening_glinet_dashboard_prompts_when_decryption_fails(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
+
+    def raise_decrypt_error(encrypted):
+        raise main_view_module.settings.SecretDecryptionError("no key")
+
+    monkeypatch.setattr(main_view_module.settings, "decrypt_glinet_password", raise_decrypt_error)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("typedpass", True))
+    )
+
+    captured = {}
+
+    class _FakeDashboard(QWidget):
+        def __init__(self, host, password):
+            super().__init__()
+            captured["password"] = password
+
+    monkeypatch.setattr(main_view_module, "GlinetDashboardWidget", _FakeDashboard)
+
+    view = _make_view(qtbot, monkeypatch)
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc", password_encrypted=b"x")
+
+    view._open_glinet_dashboard(host)
+
+    assert captured["password"] == "typedpass"
+
+
+def test_opening_glinet_dashboard_cancelled_prompt_opens_no_tab(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False))
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
+
+    view._open_glinet_dashboard(host)
+
+    assert view._tabs.count() == 0
+
+
+def test_opening_glinet_dashboard_warns_when_pyglinet_not_installed(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", None)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "warning",
+        staticmethod(lambda *a, **k: warnings.append(a)),
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
+
+    view._open_glinet_dashboard(host)
+
+    assert len(warnings) == 1
+    assert view._tabs.count() == 0
+
+
+def test_double_clicking_a_glinet_host_opens_its_dashboard(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from it_toolbox.modules.connection_manager.ui.main_view import GLINET_HOST_ROLE
+
+    class _FakeDashboard(QWidget):
+        def __init__(self, host, password):
+            super().__init__()
+
+    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
+    monkeypatch.setattr(main_view_module.settings, "decrypt_glinet_password", lambda enc: "p")
+    monkeypatch.setattr(main_view_module, "GlinetDashboardWidget", _FakeDashboard)
+
+    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc", password_encrypted=b"x")
+    view = _make_view(qtbot, monkeypatch)
+    item = QTreeWidgetItem(["Travel Router"])
+    item.setData(0, GLINET_HOST_ROLE, host)
+
+    view._on_tree_item_double_clicked(item, 0)
+
+    assert view._tabs.count() == 1
+
+
+def test_glinet_dashboard_tab_closes_via_try_close_tab(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    widget = QWidget()
+    view._owned_tab_widgets.add(widget)
+    index = view._tabs.addTab(widget, "Travel Router")
+    view._tabs.setCurrentIndex(index)
+
+    assert view.try_close_tab(widget) is True
+    assert view._tabs.count() == 0
+    assert widget not in view._owned_tab_widgets
+
+
+# -- Per-VM RDP credentials (GCP) --------------------------------------------
+
+_VM_KEY = ("p1", "us-central1-a", "vm-1")
+
+
+def _windows_vm(name="vm-1"):
+    return Instance(
+        name=name, zone="us-central1-a", project_id="p1", status="RUNNING", os_hint="windows"
+    )
+
+
+def _saved_login(username="alice", password=b"enc:s3cr3t!"):
+    from it_toolbox.core.settings import InstanceRdpCredentials
+
+    return InstanceRdpCredentials(username=username, password_encrypted=password)
+
+
+def _capture_connects(view, monkeypatch):
+    calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: calls.append(kwargs))
+    return calls
+
+
+def test_rdp_uses_the_saved_login_without_prompting(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    # The saved username must beat the global default.
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    prompts = []
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *a, **k: prompts.append(a) or ("x", True)
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert connects[0]["username"] == "alice"
+    assert connects[0]["password"] == "s3cr3t!"
+    assert prompts == []
+
+
+def test_rdp_with_only_a_saved_username_prompts_for_the_password(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(
+        qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login(password=None)}
+    )
+    prompts = []
+
+    def fake_get_text(parent, title, label, *args, **kwargs):
+        prompts.append(label)
+        return ("typed-pw", True)
+
+    monkeypatch.setattr(main_view_module.QInputDialog, "getText", fake_get_text)
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert connects[0]["username"] == "alice"
+    assert connects[0]["password"] == "typed-pw"
+    assert len(prompts) == 1 and "alice@vm-1" in prompts[0]
+
+
+def test_rdp_falls_back_to_the_prompt_when_the_saved_password_cannot_be_decrypted(
+    qtbot, monkeypatch
+):
+    # e.g. a passphrase-protected SSH key, or one replaced since the save.
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+
+    def cannot_decrypt(encrypted, passphrase=None):
+        raise main_view_module.settings.SecretDecryptionError("wrong key")
+
+    monkeypatch.setattr(main_view_module.settings, "decrypt_instance_rdp_password", cannot_decrypt)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *a, **k: ("typed-pw", True)
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert connects[0]["username"] == "alice"
+    assert connects[0]["password"] == "typed-pw"
+
+
+def test_saved_rdp_login_belongs_to_one_vm_only(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *a, **k: ("typed-pw", True)
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm("vm-2"), "rdp")
+
+    assert connects[0]["username"] == "root"
+    assert connects[0]["password"] == "typed-pw"
+
+
+def test_saved_rdp_login_does_not_leak_into_ssh(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "ssh")
+
+    assert connects[0]["username"] == "root"
+
+
+def _run_set_password(qtbot, monkeypatch, view, reset_result=("alice", "s3cr3t!")):
+    """Drives Set Password… to completion; returns what the result dialog was
+    given (a list of dicts with instance_name/username/password/note)."""
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(
+        main_view_module.QInputDialog, "getText", lambda *args, **kwargs: ("alice", True)
+    )
+    monkeypatch.setattr(
+        main_view_module.gcp_client,
+        "reset_windows_password",
+        lambda creds, project_id, zone, name, username: reset_result,
+    )
+    view._on_set_instance_password_clicked(_windows_vm())
+    qtbot.waitUntil(lambda: len(_FakePasswordResetDialog.shown) == 1, timeout=2000)
+    return _FakePasswordResetDialog.shown
+
+
+def test_set_password_saves_the_new_login_as_the_vms_rdp_credentials(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_rdp_credentials",
+        lambda credentials: saved.append(dict(credentials)),
+    )
+
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
+
+    assert saved[-1] == {_VM_KEY: _saved_login("alice", b"enc:s3cr3t!")}
+    # Still handed to the dialog (masked, but copyable): this is the only time
+    # the plain-text password is available.
+    assert dialog["password"] == "s3cr3t!"
+    assert "Saved as this VM's RDP login" in dialog["note"]
+
+
+def test_connect_via_rdp_after_set_password_signs_in_without_prompting(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+    _run_set_password(qtbot, monkeypatch, view)
+    monkeypatch.setattr(
+        main_view_module.QInputDialog,
+        "getText",
+        lambda *a, **k: pytest.fail("should not prompt: the reset saved this VM's login"),
+    )
+    connects = _capture_connects(view, monkeypatch)
+
+    view._start_session_from_instance(_windows_vm(), "rdp")
+
+    assert (connects[0]["username"], connects[0]["password"]) == ("alice", "s3cr3t!")
+
+
+def test_set_password_still_shows_the_password_when_it_cannot_be_saved(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    def no_ssh_key(password):
+        raise main_view_module.settings.SecretDecryptionError("No SSH key found to encrypt with.")
+
+    monkeypatch.setattr(main_view_module.settings, "encrypt_instance_rdp_password", no_ssh_key)
+
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
+
+    assert dialog["password"] == "s3cr3t!"
+    assert "Couldn't save it as this VM's RDP login" in dialog["note"]
+    assert "No SSH key found" in dialog["note"]
+    assert view._instance_rdp_credentials == {}
+
+
+def test_set_password_still_shows_the_password_when_the_disk_write_fails(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    def disk_full(credentials):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(main_view_module.settings, "save_instance_rdp_credentials", disk_full)
+
+    (dialog,) = _run_set_password(qtbot, monkeypatch, view)
+
+    assert dialog["password"] == "s3cr3t!"
+    assert "disk full" in dialog["note"]
+
+
+class _FakeRdpCredentialsDialog:
+    """Stands in for RdpCredentialsDialog; records how the view built it."""
+
+    accept = True
+    username_value = ""
+    password_value = ""
+    cleared_value = False
+    built_with = None
+
+    def __init__(self, instance_name, **kwargs):
+        type(self).built_with = {"instance_name": instance_name, **kwargs}
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted if type(self).accept else QDialog.DialogCode.Rejected
+
+    def username(self):
+        return type(self).username_value
+
+    def password(self):
+        return type(self).password_value
+
+    def cleared(self):
+        return type(self).cleared_value
+
+
+def _use_fake_rdp_dialog(monkeypatch, username="", password="", cleared=False, accept=True):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    _FakeRdpCredentialsDialog.username_value = username
+    _FakeRdpCredentialsDialog.password_value = password
+    _FakeRdpCredentialsDialog.cleared_value = cleared
+    _FakeRdpCredentialsDialog.accept = accept
+    _FakeRdpCredentialsDialog.built_with = None
+    monkeypatch.setattr(main_view_module, "RdpCredentialsDialog", _FakeRdpCredentialsDialog)
+
+
+def test_rdp_credentials_action_saves_the_username_and_an_encrypted_password(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="pw-1")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    # Stored only via the encrypt seam (stubbed as an "enc:" prefix here),
+    # never as the bare password.
+    assert view._instance_rdp_credentials == {_VM_KEY: _saved_login("bob", b"enc:pw-1")}
+
+
+def test_rdp_credentials_dialog_is_prefilled_from_what_is_saved(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login("alice")})
+    _use_fake_rdp_dialog(monkeypatch, username="alice", accept=False)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    built = _FakeRdpCredentialsDialog.built_with
+    assert built["username"] == "alice"
+    assert built["has_saved"] is True and built["has_saved_password"] is True
+
+
+def test_rdp_credentials_dialog_defaults_the_username_when_nothing_is_saved(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    _use_fake_rdp_dialog(monkeypatch, accept=False)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    built = _FakeRdpCredentialsDialog.built_with
+    assert built["username"] == "root"
+    assert built["has_saved"] is False and built["has_saved_password"] is False
+
+
+def test_rdp_credentials_blank_password_keeps_the_saved_one_for_the_same_username(
+    qtbot, monkeypatch
+):
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login("alice")})
+    _use_fake_rdp_dialog(monkeypatch, username="alice", password="")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials[_VM_KEY] == _saved_login("alice", b"enc:s3cr3t!")
+
+
+def test_rdp_credentials_changing_the_username_drops_the_old_password(qtbot, monkeypatch):
+    # The saved password belonged to "alice"; pairing it with "bob" would only
+    # produce a failed login, so it's discarded and the password is prompted.
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login("alice")})
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials[_VM_KEY] == _saved_login("bob", None)
+
+
+def test_rdp_credentials_clear_removes_the_saved_login(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    saved = []
+    monkeypatch.setattr(
+        main_view_module.settings,
+        "save_instance_rdp_credentials",
+        lambda credentials: saved.append(dict(credentials)),
+    )
+    _use_fake_rdp_dialog(monkeypatch, username="alice", cleared=True)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials == {}
+    assert saved == [{}]
+
+
+def test_rdp_credentials_cancel_changes_nothing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, instance_rdp_credentials={_VM_KEY: _saved_login()})
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="new", accept=False)
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials == {_VM_KEY: _saved_login()}
+
+
+def test_rdp_credentials_not_saved_when_the_password_cannot_be_encrypted(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    view = _make_view(qtbot, monkeypatch)
+
+    def no_ssh_key(password):
+        raise main_view_module.settings.SecretDecryptionError("No SSH key found to encrypt with.")
+
+    monkeypatch.setattr(main_view_module.settings, "encrypt_instance_rdp_password", no_ssh_key)
+    warnings = []
+    monkeypatch.setattr(
+        main_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text: warnings.append((title, text)),
+    )
+    _use_fake_rdp_dialog(monkeypatch, username="bob", password="pw-1")
+
+    view._on_rdp_credentials_clicked(_windows_vm())
+
+    assert view._instance_rdp_credentials == {}
+    assert len(warnings) == 1 and "No SSH key found" in warnings[0][1]
+
+
+def _instance_menu_texts(qtbot, monkeypatch, instance, choose):
+    """Right-clicks `instance` in the tree; returns the menu's action texts
+    and lets the 'user' pick the action whose text is `choose` (or None)."""
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    view = _make_view(qtbot, monkeypatch)
+    item = QTreeWidgetItem([instance.name])
+    item.setData(0, main_view_module.INSTANCE_ROLE, instance)
+    monkeypatch.setattr(view._tree, "itemAt", lambda pos: item)
+    seen = []
+
+    # A real QMenu.exec() opens a blocking popup nothing can dismiss
+    # headless; overriding it in a Python subclass (patching the C++ class's
+    # method doesn't take) records the actions and "clicks" one instead.
+    class _AutoPickMenu(QMenu):
+        def exec(self, *args):
+            seen.extend(action.text() for action in self.actions() if action.text())
+            return next((a for a in self.actions() if choose and a.text() == choose), None)
+
+    monkeypatch.setattr(main_view_module, "QMenu", _AutoPickMenu)
+    opened = []
+    monkeypatch.setattr(view, "_on_rdp_credentials_clicked", lambda inst: opened.append(inst))
+
+    view._on_tree_context_menu(QPoint(0, 0))
+    return seen, opened
+
+
+def test_instance_menu_offers_rdp_credentials_and_it_opens_the_dialog(qtbot, monkeypatch):
+    instance = Instance(name="vm-1", zone="z", project_id="p1", status="RUNNING", os_hint=None)
+
+    texts, opened = _instance_menu_texts(qtbot, monkeypatch, instance, "RDP Credentials…")
+
+    assert texts.index("Set Password…") < texts.index("RDP Credentials…")
+    assert texts.index("RDP Credentials…") < texts.index("Upload Public Key…")
+    assert opened == [instance]
+
+
+def test_instance_menu_offers_rdp_credentials_for_windows_and_linux_alike(qtbot, monkeypatch):
+    windows = Instance(name="w", zone="z", project_id="p1", status="RUNNING", os_hint="windows")
+    linux = Instance(name="l", zone="z", project_id="p1", status="RUNNING", os_hint="linux")
+
+    windows_texts, _ = _instance_menu_texts(qtbot, monkeypatch, windows, None)
+    linux_texts, _ = _instance_menu_texts(qtbot, monkeypatch, linux, None)
+
+    # "Connect via RDP" is offered for both, so its credentials are too; the
+    # OS-specific Set Password…/Upload Public Key… gating is unchanged.
+    assert "RDP Credentials…" in windows_texts and "Upload Public Key…" not in windows_texts
+    assert "RDP Credentials…" in linux_texts and "Set Password…" not in linux_texts

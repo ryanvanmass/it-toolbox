@@ -41,9 +41,13 @@ project if it happens).
    this dev machine, confirmed it runs (`rclone version`), confirmed the
    override gets set and can be cleared.
 4. **gcloud section** — status + Sign In/Out, reusing
-   `gcp_auth.sign_in()`/`sign_out()`/`get_active_account()` via the same
-   `run_in_background` pattern `ConnectionManagerView`'s own sign-in
-   button already uses. Verified live (read-only): this dev machine has
+   `gcp_auth.sign_in()`/`sign_out()`/`get_active_account()` via
+   `run_in_background`. This is now the **only** place to sign in:
+   `ConnectionManagerView`'s own "Sign in with gcloud" button was
+   removed, and both views stay in sync through
+   `core/auth/auth_events.py`'s `account_changed` signal (Settings emits
+   it on sign-in/out; Connection Manager loads/clears its GCP tree in
+   response, and its tree's "Sign out" menu emits it too). Verified live (read-only): this dev machine has
    a real, already-signed-in gcloud session, and the section correctly
    showed "Signed in as ryanvanmassenhoven@gmail.com". Sign-in/out
    themselves were **not** exercised live, deliberately — doing so would

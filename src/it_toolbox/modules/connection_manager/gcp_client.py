@@ -9,9 +9,16 @@ core, not a bug in this app's own code). Plain requests-based REST calls
 have simple, reliable timeouts and no native call threading of their own.
 """
 
+import base64
+import json
+import time
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from google.oauth2.credentials import Credentials
 
 from it_toolbox.modules.connection_manager.models import (
@@ -31,6 +38,15 @@ DOWNLOAD_TIMEOUT_SEC = (10, 300)
 RESOURCE_MANAGER_BASE = "https://cloudresourcemanager.googleapis.com/v3"
 COMPUTE_BASE = "https://compute.googleapis.com/compute/v1"
 STORAGE_BASE = "https://storage.googleapis.com/storage/v1"
+
+# Windows password reset (see reset_windows_password): the metadata key the
+# guest agent watches, the serial port it answers on, how long a request
+# stays valid, and how long we wait for the answer.
+WINDOWS_KEYS_METADATA_KEY = "windows-keys"
+WINDOWS_PASSWORD_SERIAL_PORT = 4
+WINDOWS_KEY_TTL = timedelta(minutes=5)
+WINDOWS_PASSWORD_TIMEOUT_SEC = 180
+WINDOWS_PASSWORD_POLL_INTERVAL_SEC = 3
 
 
 class GcpApiError(Exception):
@@ -189,26 +205,211 @@ def stop_instance(
     )
 
 
+def _b64_int(value: int) -> str:
+    """Big-endian, no leading zero bytes, base64 — the encoding the Windows
+    guest agent expects for an RSA key's modulus and exponent."""
+    return base64.b64encode(value.to_bytes((value.bit_length() + 7) // 8, "big")).decode()
+
+
+def _live_windows_key_lines(existing_value: str, now: datetime) -> list[str]:
+    """The lines of an existing `windows-keys` metadata value worth keeping:
+    everything still unexpired, plus anything we can't parse (not ours to
+    delete). Each line is one JSON request, and other people's pending
+    requests share this key, so it has to be merged into, not replaced."""
+    kept = []
+    for line in existing_value.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            expire_on = datetime.fromisoformat(json.loads(line)["expireOn"])
+        except (ValueError, KeyError, TypeError):
+            kept.append(line)
+            continue
+        if expire_on > now:
+            kept.append(line)
+    return kept
+
+
+def _wait_for_windows_password(
+    credentials: Credentials,
+    project_id: str,
+    zone: str,
+    name: str,
+    modulus: str,
+    timeout: float,
+    poll_interval: float,
+    sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> dict:
+    """Polls the instance's serial port 4 — where the guest agent prints one
+    JSON line per password request — until the line answering *our* request
+    (matched by the modulus we sent) appears. Returns that line's dict."""
+    url = f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/serialPort"
+    deadline = monotonic() + timeout
+    start = 0
+    pending = ""  # an unfinished last line, completed by the next chunk
+    while True:
+        data = _get(
+            url,
+            credentials.token,
+            params={"port": WINDOWS_PASSWORD_SERIAL_PORT, "start": start},
+            extra_headers={"X-Goog-User-Project": project_id},
+        )
+        start = int(data.get("next", start))
+        pending += data.get("contents", "")
+        *complete_lines, pending_tail = pending.split("\n")
+        # The tail is normally an unfinished line, but if it already parses
+        # as a whole JSON object there's no reason to wait for its newline.
+        candidates = complete_lines + [pending_tail]
+        pending = pending_tail
+        for index, line in enumerate(candidates):
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("modulus") != modulus:
+                continue
+            if index == len(candidates) - 1:
+                pending = ""  # the tail turned out to be a whole line
+            if entry.get("errorMessage"):
+                raise GcpApiError(
+                    f"{name}'s guest agent couldn't reset the password: {entry['errorMessage']}"
+                )
+            if entry.get("encryptedPassword"):
+                return entry
+        if monotonic() >= deadline:
+            raise GcpApiError(
+                f"{name} didn't answer within {int(timeout)} seconds. Resetting a Windows "
+                "password needs the Google guest agent running inside the VM; check that it "
+                "is installed and the VM has finished booting, then try again."
+            )
+        sleep(poll_interval)
+
+
 def reset_windows_password(
     credentials: Credentials,
     project_id: str,
     zone: str,
     name: str,
     username: str,
+    timeout: float = WINDOWS_PASSWORD_TIMEOUT_SEC,
+    poll_interval: float = WINDOWS_PASSWORD_POLL_INTERVAL_SEC,
+    _sleep: Callable[[float], None] = time.sleep,
+    _monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[str, str]:
     """Creates (or resets) a local Windows account on the instance and
-    returns its new (username, password) — same operation `gcloud compute
-    reset-windows-password` performs. Unlike start/stop this call responds
-    with the credential directly rather than a long-running Operation.
-    Only meaningful for Windows instances; the API rejects it otherwise.
+    returns its new (username, password) — the same flow `gcloud compute
+    reset-windows-password` performs. There is no Compute Engine REST
+    method for this (an earlier version POSTed to a non-existent
+    `.../resetWindowsPassword` and got a 404); it is a handshake with the
+    Google guest agent running inside the VM:
+
+      1. Generate a throwaway RSA key pair.
+      2. Add a `windows-keys` metadata entry — the account name, the public
+         key, and a 5-minute expiry — via setMetadata.
+      3. The guest agent creates/resets the account, encrypts the new
+         password with that public key and prints it on serial port 4.
+      4. Read it back with getSerialPortOutput and decrypt it (RSA-OAEP,
+         SHA-1) with the private key, which never leaves this process.
+
+    Blocking (it waits for the agent) — call from a background thread. Only
+    meaningful for a running Windows instance with the guest environment
+    installed; otherwise raises GcpApiError.
     """
-    data = _post(
-        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/resetWindowsPassword",
+    headers = {"X-Goog-User-Project": project_id}
+    instance_url = f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}"
+
+    instance = _get(instance_url, credentials.token, extra_headers=headers)
+    status = instance.get("status")
+    if status != "RUNNING":
+        raise GcpApiError(
+            f"{name} is {status or 'not running'}. Start it first: the password is set by "
+            "an agent inside the running VM."
+        )
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    numbers = private_key.public_key().public_numbers()
+    modulus = _b64_int(numbers.n)
+    now = datetime.now(timezone.utc)
+    request = {
+        "userName": username,
+        "modulus": modulus,
+        "exponent": _b64_int(numbers.e),
+        "expireOn": (now + WINDOWS_KEY_TTL).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    metadata = instance.get("metadata", {})
+    items = list(metadata.get("items", []))
+    keys_item = next((item for item in items if item["key"] == WINDOWS_KEYS_METADATA_KEY), None)
+    lines = _live_windows_key_lines(keys_item["value"] if keys_item else "", now)
+    lines.append(json.dumps(request, separators=(",", ":")))
+    new_value = "\n".join(lines)
+    if keys_item is not None:
+        keys_item["value"] = new_value
+    else:
+        items.append({"key": WINDOWS_KEYS_METADATA_KEY, "value": new_value})
+
+    _post(
+        f"{instance_url}/setMetadata",
         credentials.token,
-        json_body={"email": username},
+        json_body={"fingerprint": metadata.get("fingerprint"), "items": items},
+        extra_headers=headers,
+    )
+
+    answer = _wait_for_windows_password(
+        credentials, project_id, zone, name, modulus, timeout, poll_interval, _sleep, _monotonic
+    )
+    password = private_key.decrypt(
+        base64.b64decode(answer["encryptedPassword"]),
+        padding.OAEP(mgf=padding.MGF1(hashes.SHA1()), algorithm=hashes.SHA1(), label=None),
+    ).decode("utf-8")
+    return answer.get("userName") or username, password
+
+
+def add_ssh_key(
+    credentials: Credentials,
+    project_id: str,
+    zone: str,
+    name: str,
+    username: str,
+    public_key: str,
+) -> None:
+    """Grants SSH access to a Linux instance by appending an instance-
+    metadata SSH key entry -- the mechanism Linux guest images actually
+    use (password auth is disabled by default on GCP's images), the same
+    one `gcloud compute ssh` sets up automatically on a first connection.
+    Unlike reset_windows_password, this is a read-modify-write: setMetadata
+    replaces the whole metadata payload, so existing items (including any
+    other users' ssh-keys entries) must be preserved, and the current
+    fingerprint must be echoed back so the update is rejected instead of
+    silently clobbering a concurrent metadata change.
+    """
+    instance = _get(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}",
+        credentials.token,
         extra_headers={"X-Goog-User-Project": project_id},
     )
-    return data["userName"], data["password"]
+    metadata = instance.get("metadata", {})
+    items = list(metadata.get("items", []))
+    ssh_keys_item = next((item for item in items if item["key"] == "ssh-keys"), None)
+    existing_lines = ssh_keys_item["value"].splitlines() if ssh_keys_item else []
+    new_line = f"{username}:{public_key}"
+    if new_line not in existing_lines:
+        existing_lines.append(new_line)
+    new_value = "\n".join(existing_lines)
+
+    if ssh_keys_item is not None:
+        ssh_keys_item["value"] = new_value
+    else:
+        items.append({"key": "ssh-keys", "value": new_value})
+
+    _post(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/instances/{name}/setMetadata",
+        credentials.token,
+        json_body={"fingerprint": metadata.get("fingerprint"), "items": items},
+        extra_headers={"X-Goog-User-Project": project_id},
+    )
 
 
 def list_buckets(credentials: Credentials, project_id: str) -> list[GcsBucket]:

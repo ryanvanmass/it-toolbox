@@ -17,7 +17,7 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
-from it_toolbox.core.rdp.freerdp_client import FreeRdpSession
+from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US, FreeRdpSession
 
 
 class RdpSessionSignals(QObject):
@@ -40,6 +40,7 @@ class RdpSessionWorker:
         password: str,
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
+        keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
     ) -> None:
         self._host = host
         self._port = port
@@ -47,6 +48,7 @@ class RdpSessionWorker:
         self._password = password
         self._domain = domain
         self._desktop_size = desktop_size
+        self._keyboard_layout = keyboard_layout
         self.signals = RdpSessionSignals()
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
@@ -128,6 +130,7 @@ class RdpSessionWorker:
                 self._password,
                 domain=self._domain,
                 desktop_size=self._desktop_size,
+                keyboard_layout=self._keyboard_layout,
             )
         except Exception as exc:  # noqa: BLE001 - see comment below
             # Deliberately broader than FreeRdpError: an uncaught exception

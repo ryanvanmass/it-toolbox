@@ -1,14 +1,16 @@
+import base64
 import platform
 
+import shiboken6
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
-    QHBoxLayout,
+    QDialog,
     QInputDialog,
     QLineEdit,
+    QMainWindow,
     QMenu,
     QMessageBox,
-    QPushButton,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -16,32 +18,63 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, settings
+from it_toolbox.core import async_utils, ftp_client, settings
 from it_toolbox.core.auth import gcp_auth
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
-from it_toolbox.core.qemu_tunnel import QemuTunnel
+from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
+from it_toolbox.core.ssh_tunnel import SshTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
-from it_toolbox.modules.connection_manager import gcp_client, qemu_client
+from it_toolbox.modules.connection_manager import (
+    gcp_client,
+    glinet_client,
+    qemu_client,
+    qemu_provisioning,
+)
 from it_toolbox.modules.connection_manager.models import (
     RDP_PORT,
+    SFTP_PORT,
     SSH_PORT,
     GcpProject,
     GcsBucket,
+    GlinetHost,
     Instance,
     ManualConnection,
     QemuHost,
     QemuVm,
 )
 from it_toolbox.modules.connection_manager.qemu_client import QemuApiError
-from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import ActiveSessionsDialog
-from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import ManageHostsDialog
+from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import (
+    ActiveSessionsDialog,
+)
+from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import (
+    ConfigureVmDialog,
+)
+from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
+from it_toolbox.modules.connection_manager.ui.ftp_credentials_dialog import (
+    FtpCredentialsDialog,
+)
+from it_toolbox.modules.connection_manager.ui.manage_glinet_hosts_dialog import (
+    ManageGlinetHostsDialog,
+)
+from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import (
+    ManageHostsDialog,
+)
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
+)
+from it_toolbox.modules.connection_manager.ui.password_reset_dialog import (
+    PasswordResetDialog,
 )
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
 )
+from it_toolbox.modules.connection_manager.ui.rdp_credentials_dialog import (
+    RdpCredentialsDialog,
+)
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
+from it_toolbox.widgets.ftp_browser_widget import FtpBrowserWidget
+from it_toolbox.widgets.glinet_dashboard_widget import GlinetDashboardWidget
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 try:
@@ -84,6 +117,8 @@ VM_ROLE = Qt.ItemDataRole.UserRole + 8
 IS_MANUAL_ROOT_ROLE = Qt.ItemDataRole.UserRole + 9
 MANUAL_CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 10
 IS_LOADING_ROLE = Qt.ItemDataRole.UserRole + 11
+IS_GLINET_ROOT_ROLE = Qt.ItemDataRole.UserRole + 12
+GLINET_HOST_ROLE = Qt.ItemDataRole.UserRole + 13
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
@@ -95,33 +130,75 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
 
 
+def _instance_key(instance: Instance) -> tuple[str, str, str]:
+    """What per-VM settings (SSH username overrides, saved RDP logins) are
+    keyed by: a VM name is only unique within its project and zone."""
+    return (instance.project_id, instance.zone, instance.name)
+
+
+def _instance_supports_password_reset(instance: Instance) -> bool:
+    """gcp_client.reset_windows_password() works by asking the Windows
+    guest agent inside the VM to (re)create the account, so it only means
+    something for a Windows instance — against a Linux one the request
+    would just never be answered. Gate the "Set Password…" menu item on
+    the same os_hint used to pick RDP/SSH defaults elsewhere
+    (_resolve_double_click_kind) rather than always offering an action
+    that's certain to fail for a known-Linux VM. An instance with no
+    os_hint (undetected) still gets the option, since we can't be sure
+    it doesn't apply.
+    """
+    return instance.os_hint != "linux"
+
+
+def _instance_supports_ssh_key_upload(instance: Instance) -> bool:
+    """The Linux counterpart to _instance_supports_password_reset — GCP's
+    Linux images have SSH password auth disabled by default, so access is
+    granted via an SSH public key in instance metadata instead (see
+    gcp_client.add_ssh_key), not a password. Gate "Upload Public Key…" on
+    the same os_hint, the mirror image of the password-reset gate; an
+    unknown os_hint gets both options, since we can't be sure which
+    applies.
+    """
+    return instance.os_hint != "windows"
+
+
 class ConnectionManagerView(QWidget):
     def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
         super().__init__(parent)
 
         self._account: str | None = None
-        self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel]] = {}
-        self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget] = {}
+        self._active_sessions: dict[int, tuple[str, BackgroundTunnel | QemuTunnel | SshTunnel]] = {}
+        self._session_tab_widgets: dict[int, TerminalWidget | RdpWidget | SpiceWidget | FtpBrowserWidget] = {}
         # Every widget this view has added to self._tabs (sessions above,
         # plus untracked ones like bucket browsers) — lets try_close_tab
         # recognize its own tabs when self._tabs is shared with other
         # modules (see ConnectionManagerModule / MainWindow).
         self._owned_tab_widgets: set[QWidget] = set()
         self._next_session_id = 1
+        # Remembers the account an "Upload Public Key…" grant was made
+        # for, per instance — see _on_ssh_key_uploaded. An instance often
+        # has no access at all under the global default username, so a
+        # subsequent SSH connection should use the account we just
+        # actually granted access to instead of silently trying (and
+        # failing under) the unrelated default. Persisted to disk (see
+        # _on_ssh_key_uploaded's save call) so it survives a restart —
+        # the grant itself is permanent (GCP instance metadata), so
+        # forgetting the account to connect as on every relaunch would
+        # just reintroduce the same failure this override exists to fix.
+        self._instance_ssh_username_overrides = settings.load_instance_ssh_username_overrides()
+        # Per-VM RDP logins (username + encrypted password), keyed the same
+        # way. Set by hand via "RDP Credentials…" or automatically after a
+        # successful "Set Password…"; see _start_session_from_instance.
+        self._instance_rdp_credentials = settings.load_instance_rdp_credentials()
+        self._qemu_vm_ip_overrides = settings.load_qemu_vm_ip_overrides()
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
         self._qemu_root_item: QTreeWidgetItem | None = None
         self._manual_root_item: QTreeWidgetItem | None = None
+        self._glinet_root_item: QTreeWidgetItem | None = None
 
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
-
-        self._sign_in_button = QPushButton("Sign in with gcloud")
-        self._sign_in_button.clicked.connect(self._on_sign_in_clicked)
-
-        top_bar = QHBoxLayout()
-        top_bar.addStretch()
-        top_bar.addWidget(self._sign_in_button)
 
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Connections"])
@@ -142,7 +219,6 @@ class ConnectionManagerView(QWidget):
             self._tabs.currentChanged.connect(self._on_session_tab_changed)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(top_bar)
         if self._owns_tabs:
             layout.addWidget(self._tabs, 1)
 
@@ -159,21 +235,21 @@ class ConnectionManagerView(QWidget):
         self._gcp_refresh_timer.timeout.connect(self._refresh_all_gcp_data)
         self._gcp_refresh_timer.start()
 
-        # QEMU hosts and manually-configured connections are independent
-        # connection families — shown regardless of GCP sign-in state,
-        # unlike everything below this point which requires the gcloud CLI.
+        # QEMU hosts, manually-configured connections, and GL.iNet hosts are
+        # independent connection families — shown regardless of GCP sign-in
+        # state, unlike everything below this point which requires the
+        # gcloud CLI.
         self._populate_qemu_hosts()
         self._populate_manual_connections()
+        self._populate_glinet_hosts()
+
+        # Signing in/out happens in Settings, not here — this view only
+        # reacts to it (see _on_account_changed).
+        auth_events.account_changed.connect(self._on_account_changed)
 
         if not gcp_auth.is_available():
-            self._sign_in_button.setEnabled(False)
-            self._sign_in_button.setToolTip(
-                f"gcloud CLI not found — install it from {gcp_auth.INSTALL_URL} "
-                "and relaunch."
-            )
             return
 
-        self._sign_in_button.setEnabled(False)
         async_utils.run_in_background(
             gcp_auth.get_active_account,
             on_result=self._on_startup_account_checked,
@@ -191,28 +267,24 @@ class ConnectionManagerView(QWidget):
     # -- Sign in / out -----------------------------------------------------
 
     def _on_startup_account_checked(self, account: str | None) -> None:
-        self._sign_in_button.setEnabled(True)
         if account is not None:
             self._set_signed_in(account)
 
-    def _on_sign_in_clicked(self) -> None:
-        self._sign_in_button.setEnabled(False)
-        async_utils.run_in_background(
-            gcp_auth.sign_in,
-            on_result=self._set_signed_in,
-            on_error=self._on_auth_error,
-        )
+    def _on_account_changed(self, account: str | None) -> None:
+        if account is None:
+            self._set_signed_out()
+        else:
+            self._set_signed_in(account)
 
     def _do_sign_out(self) -> None:
         async_utils.run_in_background(
             gcp_auth.sign_out,
-            on_result=lambda _: self._set_signed_out(),
+            on_result=lambda _: auth_events.account_changed.emit(None),
             on_error=self._on_auth_error,
         )
 
     def _set_signed_in(self, account: str) -> None:
         self._account = account
-        self._sign_in_button.setVisible(False)
         async_utils.run_in_background(
             lambda: gcp_client.list_projects(gcp_auth.get_credentials()),
             on_result=self._populate_projects,
@@ -222,12 +294,19 @@ class ConnectionManagerView(QWidget):
     def _set_signed_out(self) -> None:
         self._account = None
         self._all_projects = []
+        # tree.clear() destroys every top-level item, QEMU/Manual/GL.iNet
+        # roots included — rebuild those (they're independent of GCP
+        # sign-in), same as _apply_project_selection does.
         self._tree.clear()
-        self._sign_in_button.setEnabled(True)
-        self._sign_in_button.setVisible(True)
+        self._gcp_root_item = None
+        self._qemu_root_item = None
+        self._manual_root_item = None
+        self._glinet_root_item = None
+        self._populate_qemu_hosts()
+        self._populate_manual_connections()
+        self._populate_glinet_hosts()
 
     def _on_auth_error(self, error: Exception) -> None:
-        self._sign_in_button.setEnabled(True)
         QMessageBox.warning(self, "gcloud auth failed", str(error))
 
     # -- Project / instance tree --------------------------------------------
@@ -262,6 +341,7 @@ class ConnectionManagerView(QWidget):
         self._tree.clear()
         self._qemu_root_item = None
         self._manual_root_item = None
+        self._glinet_root_item = None
         gcp_category = QTreeWidgetItem(["GCP"])
         gcp_category.setData(0, IS_GCP_ROOT_ROLE, True)
         self._tree.addTopLevelItem(gcp_category)
@@ -285,6 +365,7 @@ class ConnectionManagerView(QWidget):
         gcp_category.setExpanded(True)
         self._populate_qemu_hosts()
         self._populate_manual_connections()
+        self._populate_glinet_hosts()
 
     def _on_select_projects_clicked(self) -> None:
         # Re-fetch rather than reusing self._all_projects (populated once at
@@ -391,10 +472,16 @@ class ConnectionManagerView(QWidget):
             )
 
     def _on_category_loaded(self, item: QTreeWidgetItem, populate, data) -> None:
+        # The tree can be cleared (sign-out, re-selecting projects) while a
+        # request is still in flight — the item is gone, so drop the result.
+        if not shiboken6.isValid(item):
+            return
         item.setData(0, IS_LOADING_ROLE, False)
         populate(item, data)
 
     def _on_category_load_failed(self, item: QTreeWidgetItem, error: Exception) -> None:
+        if not shiboken6.isValid(item):
+            return
         item.setData(0, IS_LOADING_ROLE, False)
         self._populate_category_error(item, error)
 
@@ -456,11 +543,39 @@ class ConnectionManagerView(QWidget):
 
     @staticmethod
     def _load_qemu_hosts() -> list[QemuHost]:
-        return [QemuHost(name=h["name"], uri=h["uri"]) for h in settings.load_qemu_hosts()]
+        return [
+            QemuHost(
+                name=h["name"],
+                uri=h["uri"],
+                default_memory_mib=h.get("default_memory_mib"),
+                default_vcpus=h.get("default_vcpus"),
+                default_disk_gib=h.get("default_disk_gib"),
+                default_disk_pool=h.get("default_disk_pool"),
+                default_network=h.get("default_network"),
+                default_iso_pool=h.get("default_iso_pool"),
+                default_os_variant=h.get("default_os_variant"),
+            )
+            for h in settings.load_qemu_hosts()
+        ]
 
     @staticmethod
     def _save_qemu_hosts(hosts: list[QemuHost]) -> None:
-        settings.save_qemu_hosts([{"name": h.name, "uri": h.uri} for h in hosts])
+        settings.save_qemu_hosts(
+            [
+                {
+                    "name": h.name,
+                    "uri": h.uri,
+                    "default_memory_mib": h.default_memory_mib,
+                    "default_vcpus": h.default_vcpus,
+                    "default_disk_gib": h.default_disk_gib,
+                    "default_disk_pool": h.default_disk_pool,
+                    "default_network": h.default_network,
+                    "default_iso_pool": h.default_iso_pool,
+                    "default_os_variant": h.default_os_variant,
+                }
+                for h in hosts
+            ]
+        )
 
     def _populate_qemu_hosts(self) -> None:
         # virsh isn't installed -- Settings' "QEMU / libvirt" section
@@ -524,6 +639,22 @@ class ConnectionManagerView(QWidget):
         self._save_qemu_hosts(dialog.hosts())
         self._populate_qemu_hosts()
 
+    def _on_qemu_reset_clicked(self, host: QemuHost, vm: QemuVm) -> None:
+        # Same confirm-first convention as GCP's "Force Shutdown" above --
+        # a hard reset is the destructive, no-guest-cooperation sibling of
+        # the plain "Shutdown" action, worth a pause before firing.
+        reply = QMessageBox.question(
+            self,
+            "Reset VM",
+            f"Reset {vm.name}? This forcibly resets the guest, the same as pressing a "
+            "physical machine's reset button — the guest OS gets no chance to shut down "
+            "cleanly first. Unsaved work or in-flight disk writes can be lost. Use "
+            '"Shutdown" instead unless the VM is unresponsive.',
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._run_qemu_power_action(host, vm, "reset")
+
     def _run_qemu_power_action(self, host: QemuHost, vm: QemuVm, action: str) -> None:
         async_utils.run_in_background(
             lambda: qemu_client.power_action(host, vm.name, action),
@@ -542,12 +673,25 @@ class ConnectionManagerView(QWidget):
 
     @staticmethod
     def _load_manual_connections() -> list[ManualConnection]:
-        return [
-            ManualConnection(
-                name=c["name"], host=c["host"], port=c["port"], kind=c["kind"], username=c.get("username")
+        connections = []
+        for c in settings.load_manual_connections():
+            encoded = c.get("password_encrypted")
+            connections.append(
+                ManualConnection(
+                    name=c["name"],
+                    host=c["host"],
+                    port=c["port"],
+                    kind=c["kind"],
+                    username=c.get("username"),
+                    password_encrypted=base64.b64decode(encoded) if encoded else None,
+                    gateway_host=c.get("gateway_host"),
+                    gateway_port=c.get("gateway_port", SSH_PORT),
+                    gateway_username=c.get("gateway_username"),
+                    gateway_password=c.get("gateway_password"),
+                    gateway_prompt_for_password=c.get("gateway_prompt_for_password", False),
+                )
             )
-            for c in settings.load_manual_connections()
-        ]
+        return connections
 
     @staticmethod
     def _save_manual_connections(connections: list[ManualConnection]) -> None:
@@ -559,6 +703,16 @@ class ConnectionManagerView(QWidget):
                     "port": c.port,
                     "kind": c.kind,
                     "username": c.username,
+                    "password_encrypted": (
+                        base64.b64encode(c.password_encrypted).decode()
+                        if c.password_encrypted
+                        else None
+                    ),
+                    "gateway_host": c.gateway_host,
+                    "gateway_port": c.gateway_port,
+                    "gateway_username": c.gateway_username,
+                    "gateway_password": c.gateway_password,
+                    "gateway_prompt_for_password": c.gateway_prompt_for_password,
                 }
                 for c in connections
             ]
@@ -579,8 +733,134 @@ class ConnectionManagerView(QWidget):
     def _on_manage_manual_connections_clicked(self) -> None:
         dialog = ManageManualConnectionsDialog(self._load_manual_connections(), parent=self)
         dialog.exec()
-        self._save_manual_connections(dialog.connections())
+        connections = []
+        for connection, new_password in zip(dialog.connections(), dialog.new_passwords(), strict=True):
+            if new_password:
+                connection = ManualConnection(
+                    name=connection.name,
+                    host=connection.host,
+                    port=connection.port,
+                    kind=connection.kind,
+                    username=connection.username,
+                    password_encrypted=settings.encrypt_manual_connection_password(new_password),
+                )
+            connections.append(connection)
+        self._save_manual_connections(connections)
         self._populate_manual_connections()
+
+    # -- GL.iNet hosts ------------------------------------------------------
+
+    @staticmethod
+    def _load_glinet_hosts() -> list[GlinetHost]:
+        hosts = []
+        for h in settings.load_glinet_hosts():
+            encoded = h.get("password_encrypted")
+            hosts.append(
+                GlinetHost(
+                    name=h["name"],
+                    url=h["url"],
+                    username=h.get("username", "root"),
+                    verify_ssl=h.get("verify_ssl", False),
+                    password_encrypted=base64.b64decode(encoded) if encoded else None,
+                )
+            )
+        return hosts
+
+    @staticmethod
+    def _save_glinet_hosts(hosts: list[GlinetHost]) -> None:
+        settings.save_glinet_hosts(
+            [
+                {
+                    "name": h.name,
+                    "url": h.url,
+                    "username": h.username,
+                    "verify_ssl": h.verify_ssl,
+                    "password_encrypted": (
+                        base64.b64encode(h.password_encrypted).decode()
+                        if h.password_encrypted
+                        else None
+                    ),
+                }
+                for h in hosts
+            ]
+        )
+
+    def _populate_glinet_hosts(self) -> None:
+        # python-glinet isn't installed -- Settings' "GL.iNet" section
+        # already reports this; nothing under this root could actually be
+        # opened (GlinetDashboardWidget itself degrades to a "not
+        # installed" message), so don't clutter the tree with a root that
+        # leads nowhere. Same treatment as the QEMU root.
+        if not glinet_client.is_available():
+            if self._glinet_root_item is not None:
+                index = self._tree.indexOfTopLevelItem(self._glinet_root_item)
+                if index != -1:
+                    self._tree.takeTopLevelItem(index)
+                self._glinet_root_item = None
+            return
+
+        if self._glinet_root_item is None:
+            self._glinet_root_item = QTreeWidgetItem(["GL.iNet"])
+            self._glinet_root_item.setData(0, IS_GLINET_ROOT_ROLE, True)
+            self._tree.addTopLevelItem(self._glinet_root_item)
+        self._glinet_root_item.takeChildren()
+        for host in self._load_glinet_hosts():
+            item = QTreeWidgetItem([host.name])
+            item.setData(0, GLINET_HOST_ROLE, host)
+            item.setToolTip(0, host.url)
+            self._glinet_root_item.addChild(item)
+
+    def _on_manage_glinet_hosts_clicked(self) -> None:
+        dialog = ManageGlinetHostsDialog(self._load_glinet_hosts(), parent=self)
+        dialog.exec()
+        hosts = []
+        for host, new_password in zip(dialog.hosts(), dialog.new_passwords(), strict=True):
+            if new_password:
+                host = GlinetHost(
+                    name=host.name,
+                    url=host.url,
+                    username=host.username,
+                    verify_ssl=host.verify_ssl,
+                    password_encrypted=settings.encrypt_glinet_password(new_password),
+                )
+            hosts.append(host)
+        self._save_glinet_hosts(hosts)
+        self._populate_glinet_hosts()
+
+    def _open_glinet_dashboard(self, host: GlinetHost) -> None:
+        if glinet_client.GlInet is None:
+            QMessageBox.warning(
+                self,
+                "GL.iNet unavailable",
+                "python-glinet isn't installed — see Settings for install instructions.",
+            )
+            return
+
+        password = self._resolve_glinet_password(host)
+        if password is None:
+            return
+
+        dashboard = GlinetDashboardWidget(host, password)
+        self._owned_tab_widgets.add(dashboard)
+        index = self._tabs.addTab(dashboard, host.name)
+        self._tabs.setCurrentIndex(index)
+
+    def _resolve_glinet_password(self, host: GlinetHost) -> str | None:
+        if host.password_encrypted is not None:
+            try:
+                return settings.decrypt_glinet_password(host.password_encrypted)
+            except settings.SecretDecryptionError:
+                pass  # fall through to the interactive prompt below
+
+        password, ok = QInputDialog.getText(
+            self,
+            "GL.iNet Password",
+            f"Password for {host.username}@{host.name}:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return None
+        return password
 
     # -- Tree context menu: connect -------------------------------------------
 
@@ -602,6 +882,15 @@ class ConnectionManagerView(QWidget):
             self._show_qemu_vm_context_menu(pos, item, vm)
             return
 
+        # A bare QEMU host node -- not the "QEMU" root (that's
+        # IS_QEMU_ROOT_ROLE, above), not a VM leaf (that's VM_ROLE,
+        # just checked). Same HOST_ROLE-is-set/VM_ROLE-is-None check
+        # _load_qemu_vms's expand-on-click handler already uses.
+        host = item.data(0, HOST_ROLE)
+        if host is not None:
+            self._show_qemu_host_context_menu(pos, item, host)
+            return
+
         if item.data(0, IS_MANUAL_ROOT_ROLE):
             self._show_manual_root_context_menu(pos)
             return
@@ -609,6 +898,15 @@ class ConnectionManagerView(QWidget):
         manual_connection = item.data(0, MANUAL_CONNECTION_ROLE)
         if manual_connection is not None:
             self._show_manual_connection_context_menu(pos, manual_connection)
+            return
+
+        if item.data(0, IS_GLINET_ROOT_ROLE):
+            self._show_glinet_root_context_menu(pos)
+            return
+
+        glinet_host = item.data(0, GLINET_HOST_ROLE)
+        if glinet_host is not None:
+            self._show_glinet_host_context_menu(pos, glinet_host)
             return
 
         # A GCP project node — PROJECT_ID_ROLE set, but neither a VMs/
@@ -631,30 +929,63 @@ class ConnectionManagerView(QWidget):
         menu = QMenu(self)
         rdp_action = menu.addAction("Connect via RDP")
         ssh_action = menu.addAction("Connect via SSH")
+        sftp_action = menu.addAction("Connect via SFTP")
         menu.addSeparator()
         turn_on_action = menu.addAction("Turn On")
         turn_off_action = menu.addAction("Turn Off")
         force_shutdown_action = menu.addAction("Force Shutdown…")
+        show_password_reset = _instance_supports_password_reset(instance)
+        show_key_upload = _instance_supports_ssh_key_upload(instance)
+        set_password_action = None
+        upload_key_action = None
         menu.addSeparator()
-        set_password_action = menu.addAction("Set Password…")
+        if show_password_reset:
+            set_password_action = menu.addAction("Set Password…")
+        rdp_credentials_action = menu.addAction("RDP Credentials…")
+        if show_key_upload:
+            upload_key_action = menu.addAction("Upload Public Key…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
         elif chosen is ssh_action:
             self._start_session_from_instance(instance, "ssh")
+        elif chosen is sftp_action:
+            self._start_session_from_instance(instance, "sftp")
         elif chosen is turn_on_action:
             self._run_instance_power_action(instance, "start")
         elif chosen is turn_off_action:
             self._run_instance_power_action(instance, "stop")
         elif chosen is force_shutdown_action:
             self._run_instance_power_action(instance, "force_stop")
-        elif chosen is set_password_action:
+        elif set_password_action is not None and chosen is set_password_action:
             self._on_set_instance_password_clicked(instance)
+        elif chosen is rdp_credentials_action:
+            self._on_rdp_credentials_clicked(instance)
+        elif upload_key_action is not None and chosen is upload_key_action:
+            self._on_upload_ssh_key_clicked(instance)
 
     def _show_qemu_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
         menu.addAction("Manage Hosts…").triggered.connect(self._on_manage_hosts_clicked)
         menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _show_qemu_host_context_menu(self, pos, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        menu = QMenu(self)
+        # Only offered where virt-install itself is present -- resize/
+        # add-disk (on the VM context menu) only need virsh, already
+        # gated by qemu_client.is_available() disabling the whole QEMU
+        # tree, but creation has its own, separate dependency.
+        deploy_action = menu.addAction("Deploy VM…") if qemu_provisioning.is_available() else None
+        if deploy_action is None:
+            menu.addAction("Deploy VM… (requires virt-install)").setEnabled(False)
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if deploy_action is not None and chosen is deploy_action:
+            self._on_deploy_vm_clicked(host_item, host)
+
+    def _on_deploy_vm_clicked(self, host_item: QTreeWidgetItem, host: QemuHost) -> None:
+        dialog = CreateVmDialog(host, parent=self)
+        if dialog.exec() == CreateVmDialog.DialogCode.Accepted:
+            self._load_qemu_vms(host_item, host)
 
     def _show_qemu_vm_context_menu(self, pos, item: QTreeWidgetItem, vm: QemuVm) -> None:
         host = item.data(0, HOST_ROLE)
@@ -664,15 +995,27 @@ class ConnectionManagerView(QWidget):
         # at the top of this file. VM discovery/power actions below don't
         # need it and stay available regardless.
         connect_action = menu.addAction("Connect via SPICE") if SpiceWidget is not None else None
-        if connect_action is not None:
-            menu.addSeparator()
+        sftp_action = menu.addAction("Connect via SFTP")
+        menu.addSeparator()
         start_action = menu.addAction("Start")
         pause_action = menu.addAction("Pause")
         resume_action = menu.addAction("Resume")
         shutdown_action = menu.addAction("Shutdown")
+        reset_action = menu.addAction("Reset…")
+        # Available regardless of running state -- ConfigureVmDialog itself
+        # adapts what each change actually does per operation (see its own
+        # module docstring): vCPU/memory always stages for next restart,
+        # disk-add/CD-ROM-media apply immediately either way, and disk/
+        # network removal requests immediate effect but warns it isn't
+        # guaranteed while running.
+        menu.addSeparator()
+        configure_action = menu.addAction("Configure…")
+        set_ip_action = menu.addAction("Set IP Address…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if connect_action is not None and chosen is connect_action:
             self._connect_qemu(host, vm)
+        elif chosen is sftp_action:
+            self._start_qemu_sftp_session(host, vm)
         elif chosen is start_action:
             self._run_qemu_power_action(host, vm, "start")
         elif chosen is pause_action:
@@ -681,6 +1024,114 @@ class ConnectionManagerView(QWidget):
             self._run_qemu_power_action(host, vm, "resume")
         elif chosen is shutdown_action:
             self._run_qemu_power_action(host, vm, "shutdown")
+        elif chosen is reset_action:
+            self._on_qemu_reset_clicked(host, vm)
+        elif chosen is configure_action:
+            self._on_configure_vm_clicked(item, host, vm)
+        elif chosen is set_ip_action:
+            self._on_set_qemu_vm_ip_clicked(host, vm)
+
+    def _on_configure_vm_clicked(self, item: QTreeWidgetItem, host: QemuHost, vm: QemuVm) -> None:
+        async_utils.run_in_background(
+            lambda: (
+                qemu_provisioning.get_vm_resources(host, vm.name),
+                qemu_provisioning.get_vm_display_device(host, vm.name),
+                qemu_provisioning.get_boot_order(host, vm.name),
+            ),
+            on_result=lambda result: self._open_configure_vm_dialog(item, host, vm, result),
+            on_error=lambda error: QMessageBox.warning(self, "Failed to read VM resources", str(error)),
+        )
+
+    def _open_configure_vm_dialog(
+        self,
+        item: QTreeWidgetItem,
+        host: QemuHost,
+        vm: QemuVm,
+        result: tuple[tuple[int, int], str | None, list[str]],
+    ) -> None:
+        (vcpus, memory_mib), display_device, boot_order = result
+        dialog = ConfigureVmDialog(host, vm, vcpus, memory_mib, display_device, boot_order, parent=self)
+        if dialog.exec() == ConfigureVmDialog.DialogCode.Accepted:
+            host_item = item.parent()
+            if host_item is not None:
+                self._load_qemu_vms(host_item, host)
+
+    def _start_qemu_sftp_session(self, host: QemuHost, vm: QemuVm) -> None:
+        override = self._qemu_vm_ip_overrides.get((host.name, vm.name))
+        if override:
+            self._prompt_qemu_sftp_credentials(vm, override)
+            return
+
+        async_utils.run_in_background(
+            lambda: qemu_client.get_vm_ip_address(host, vm.name),
+            on_result=lambda ip: self._on_qemu_vm_ip_resolved(host, vm, ip),
+            on_error=self._on_session_error,
+        )
+
+    def _on_qemu_vm_ip_resolved(self, host: QemuHost, vm: QemuVm, ip: str | None) -> None:
+        if ip is None:
+            # virsh domifaddr found nothing on any of its three sources
+            # (see qemu_client.get_vm_ip_address) -- ask once and remember
+            # the answer as an override so this VM never needs asking again.
+            ip, ok = QInputDialog.getText(
+                self,
+                "IP Address Needed",
+                f"Couldn't automatically discover {vm.name}'s IP address (this needs "
+                "either the QEMU guest agent installed in the guest, a DHCP lease from "
+                "libvirt's own network, or a live ARP cache entry on a bridged network). "
+                "Enter it manually:",
+            )
+            if not ok or not ip.strip():
+                return
+            ip = ip.strip()
+            self._qemu_vm_ip_overrides[(host.name, vm.name)] = ip
+            settings.save_qemu_vm_ip_overrides(self._qemu_vm_ip_overrides)
+        self._prompt_qemu_sftp_credentials(vm, ip)
+
+    def _prompt_qemu_sftp_credentials(self, vm: QemuVm, ip: str) -> None:
+        default_username = settings.load_default_username() or ""
+        # No ManualConnection record exists for a QEMU VM to persist a
+        # password onto (same reasoning as the GCP-instance SFTP path) --
+        # the credentials dialog's own "remember" checkbox is hidden.
+        dialog = FtpCredentialsDialog("sftp", vm.name, default_username=default_username, show_remember=False, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        username = dialog.username() or default_username
+        if not username:
+            QMessageBox.warning(self, "Username required", "A username is required to connect.")
+            return
+
+        session = ftp_client.SftpSession(
+            ip,
+            SFTP_PORT,
+            username,
+            password=dialog.password() or None,
+            key_path=dialog.key_path(),
+            key_passphrase=dialog.key_passphrase(),
+        )
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._embed_ftp(session_id, vm.name, session)
+
+        label = f"{vm.name} (SFTP) — {ip}:{SFTP_PORT}"
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    def _on_set_qemu_vm_ip_clicked(self, host: QemuHost, vm: QemuVm) -> None:
+        current = self._qemu_vm_ip_overrides.get((host.name, vm.name), "")
+        ip, ok = QInputDialog.getText(
+            self,
+            "Set IP Address",
+            f"IP address for {vm.name} (leave blank to go back to automatic discovery):",
+            text=current,
+        )
+        if not ok:
+            return
+        ip = ip.strip()
+        if ip:
+            self._qemu_vm_ip_overrides[(host.name, vm.name)] = ip
+        else:
+            self._qemu_vm_ip_overrides.pop((host.name, vm.name), None)
+        settings.save_qemu_vm_ip_overrides(self._qemu_vm_ip_overrides)
 
     def _show_manual_root_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -695,6 +1146,18 @@ class ConnectionManagerView(QWidget):
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is connect_action:
             self._start_session_from_manual_connection(connection)
+
+    def _show_glinet_root_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Manage Hosts…").triggered.connect(self._on_manage_glinet_hosts_clicked)
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _show_glinet_host_context_menu(self, pos, host: GlinetHost) -> None:
+        menu = QMenu(self)
+        open_action = menu.addAction("Open Dashboard")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is open_action:
+            self._open_glinet_dashboard(host)
 
     def _build_gcp_root_menu(self) -> QMenu | None:
         if self._account is None:
@@ -713,6 +1176,11 @@ class ConnectionManagerView(QWidget):
         bucket = item.data(0, BUCKET_ROLE)
         if bucket is not None:
             self._open_bucket_browser(bucket)
+            return
+
+        glinet_host = item.data(0, GLINET_HOST_ROLE)
+        if glinet_host is not None:
+            self._open_glinet_dashboard(glinet_host)
             return
 
         instance = item.data(0, INSTANCE_ROLE)
@@ -786,7 +1254,15 @@ class ConnectionManagerView(QWidget):
             )
             return
 
-        username = settings.load_default_username()
+        key = _instance_key(instance)
+        saved_rdp = self._instance_rdp_credentials.get(key) if kind == "rdp" else None
+        username = None
+        if saved_rdp is not None:
+            username = saved_rdp.username
+        elif kind in ("ssh", "sftp"):
+            username = self._instance_ssh_username_overrides.get(key)
+        if username is None:
+            username = settings.load_default_username()
         if username is None:
             username, ok = QInputDialog.getText(
                 self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
@@ -796,19 +1272,38 @@ class ConnectionManagerView(QWidget):
             username = username.strip() or None
 
         password = None
+        key_path = None
+        key_passphrase = None
         if kind == "rdp":
-            # Not persisted anywhere (no keyring integration in this app) —
-            # the embedded RDP client needs it upfront for the NLA
+            # The embedded RDP client needs the password upfront for the NLA
             # handshake, unlike external mstsc/xfreerdp which prompt in
-            # their own window.
-            password, ok = QInputDialog.getText(
-                self,
-                "Password",
-                f"Password for {username or 'RDP'}@{instance.name}:",
-                QLineEdit.EchoMode.Password,
+            # their own window. Use the one saved for this VM (via "RDP
+            # Credentials…" or an earlier "Set Password…") when there is
+            # one; otherwise ask, and don't persist what's typed here.
+            password = self._saved_rdp_password(saved_rdp)
+            if password is None:
+                password, ok = QInputDialog.getText(
+                    self,
+                    "Password",
+                    f"Password for {username or 'RDP'}@{instance.name}:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if not ok:
+                    return
+        elif kind == "sftp":
+            # Same "never persisted for a GCP instance" reasoning as RDP's
+            # password above -- there's no ManualConnection here to
+            # remember it on, so the credentials dialog's own "remember"
+            # checkbox is hidden.
+            dialog = FtpCredentialsDialog(
+                "sftp", instance.name, default_username=username or "", show_remember=False, parent=self
             )
-            if not ok:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
+            username = dialog.username() or username
+            password = dialog.password() or None
+            key_path = dialog.key_path()
+            key_passphrase = dialog.key_passphrase()
 
         self._connect(
             display_name=instance.name,
@@ -819,6 +1314,8 @@ class ConnectionManagerView(QWidget):
             kind=kind,
             username=username,
             password=password,
+            key_path=key_path,
+            key_passphrase=key_passphrase,
         )
 
     def _run_instance_power_action(self, instance: Instance, action: str) -> None:
@@ -894,25 +1391,187 @@ class ConnectionManagerView(QWidget):
             return
         username = username.strip()
 
+        # The reset is a round trip through the guest agent inside the VM
+        # and can take a minute or more, so say so rather than looking hung.
+        previous_status = self._show_status(
+            f"Resetting the password for {username} on {instance.name} — this can take a minute…"
+        )
         async_utils.run_in_background(
             lambda: gcp_client.reset_windows_password(
                 gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name, username
             ),
-            on_result=lambda credential: self._on_password_reset(instance, credential),
-            on_error=self._on_instance_action_error,
+            on_result=lambda credential: self._on_password_reset(instance, credential, previous_status),
+            on_error=lambda error: self._on_password_reset_failed(error, previous_status),
         )
 
-    def _on_password_reset(self, instance: Instance, credential: tuple[str, str]) -> None:
+    def _show_status(self, message: str) -> str | None:
+        """Shows `message` in the main window's status bar and returns what
+        it replaced (None when there's no main window, e.g. standalone)."""
+        window = self.window()
+        if not isinstance(window, QMainWindow):
+            return None
+        status_bar = window.statusBar()
+        previous = status_bar.currentMessage()
+        status_bar.showMessage(message)
+        return previous
+
+    def _restore_status(self, previous: str | None) -> None:
+        if previous is None:
+            return
+        try:
+            window = self.window()
+            if isinstance(window, QMainWindow):
+                window.statusBar().showMessage(previous)
+        except RuntimeError:
+            pass  # window torn down before the reset finished
+
+    def _on_password_reset_failed(self, error: Exception, previous_status: str | None) -> None:
+        self._restore_status(previous_status)
+        self._on_instance_action_error(error)
+
+    def _on_password_reset(
+        self, instance: Instance, credential: tuple[str, str], previous_status: str | None = None
+    ) -> None:
+        self._restore_status(previous_status)
         username, password = credential
-        QMessageBox.information(
-            self,
-            "Password Reset",
-            f"New login for {instance.name} — shown once, not stored anywhere:\n\n"
-            f"Username: {username}\nPassword: {password}",
+        # The new login is what "Connect via RDP" needs from now on, so save
+        # it for this VM rather than making the user copy it into a prompt.
+        # Saving is best-effort (no SSH key to encrypt with, say) and must
+        # never stop the credentials being shown: this dialog is the only
+        # place the password ever appears in plain text.
+        try:
+            self._store_instance_rdp_credentials(
+                instance, username, settings.encrypt_instance_rdp_password(password)
+            )
+        except (settings.SecretDecryptionError, OSError) as exc:
+            saved_note = (
+                f"Couldn't save it as this VM's RDP login: {exc}\n"
+                "Copy it now; you'll be asked for the password on the next RDP connection."
+            )
+        else:
+            saved_note = (
+                "Saved as this VM's RDP login (password encrypted with your SSH key), so "
+                "Connect via RDP signs in automatically. Change it under RDP Credentials…"
+            )
+        # The password is masked (with a Copy button) rather than printed: see
+        # PasswordResetDialog.
+        PasswordResetDialog(instance.name, username, password, saved_note, parent=self).exec()
+
+    def _store_instance_rdp_credentials(
+        self, instance: Instance, username: str, password_encrypted: bytes | None
+    ) -> None:
+        self._instance_rdp_credentials[_instance_key(instance)] = settings.InstanceRdpCredentials(
+            username=username, password_encrypted=password_encrypted
         )
+        settings.save_instance_rdp_credentials(self._instance_rdp_credentials)
+
+    def _saved_rdp_password(self, saved: settings.InstanceRdpCredentials | None) -> str | None:
+        """The saved RDP password, or None when there isn't one or it can't
+        be decrypted (no SSH key, a passphrase-protected key, a key that was
+        replaced since) -- the caller then just prompts, as it always did."""
+        if saved is None or saved.password_encrypted is None:
+            return None
+        try:
+            return settings.decrypt_instance_rdp_password(saved.password_encrypted)
+        except settings.SecretDecryptionError:
+            return None
+
+    def _on_rdp_credentials_clicked(self, instance: Instance) -> None:
+        key = _instance_key(instance)
+        saved = self._instance_rdp_credentials.get(key)
+        dialog = RdpCredentialsDialog(
+            instance.name,
+            username=saved.username if saved else (settings.load_default_username() or ""),
+            has_saved=saved is not None,
+            has_saved_password=saved is not None and saved.password_encrypted is not None,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if dialog.cleared():
+            self._instance_rdp_credentials.pop(key, None)
+            settings.save_instance_rdp_credentials(self._instance_rdp_credentials)
+            return
+
+        username = dialog.username()
+        password = dialog.password()
+        if password:
+            try:
+                encrypted = settings.encrypt_instance_rdp_password(password)
+            except settings.SecretDecryptionError as exc:
+                QMessageBox.warning(self, "Couldn't save password", str(exc))
+                return
+        elif saved is not None and saved.username == username:
+            encrypted = saved.password_encrypted  # blank means "keep what's saved"
+        else:
+            # A new username (or nothing saved yet): a leftover password
+            # belonged to somebody else, so it would only cause a failed login.
+            encrypted = None
+        self._store_instance_rdp_credentials(instance, username, encrypted)
 
     def _on_instance_action_error(self, error: Exception) -> None:
         QMessageBox.warning(self, "Instance action failed", str(error))
+
+    def _on_upload_ssh_key_clicked(self, instance: Instance) -> None:
+        # Same "ask, don't silently pick one" reasoning as Set Password's
+        # username prompt above.
+        username, ok = QInputDialog.getText(
+            self,
+            "Upload Public Key",
+            f"Username to grant SSH access as on {instance.name}:",
+            QLineEdit.EchoMode.Normal,
+            settings.load_default_username() or "",
+        )
+        if not ok or not username.strip():
+            return
+        username = username.strip()
+
+        # Pre-filled from the Settings-configured default (or the same
+        # ~/.ssh/id_ed25519 / id_rsa discovery JumpCloud's own SSH key
+        # setting falls back to) so the common case needs no manual
+        # pasting — still editable/clearable for a one-off different key.
+        public_key, ok = QInputDialog.getText(
+            self,
+            "Upload Public Key",
+            f"Public key to authorize for {username}@{instance.name}:",
+            QLineEdit.EchoMode.Normal,
+            settings.resolve_gcp_ssh_public_key() or "",
+        )
+        if not ok or not public_key.strip():
+            return
+        public_key = public_key.strip()
+
+        async_utils.run_in_background(
+            lambda: gcp_client.add_ssh_key(
+                gcp_auth.get_credentials(),
+                instance.project_id,
+                instance.zone,
+                instance.name,
+                username,
+                public_key,
+            ),
+            on_result=lambda _: self._on_ssh_key_uploaded(instance, username),
+            on_error=self._on_instance_action_error,
+        )
+
+    def _on_ssh_key_uploaded(self, instance: Instance, username: str) -> None:
+        # If this granted access under a different account than the global
+        # default, a subsequent "Connect via SSH" should use *this*
+        # account -- the default may well have no access on this instance
+        # at all, which is the whole reason a different username was
+        # entered above. See _start_session_from_instance's lookup.
+        if username != settings.load_default_username():
+            self._instance_ssh_username_overrides[
+                (instance.project_id, instance.zone, instance.name)
+            ] = username
+            settings.save_instance_ssh_username_overrides(self._instance_ssh_username_overrides)
+        QMessageBox.information(
+            self,
+            "Public Key Uploaded",
+            f"Granted SSH access to {instance.name} as {username}. It can take up to a "
+            "minute for the guest agent to apply it before connecting will work.",
+        )
 
     # -- Connect: tunnel, then embed SSH or launch external RDP ---------------
 
@@ -926,19 +1585,22 @@ class ConnectionManagerView(QWidget):
         kind: str,
         username: str | None,
         password: str | None = None,
+        key_path: str | None = None,
+        key_passphrase: str | None = None,
     ) -> None:
         target = IapTunnelTarget(
             project=project_id,
             zone=zone,
             instance=instance_name,
             interface=network_interface,
+            # sftp rides over an ordinary SSH connection, same as ssh itself.
             port=RDP_PORT if kind == "rdp" else SSH_PORT,
         )
 
         async_utils.run_in_background(
             lambda: self._start_tunnel(target),
             on_result=lambda tunnel: self._on_tunnel_ready(
-                tunnel, display_name, kind, username, password
+                tunnel, display_name, kind, username, password, key_path, key_passphrase
             ),
             on_error=self._on_session_error,
         )
@@ -958,6 +1620,8 @@ class ConnectionManagerView(QWidget):
         kind: str,
         username: str | None,
         password: str | None = None,
+        key_path: str | None = None,
+        key_passphrase: str | None = None,
     ) -> None:
         session_id = self._next_session_id
         self._next_session_id += 1
@@ -965,6 +1629,17 @@ class ConnectionManagerView(QWidget):
 
         if kind == "ssh":
             self._embed_ssh(session_id, display_name, tunnel.port, username, skip_host_key_check=True)
+        elif kind == "sftp":
+            session = ftp_client.SftpSession(
+                "127.0.0.1",
+                tunnel.port,
+                username or "",
+                password=password,
+                key_path=key_path,
+                key_passphrase=key_passphrase,
+                skip_host_key_check=True,
+            )
+            self._embed_ftp(session_id, display_name, session)
         else:
             self._embed_rdp(session_id, display_name, tunnel.port, username, password)
 
@@ -999,7 +1674,7 @@ class ConnectionManagerView(QWidget):
             # checking.
             args += ["-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={_NULL_DEVICE}"]
         args.append(target)
-        terminal = TerminalWidget(args)
+        terminal = TerminalWidget(args, font_point_size=settings.load_terminal_font_size())
         terminal.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = terminal
         self._owned_tab_widgets.add(terminal)
@@ -1017,7 +1692,15 @@ class ConnectionManagerView(QWidget):
         host: str = "127.0.0.1",
     ) -> None:
         desktop_size = settings.load_default_rdp_resolution()
-        rdp = RdpWidget(host, port, username or "", password or "", desktop_size=desktop_size)
+        keyboard_layout = settings.load_rdp_keyboard_layout()
+        rdp = RdpWidget(
+            host,
+            port,
+            username or "",
+            password or "",
+            desktop_size=desktop_size,
+            keyboard_layout=keyboard_layout,
+        )
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = rdp
         self._owned_tab_widgets.add(rdp)
@@ -1025,9 +1708,26 @@ class ConnectionManagerView(QWidget):
         self._tabs.setCurrentIndex(index)
         rdp.setFocus()
 
+    def _embed_ftp(
+        self,
+        session_id: int,
+        display_name: str,
+        session: ftp_client.SftpSession | ftp_client.FtpSession,
+    ) -> None:
+        browser = FtpBrowserWidget(session, display_name)
+        self._session_tab_widgets[session_id] = browser
+        self._owned_tab_widgets.add(browser)
+        index = self._tabs.addTab(browser, display_name)
+        self._tabs.setCurrentIndex(index)
+        browser.setFocus()
+
     # -- Connect: manually-configured RDP/SSH, direct (no tunnel) ---------
 
     def _start_session_from_manual_connection(self, connection: ManualConnection) -> None:
+        if connection.kind in ("sftp", "ftp"):
+            self._start_manual_ftp_session(connection)
+            return
+
         if connection.kind == "rdp" and RdpWidget is None:
             QMessageBox.warning(
                 self,
@@ -1057,6 +1757,27 @@ class ConnectionManagerView(QWidget):
             if not ok:
                 return
 
+        if connection.gateway_host:
+            gateway_password = connection.gateway_password
+            if connection.gateway_prompt_for_password:
+                gateway_target = connection.gateway_username or "the SSH gateway"
+                gateway_password, ok = QInputDialog.getText(
+                    self,
+                    "SSH Gateway Password",
+                    f"Password for {gateway_target}@{connection.gateway_host}:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if not ok:
+                    return
+            async_utils.run_in_background(
+                lambda: self._start_manual_gateway_tunnel(connection, gateway_password),
+                on_result=lambda tunnel: self._on_manual_gateway_tunnel_ready(
+                    tunnel, connection, username, password
+                ),
+                on_error=self._on_session_error,
+            )
+            return
+
         session_id = self._next_session_id
         self._next_session_id += 1
 
@@ -1070,7 +1791,115 @@ class ConnectionManagerView(QWidget):
         label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
-    # -- Connect: QEMU/libvirt, tunnel over SSH, embed SPICE ------------------
+    def _start_manual_ftp_session(self, connection: ManualConnection) -> None:
+        default_username = connection.username or settings.load_default_username() or ""
+        password = None
+        if connection.password_encrypted is not None:
+            try:
+                password = settings.decrypt_manual_connection_password(connection.password_encrypted)
+            except settings.SecretDecryptionError:
+                password = None  # fall through to the prompt below
+
+        username = default_username
+        key_path = None
+        key_passphrase = None
+
+        if password is None:
+            dialog = FtpCredentialsDialog(
+                connection.kind, connection.name, default_username=default_username, parent=self
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            username = dialog.username() or default_username
+            password = dialog.password() or None
+            key_path = dialog.key_path()
+            key_passphrase = dialog.key_passphrase()
+            if dialog.remember_password() and password:
+                try:
+                    encrypted = settings.encrypt_manual_connection_password(password)
+                except settings.SecretDecryptionError as exc:
+                    QMessageBox.warning(self, "Couldn't save password", str(exc))
+                else:
+                    self._remember_manual_connection_password(connection, encrypted)
+
+        if not username:
+            QMessageBox.warning(self, "Username required", "A username is required to connect.")
+            return
+
+        if connection.kind == "sftp":
+            session = ftp_client.SftpSession(
+                connection.host, connection.port, username,
+                password=password, key_path=key_path, key_passphrase=key_passphrase,
+            )
+        else:
+            session = ftp_client.FtpSession(connection.host, connection.port, username, password=password or "")
+
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._embed_ftp(session_id, connection.name, session)
+
+        label = f"{connection.name} ({connection.kind.upper()}) — {connection.host}:{connection.port}"
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    def _remember_manual_connection_password(self, connection: ManualConnection, encrypted: bytes) -> None:
+        connections = self._load_manual_connections()
+        updated = [
+            ManualConnection(
+                name=c.name, host=c.host, port=c.port, kind=c.kind, username=c.username,
+                password_encrypted=encrypted,
+            )
+            if c.name == connection.name and c.host == connection.host and c.port == connection.port
+            else c
+            for c in connections
+        ]
+        self._save_manual_connections(updated)
+        self._populate_manual_connections()
+
+    @staticmethod
+    def _start_manual_gateway_tunnel(connection: ManualConnection, gateway_password: str | None) -> SshTunnel:
+        gateway_target = (
+            f"{connection.gateway_username}@{connection.gateway_host}"
+            if connection.gateway_username
+            else connection.gateway_host
+        )
+        tunnel = SshTunnel(
+            gateway_target,
+            connection.host,
+            connection.port,
+            ssh_port=connection.gateway_port,
+            password=gateway_password,
+        )
+        tunnel.start()
+        return tunnel
+
+    def _on_manual_gateway_tunnel_ready(
+        self,
+        tunnel: SshTunnel,
+        connection: ManualConnection,
+        username: str | None,
+        password: str | None,
+    ) -> None:
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        self._active_sessions[session_id] = (connection.kind, tunnel)
+
+        if connection.kind == "ssh":
+            # The local hop's own host key is meaningless here (a fresh
+            # ephemeral local port every session -- same reasoning as the
+            # GCP/IAP tunnel path in _embed_ssh's own docstring); the real
+            # trust boundary is the gateway's SSH host key, checked by the
+            # tunnel subprocess itself when it connects out.
+            self._embed_ssh(session_id, connection.name, tunnel.port, username, skip_host_key_check=True)
+        else:
+            self._embed_rdp(session_id, connection.name, tunnel.port, username, password)
+
+        label = (
+            f"{connection.name} ({connection.kind.upper()}) — via {connection.gateway_host} "
+            f"→ {connection.host}:{connection.port}"
+        )
+        self._active_sessions_dialog.add_session(session_id, label)
+
+    # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------
 
     def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
         if SpiceWidget is None:
@@ -1082,28 +1911,41 @@ class ConnectionManagerView(QWidget):
             )
             return
         async_utils.run_in_background(
-            lambda: self._start_qemu_tunnel(host, vm),
-            on_result=lambda tunnel: self._on_qemu_tunnel_ready(tunnel, vm),
+            lambda: self._prepare_qemu_spice_connection(host, vm),
+            on_result=lambda result: self._on_qemu_spice_connection_ready(result, vm),
             on_error=self._on_session_error,
         )
 
     @staticmethod
-    def _start_qemu_tunnel(host: QemuHost, vm: QemuVm) -> QemuTunnel:
+    def _prepare_qemu_spice_connection(host: QemuHost, vm: QemuVm) -> tuple[QemuTunnel | None, int]:
+        """(tunnel, port-to-connect-to-on-127.0.0.1) -- tunnel is None for a
+        local libvirt host (see qemu_tunnel.is_local_uri()'s docstring for
+        why that case needs no tunnel at all: its SPICE port is already
+        directly reachable on this same machine)."""
         spice_port = qemu_client.get_vm_spice_port(host, vm.name)
         if spice_port is None:
-            raise QemuApiError(f"{vm.name} has no SPICE port available — is it running?")
+            raise QemuApiError(qemu_client.diagnose_missing_spice_port(host, vm.name, vm.state))
+        if is_local_uri(host.uri):
+            return None, spice_port
         tunnel = QemuTunnel(host.uri, spice_port)
         tunnel.start()
-        return tunnel
+        return tunnel, tunnel.port
 
-    def _on_qemu_tunnel_ready(self, tunnel: QemuTunnel, vm: QemuVm) -> None:
+    def _on_qemu_spice_connection_ready(
+        self, result: tuple[QemuTunnel | None, int], vm: QemuVm
+    ) -> None:
+        tunnel, port = result
         session_id = self._next_session_id
         self._next_session_id += 1
-        self._active_sessions[session_id] = ("spice", tunnel)
+        # No entry at all for the no-tunnel (local) case -- nothing to stop
+        # on disconnect, and _on_disconnect_requested/_stop_all_sessions
+        # already tolerate a session_id with no _active_sessions entry.
+        if tunnel is not None:
+            self._active_sessions[session_id] = ("spice", tunnel)
 
-        self._embed_spice(session_id, vm.name, tunnel.port)
+        self._embed_spice(session_id, vm.name, port)
 
-        label = f"{vm.name} (SPICE) — 127.0.0.1:{tunnel.port}"
+        label = f"{vm.name} (SPICE) — 127.0.0.1:{port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
     def _embed_spice(self, session_id: int, display_name: str, port: int) -> None:

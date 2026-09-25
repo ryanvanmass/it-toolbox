@@ -7,25 +7,37 @@ dance. Since this app's embedded SPICE client connects to the SPICE port
 directly (bypassing virt-viewer entirely, see docs/qemu-spice-status.md),
 it has to open that tunnel itself.
 
-Subprocess-based rather than asyncio (unlike core/iap_tunnel.py) — same
-"spawn ssh, respect the user's existing keys/agent" pattern
-session_launcher.py already uses for interactive SSH sessions, just held
-open as a background tunnel instead of an interactive session. Closer in
-spirit to core/tunnel_session.py's BackgroundTunnel than to the IAP tunnel,
-but simpler: ssh itself does the byte-pumping, so there's no event loop to
-own here, only a subprocess to supervise.
+This is libvirt-specific URI parsing on top of the generic spawn/wait/
+teardown mechanics in core/ssh_tunnel.py — see that module's own
+docstring for why the split happened (a second caller needed the same
+mechanics but a configurable destination host, not always 127.0.0.1).
 """
 
-import socket
-import subprocess
-import time
 from urllib.parse import urlsplit
 
-READY_POLL_INTERVAL_SEC = 0.1
+from it_toolbox.core.ssh_tunnel import SshTunnel, SshTunnelError
+
+# Kept as an alias, not a fresh subclass -- existing callers/tests
+# (including this module's own) import QemuTunnelError specifically, and
+# every failure this module can actually raise originates from
+# SshTunnel.start() itself.
+QemuTunnelError = SshTunnelError
 
 
-class QemuTunnelError(Exception):
-    pass
+def is_local_uri(uri: str) -> bool:
+    """True for a bare local libvirt connection -- "qemu:///system" or
+    "qemu:///session", no host component at all -- meaning the libvirt
+    daemon (and so the VM/its SPICE server) already runs on this same
+    machine. SPICE's 127.0.0.1 bind is then already directly reachable
+    with no tunnel at all -- QemuTunnel exists specifically for the
+    qemu+ssh:// case, where the SPICE port lives on a genuinely different
+    machine and needs an SSH-forwarded local port to reach it from here.
+    Confirmed live: a QemuHost pointed at the *same* machine running
+    it-toolbox (a real, valid libvirt setup, not just a remote lab host)
+    previously always failed to connect, since the caller unconditionally
+    tried to build an SSH tunnel for every QEMU host regardless of URI.
+    """
+    return urlsplit(uri).scheme == "qemu"
 
 
 def _parse_ssh_target(uri: str) -> tuple[str, int | None]:
@@ -42,85 +54,15 @@ def _parse_ssh_target(uri: str) -> tuple[str, int | None]:
     return target, parsed.port
 
 
-def _free_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _can_connect(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-            return True
-    except OSError:
-        return False
-
-
-class QemuTunnel:
-    """One SSH local-port-forward, spawned as a subprocess, exposing a VM's
-    remote SPICE port on a local port for the lifetime of a connection.
+class QemuTunnel(SshTunnel):
+    """SshTunnel specialized for qemu+ssh:// libvirt URIs -- always
+    forwards to 127.0.0.1 on the SSH target, since libvirt-managed VMs
+    conventionally bind SPICE to localhost on the same host virsh
+    connects to (unlike a general SSH gateway, which just as often
+    forwards to some *other* host on its own network -- see
+    core/ssh_tunnel.py's docstring).
     """
 
     def __init__(self, uri: str, remote_port: int) -> None:
-        self._target, self._ssh_port = _parse_ssh_target(uri)
-        self._remote_port = remote_port
-        self._process: subprocess.Popen[str] | None = None
-        self._local_port: int | None = None
-
-    @property
-    def port(self) -> int | None:
-        """The bound local port, or None before start() has completed."""
-        return self._local_port
-
-    def start(self, ready_timeout: float = 10) -> int:
-        """Spawn the ssh tunnel and block until the local port is accepting
-        connections (or ready_timeout elapses). Returns the local port.
-
-        Call from a background (worker-pool) thread, never the Qt main
-        thread — this blocks on tunnel startup.
-        """
-        self._local_port = _free_local_port()
-        cmd = [
-            "ssh",
-            "-N",  # no remote command — this is a pure port-forward
-            "-o", "ExitOnForwardFailure=yes",
-            "-o", "BatchMode=yes",  # never block waiting for a password prompt
-            "-L", f"{self._local_port}:127.0.0.1:{self._remote_port}",
-        ]
-        if self._ssh_port:
-            cmd += ["-p", str(self._ssh_port)]
-        cmd.append(self._target)
-
-        try:
-            self._process = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
-            )
-        except FileNotFoundError as e:
-            raise QemuTunnelError("ssh not found — install an OpenSSH client") from e
-
-        deadline = time.monotonic() + ready_timeout
-        while time.monotonic() < deadline:
-            exit_code = self._process.poll()
-            if exit_code is not None:
-                stderr = self._process.stderr.read() if self._process.stderr else ""
-                raise QemuTunnelError(f"ssh tunnel to {self._target} exited: {stderr.strip()}")
-            if _can_connect(self._local_port):
-                return self._local_port
-            time.sleep(READY_POLL_INTERVAL_SEC)
-
-        self.stop()
-        raise QemuTunnelError(f"timed out waiting for ssh tunnel to {self._target} to come up")
-
-    def stop(self, timeout: float = 5) -> None:
-        """Tear down the tunnel. Safe to call from any thread, more than
-        once, or after a failed start().
-        """
-        if self._process is None:
-            return
-        self._process.terminate()
-        try:
-            self._process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait()
-        self._process = None
+        target, ssh_port = _parse_ssh_target(uri)
+        super().__init__(target, "127.0.0.1", remote_port, ssh_port=ssh_port)

@@ -31,6 +31,11 @@ _POWER_ACTIONS = {
     "shutdown": "shutdown",
     "pause": "suspend",
     "resume": "resume",
+    # Forcibly resets the guest -- the same as pressing a physical
+    # machine's reset button; the guest OS gets no chance to shut down
+    # cleanly first. Distinct from "shutdown" (a graceful ACPI request)
+    # and from "start" (which does nothing to an already-running VM).
+    "reset": "reset",
 }
 
 
@@ -38,7 +43,7 @@ class QemuApiError(Exception):
     pass
 
 
-def _run_virsh(host: QemuHost, *args: str) -> str:
+def run_virsh(host: QemuHost, *args: str) -> str:
     try:
         result = subprocess.run(
             [VIRSH_CMD, "-c", host.uri, *args],
@@ -57,7 +62,7 @@ def _run_virsh(host: QemuHost, *args: str) -> str:
 
 
 def list_vms(host: QemuHost) -> list[QemuVm]:
-    output = _run_virsh(host, "list", "--all")
+    output = run_virsh(host, "list", "--all")
     lines = output.splitlines()
 
     vms: list[QemuVm] = []
@@ -78,7 +83,11 @@ def get_vm_spice_port(host: QemuHost, vm_name: str) -> int | None:
     """The VM's SPICE port, or None if it has no SPICE graphics device, or
     its port hasn't been assigned yet (VM not currently running).
     """
-    xml_text = _run_virsh(host, "dumpxml", vm_name)
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    return _parse_spice_port(xml_text)
+
+
+def _parse_spice_port(xml_text: str) -> int | None:
     root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
     graphics = root.find(".//graphics[@type='spice']")
     if graphics is None:
@@ -89,8 +98,99 @@ def get_vm_spice_port(host: QemuHost, vm_name: str) -> int | None:
     return int(port)
 
 
+def diagnose_missing_spice_port(host: QemuHost, vm_name: str, vm_state: str) -> str:
+    """Explains *why* get_vm_spice_port(host, vm_name) came back None, for
+    a clearer error than a blanket "is it running?". That question is only
+    actually right for one of several distinct cases this can mean:
+
+    - The VM genuinely isn't running yet.
+    - The VM has no SPICE graphics device at all -- e.g. it was created
+      (outside this app) with VNC graphics instead, which looks identical
+      from the tree/power-control side but was never going to get a SPICE
+      port no matter how long it runs.
+    - The VM's SPICE server is configured for TLS-only access (libvirt
+      sets the plain `port` attribute to "-1" and puts the real,
+      live-assigned port in `tlsPort` instead -- a default some admin
+      tools, e.g. a remote-connection wizard, choose). This app's
+      embedded SPICE client doesn't negotiate TLS, so this needs its own
+      message rather than being reported as "not running" when it's
+      actually up and reachable, just not via a plaintext port.
+    """
+    xml_text = run_virsh(host, "dumpxml", vm_name)
+    root = ET.fromstring(xml_text)  # noqa: S314 - our own libvirt's own trusted output
+    graphics = root.find(".//graphics[@type='spice']")
+
+    if graphics is None:
+        other = root.find(".//graphics")
+        if other is not None:
+            return (
+                f"{vm_name} has no SPICE graphics device — its display is "
+                f"configured for {other.get('type', 'a different protocol')!r} instead."
+            )
+        return f"{vm_name} has no graphics device configured at all."
+
+    tls_port = graphics.get("tlsPort")
+    if tls_port not in (None, "-1"):
+        return (
+            f"{vm_name}'s SPICE server is configured for TLS-only access "
+            "(no plaintext port available), which this app doesn't support connecting to yet."
+        )
+
+    if vm_state != "running":
+        return f"{vm_name} is not running (state: {vm_state})."
+
+    return f"{vm_name} has no SPICE port available — is it running?"
+
+
 def power_action(host: QemuHost, vm_name: str, action: str) -> None:
     virsh_command = _POWER_ACTIONS.get(action)
     if virsh_command is None:
         raise QemuApiError(f"Unknown power action: {action!r}")
-    _run_virsh(host, virsh_command, vm_name)
+    run_virsh(host, virsh_command, vm_name)
+
+
+# Matches one data row of `virsh domifaddr` output, e.g.:
+#   vnet0      52:54:00:36:2f:c1    ipv4         192.168.122.150/24
+# The guest-agent source can also report rows with "-" in place of a
+# name/MAC (loopback/link-local entries with no interface identity of
+# their own), hence accepting "-" as well as a real MAC there.
+_DOMIFADDR_LINE_RE = re.compile(
+    r"^\s*(\S+)\s+([0-9a-fA-F:]{17}|-)\s+(ipv4|ipv6)\s+([0-9a-fA-F.:]+)/\d+\s*$"
+)
+
+
+def _parse_domifaddr_output(output: str) -> str | None:
+    for line in output.splitlines():
+        match = _DOMIFADDR_LINE_RE.match(line)
+        if not match:
+            continue
+        _name, _mac, protocol, address = match.groups()
+        if protocol != "ipv4" or address.startswith("127."):
+            continue
+        return address
+    return None
+
+
+def get_vm_ip_address(host: QemuHost, vm_name: str) -> str | None:
+    """Best-effort guest IP discovery via `virsh domifaddr`, tried against
+    each of libvirt's three sources in order of reliability: "agent" (an
+    accurate, guest-reported address -- needs the QEMU guest agent
+    installed and running in the guest), "lease" (libvirt's own DHCP
+    lease record -- only populated for a NAT/isolated virtual network
+    using libvirt's own dnsmasq, not a bridged one), then "arp" (the
+    host's ARP cache -- ony has an entry if the host has actually talked
+    to the guest recently, which needs them on the same bridged L2
+    segment). Returns None if none of those sources have anything, in
+    which case the caller should fall back to a manually-configured
+    override (see settings.load_qemu_vm_ip_overrides) -- there's no
+    guest IP tracked anywhere else in this app to fall back to.
+    """
+    for source in ("agent", "lease", "arp"):
+        try:
+            output = run_virsh(host, "domifaddr", vm_name, "--source", source)
+        except QemuApiError:
+            continue
+        ip = _parse_domifaddr_output(output)
+        if ip is not None:
+            return ip
+    return None

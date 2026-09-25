@@ -1,15 +1,33 @@
 #!/usr/bin/env bash
-# Builds an it-toolbox .deb and .rpm, both vendoring a full venv (see
+# Builds an it-toolbox .deb and/or .rpm, both vendoring a full venv (see
 # docs/releasing.md for why). Requires: python3, python3-venv, fpm (gem
 # install fpm), rpm (for the RPM output), and sudo (writes to real
 # /usr/share on the build host -- see the comment below on why that's
 # safe). Runnable standalone, same convention as scripts/release.sh, and
 # is exactly what .github/workflows/package-linux.yml runs in CI.
+#
+# Usage: build.sh [deb|rpm|all]   (default: all)
+#
+# The vendored venv is tied to the build host's Python minor version: its
+# site-packages lives under lib/pythonX.Y/ and its bin/python3 is just a
+# symlink to the system interpreter. So the .deb must be built on a
+# Debian/Ubuntu host and the .rpm on a Fedora host (CI does exactly that),
+# and each package pins the exact Python version it was built against.
 set -euo pipefail
 cd "$(dirname "$0")/../.."  # repo root
 
+TARGET="${1:-all}"
+case "$TARGET" in
+    deb|rpm|all) ;;
+    *) echo "Usage: $0 [deb|rpm|all]" >&2; exit 2 ;;
+esac
+
 VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
 PREFIX=/usr/share/it-toolbox
+# The Python the venv below is built against (system python3 on the build
+# host) -- pinned as a package dependency further down.
+PY_MINOR=$(python3 -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')")
+PY_NEXT=$(python3 -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1] + 1}')")
 
 echo "Building it-toolbox $VERSION packages..."
 
@@ -32,11 +50,23 @@ rm -f dist/it_toolbox-*.whl
 #    tooling (fpm's --input-type virtualenv, virtualenv-tools3, ...)
 #    needed at all. Confirmed directly: `head -1 venv/bin/it-toolbox`
 #    after this step shows the real final path, not the build path.
+# A glob, not "dist/it_toolbox-${VERSION}-py3-none-any.whl" -- `build`
+# normalizes pyproject.toml's raw version string to PEP 440 canonical
+# form for the actual wheel filename (e.g. "0.3.0-beta.1" -> "0.3.0b1"),
+# so building that filename from $VERSION directly doesn't match what
+# actually landed in dist/. Safe as a plain glob since the `rm -f
+# dist/it_toolbox-*.whl` above guarantees at most one matches.
+WHEEL=(dist/it_toolbox-*-py3-none-any.whl)
+if [[ ! -f "${WHEEL[0]}" ]]; then
+    echo "No wheel found in dist/ matching it_toolbox-*-py3-none-any.whl" >&2
+    exit 1
+fi
+
 sudo rm -rf "$PREFIX"
 sudo mkdir -p "$PREFIX"
 sudo python3 -m venv "$PREFIX/venv"
 sudo "$PREFIX/venv/bin/pip" install --upgrade pip
-sudo "$PREFIX/venv/bin/pip" install "dist/it_toolbox-${VERSION}-py3-none-any.whl"
+sudo "$PREFIX/venv/bin/pip" install "${WHEEL[0]}"
 sudo find "$PREFIX/venv" -name "__pycache__" -exec rm -rf {} +
 
 # 3. Stage the /usr/bin wrapper, .desktop entry, and icon.
@@ -44,7 +74,10 @@ STAGE=$(mktemp -d)
 mkdir -p "$STAGE/usr/bin" "$STAGE/usr/share/applications" \
          "$STAGE/usr/share/icons/hicolor/scalable/apps"
 cp packaging/linux/it-toolbox.desktop "$STAGE/usr/share/applications/"
-cp packaging/linux/icons/it-toolbox.svg "$STAGE/usr/share/icons/hicolor/scalable/apps/"
+# The single canonical copy lives inside the package itself (src/it_toolbox
+# /resources/icons/) so the *running app* can also load it at runtime for
+# its own window icon (app.py) -- not duplicated here, just reused.
+cp src/it_toolbox/resources/icons/it-toolbox.svg "$STAGE/usr/share/icons/hicolor/scalable/apps/"
 cat > "$STAGE/usr/bin/it-toolbox" <<'WRAPPER'
 #!/bin/sh
 exec /usr/share/it-toolbox/venv/bin/it-toolbox "$@"
@@ -70,7 +103,7 @@ chmod +x "$STAGE/usr/bin/it-toolbox"
 #    documented-only, not package dependencies -- see the README.
 mkdir -p dist/packages
 DEB_DEPENDS=(
-  --depends "python3 (>= 3.11)"
+  --depends "python3 (>= $PY_MINOR)" --depends "python3 (<< $PY_NEXT)"
   --depends libgl1 --depends libxkbcommon0 --depends libegl1
   --depends libxcb-cursor0 --depends libxcomposite1 --depends libxi6
   --depends libxtst6 --depends libxrandr2 --depends libxdamage1
@@ -78,14 +111,23 @@ DEB_DEPENDS=(
   --depends libdbus-1-3 --depends libfontconfig1
 )
 RPM_DEPENDS=(
-  --depends "python3 >= 3.11"
+  --depends "python(abi) = $PY_MINOR"
   --depends libglvnd-glx --depends libxkbcommon --depends libglvnd-egl
   --depends xcb-util-cursor --depends libXcomposite --depends libXi
   --depends libXtst --depends libXrandr --depends libXdamage
   --depends nss --depends alsa-lib --depends dbus-libs --depends fontconfig
 )
+# RPM's Version field flatly rejects "-" (it's the NVR separator), and
+# both dpkg and rpm treat "~" as the portable, standard way to encode
+# "this is a pre-release, sort it before the plain version" -- so
+# "0.3.0-beta.1" (fine for pyproject.toml/PEP 440 and the wheel filename
+# above) becomes "0.3.0~beta.1" specifically for the packages' own
+# version field. A plain release version has no "-" to replace, so this
+# is a no-op for those.
+PACKAGE_VERSION="${VERSION//-/\~}"
+
 COMMON_ARGS=(
-  -s dir -n it-toolbox -v "$VERSION"
+  -s dir -n it-toolbox -v "$PACKAGE_VERSION"
   --license Apache-2.0
   --description "Cross-platform IT tooling desktop app"
   --url "https://github.com/ryanvanmass/it-toolbox"
@@ -93,15 +135,19 @@ COMMON_ARGS=(
   "$PREFIX/"=/usr/share/it-toolbox/
   "$STAGE/usr/"=/usr/
 )
-fpm -t deb -a amd64 "${DEB_DEPENDS[@]}" "${COMMON_ARGS[@]}"
+if [[ "$TARGET" == deb || "$TARGET" == all ]]; then
+    fpm -t deb -a amd64 "${DEB_DEPENDS[@]}" "${COMMON_ARGS[@]}"
+fi
 # _build_id_links/debug_package: fpm's RPM output otherwise auto-generates
 # thousands of debuginfo/build-id symlinks for every ELF binary in the
 # vendored venv (Qt's bundled .so files, compiled extension modules) --
 # confirmed via a real before/after `rpm -qlp` diff.
-fpm -t rpm -a x86_64 \
-  --rpm-rpmbuild-define '_build_id_links none' \
-  --rpm-rpmbuild-define 'debug_package %{nil}' \
-  "${RPM_DEPENDS[@]}" "${COMMON_ARGS[@]}"
+if [[ "$TARGET" == rpm || "$TARGET" == all ]]; then
+    fpm -t rpm -a x86_64 \
+      --rpm-rpmbuild-define '_build_id_links none' \
+      --rpm-rpmbuild-define 'debug_package %{nil}' \
+      "${RPM_DEPENDS[@]}" "${COMMON_ARGS[@]}"
+fi
 
 echo "Built:"
 ls -la dist/packages/
