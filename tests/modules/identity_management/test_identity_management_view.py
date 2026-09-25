@@ -1,6 +1,7 @@
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QPushButton
 
 import it_toolbox.modules.identity_management.ui.main_view as main_view_module
+from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager.models import GcpIamBinding, GcpProject
 from it_toolbox.modules.identity_management.models import Device, User
 from it_toolbox.modules.identity_management.ui.main_view import (
@@ -524,16 +525,25 @@ def test_gcp_shows_gcloud_not_found_message_when_unavailable(qtbot, monkeypatch)
     view = _make_view(qtbot, monkeypatch, gcp_available=False)
 
     assert "gcloud CLI not found" in view._gcp_projects_status_label.text()
-    assert view._gcp_sign_in_button.isHidden()
 
 
-def test_gcp_shows_sign_in_prompt_when_signed_out(qtbot, monkeypatch):
+def test_gcp_has_no_sign_in_button_of_its_own(qtbot, monkeypatch):
+    # Sign-in lives only in Settings (like Connection Manager).
+    view = _make_view(qtbot, monkeypatch, gcp_available=True, gcp_account=None)
+    qtbot.waitUntil(lambda: view._gcp_signed_in is False, timeout=2000)
+
+    page = view._stack.widget(PAGE_GCP_PROJECTS_TABLE)
+    assert page.findChildren(QPushButton) == []
+    assert not hasattr(view, "_on_gcp_sign_in_clicked")
+
+
+def test_gcp_signed_out_points_to_settings(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, gcp_available=True, gcp_account=None)
 
     qtbot.waitUntil(
-        lambda: "Sign in with Google" in view._gcp_projects_status_label.text(), timeout=2000
+        lambda: "Settings → Integrations → gcloud" in view._gcp_projects_status_label.text(),
+        timeout=2000,
     )
-    assert not view._gcp_sign_in_button.isHidden()
 
 
 def test_gcp_signs_in_automatically_when_already_authenticated(qtbot, monkeypatch):
@@ -548,29 +558,75 @@ def test_gcp_signs_in_automatically_when_already_authenticated(qtbot, monkeypatc
 
     qtbot.waitUntil(lambda: view._gcp_projects_table.rowCount() == 1, timeout=2000)
     assert view._gcp_signed_in is True
-    assert view._gcp_sign_in_button.isHidden()
 
 
-def test_gcp_sign_in_button_click_populates_projects(qtbot, monkeypatch):
+def test_gcp_follows_a_sign_in_from_settings(qtbot, monkeypatch):
     projects = [GcpProject(project_id="proj-1", display_name="Project One")]
-    view = _make_view(qtbot, monkeypatch, gcp_available=True, gcp_account=None)
-    qtbot.waitUntil(lambda: not view._gcp_sign_in_button.isHidden(), timeout=2000)
-    monkeypatch.setattr(
-        "it_toolbox.modules.identity_management.ui.main_view.gcp_auth.sign_in",
-        lambda: "alice@example.com",
+    view = _make_view(
+        qtbot, monkeypatch, gcp_available=True, gcp_account=None, gcp_projects=projects
     )
-    monkeypatch.setattr(
-        "it_toolbox.modules.identity_management.ui.main_view.gcp_client.list_projects",
-        lambda credentials: list(projects),
-    )
+    qtbot.waitUntil(lambda: "Settings" in view._gcp_projects_status_label.text(), timeout=2000)
 
-    view._on_gcp_sign_in_clicked()
+    auth_events.account_changed.emit("alice@example.com")
 
     qtbot.waitUntil(lambda: view._gcp_projects_table.rowCount() == 1, timeout=2000)
     assert view._gcp_signed_in is True
 
 
-def test_gcp_sign_out_clears_projects(qtbot, monkeypatch):
+def test_gcp_follows_a_sign_out_from_elsewhere(qtbot, monkeypatch):
+    projects = [GcpProject(project_id="proj-1", display_name="Project One")]
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        gcp_available=True,
+        gcp_account="alice@example.com",
+        gcp_projects=projects,
+    )
+    qtbot.waitUntil(lambda: view._gcp_projects_table.rowCount() == 1, timeout=2000)
+
+    auth_events.account_changed.emit(None)
+
+    assert view._gcp_signed_in is False
+    assert view._gcp_projects_table.rowCount() == 0
+    assert "Settings" in view._gcp_projects_status_label.text()
+
+
+def test_gcp_ignores_account_changes_when_gcloud_is_missing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, gcp_available=False)
+
+    auth_events.account_changed.emit("alice@example.com")
+
+    assert view._gcp_signed_in is False
+    assert "gcloud CLI not found" in view._gcp_projects_status_label.text()
+
+
+def test_gcp_sign_in_from_settings_beats_a_slower_startup_check(qtbot, monkeypatch):
+    # The startup "who's signed in?" check runs in the background; if the
+    # user signs in from Settings before it answers, its stale "nobody"
+    # mustn't sign this view back out.
+    projects = [GcpProject(project_id="proj-1", display_name="Project One")]
+    view = _make_view(
+        qtbot, monkeypatch, gcp_available=True, gcp_account=None, gcp_projects=projects
+    )
+
+    auth_events.account_changed.emit("alice@example.com")
+    view._on_startup_gcp_account_checked(None)
+
+    assert view._gcp_signed_in is True
+    qtbot.waitUntil(lambda: view._gcp_projects_table.rowCount() == 1, timeout=2000)
+
+
+def test_gcp_projects_arriving_after_sign_out_are_dropped(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, gcp_available=True, gcp_account=None)
+    qtbot.waitUntil(lambda: "Settings" in view._gcp_projects_status_label.text(), timeout=2000)
+
+    view._populate_gcp_projects([GcpProject(project_id="proj-1", display_name="Project One")])
+
+    assert view._gcp_projects_table.rowCount() == 0
+    assert view._gcp_projects == []
+
+
+def test_gcp_sign_out_clears_projects_and_broadcasts(qtbot, monkeypatch):
     projects = [GcpProject(project_id="proj-1", display_name="Project One")]
     view = _make_view(
         qtbot,
@@ -585,11 +641,13 @@ def test_gcp_sign_out_clears_projects(qtbot, monkeypatch):
         lambda: None,
     )
 
-    view._do_gcp_sign_out()
+    # Settings and Connection Manager follow this same signal.
+    with qtbot.waitSignal(auth_events.account_changed, timeout=2000) as blocker:
+        view._do_gcp_sign_out()
 
+    assert blocker.args == [None]
     qtbot.waitUntil(lambda: view._gcp_signed_in is False, timeout=2000)
     assert view._gcp_projects_table.rowCount() == 0
-    assert not view._gcp_sign_in_button.isHidden()
 
 
 def test_gcp_root_menu_is_none_when_signed_out(qtbot, monkeypatch):
