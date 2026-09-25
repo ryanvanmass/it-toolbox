@@ -52,6 +52,22 @@ project if it happens).
    showed "Signed in as ryanvanmassenhoven@gmail.com". Sign-in/out
    themselves were **not** exercised live, deliberately — doing so would
    touch the real gcloud credentials on this machine.
+
+   The section also shows the installed gcloud version
+   (`gcp_auth.get_version()`, from `gcloud version --format=json`) and
+   an **Update gcloud** button (issue #79): `gcp_auth.update()` runs
+   `gcloud components update --quiet` in the background and reports the
+   old → new version (or "already up to date"). A package-manager
+   install (dnf/apt/snap/Homebrew) has gcloud's component manager
+   disabled; gcloud's error names the equivalent package-manager command,
+   which `update()` extracts into `GcloudUpdateUnsupported` and the
+   section shows (selectable, for copying) instead of a raw error. Any
+   other failure — e.g. no write access to a system-wide Windows install
+   under `Program Files` — is shown as "Couldn't update gcloud: …".
+   Unit-tested against a fake `subprocess.run` using gcloud's real
+   error wording; **not** yet run against a real gcloud install (none on
+   the machine it was written on), so the Windows self-update path in
+   particular is unverified.
 5. **QEMU/libvirt + FreeRDP sections**:
    - QEMU: `qemu_client.is_available()` (new, mirrors `gcp_auth`/
      `rclone_client`'s own `is_available()`) — verified live, this dev

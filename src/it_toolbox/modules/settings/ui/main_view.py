@@ -25,7 +25,7 @@ import platform
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -511,6 +511,24 @@ class SettingsView(QWidget):
         layout.addWidget(self._gcloud_status_label)
         layout.addLayout(button_row)
 
+        # Version + self-update (issue #79). Selectable, since for a
+        # package-manager install this shows the command to run instead.
+        self._gcloud_version_label = QLabel()
+        self._gcloud_version_label.setWordWrap(True)
+        self._gcloud_version_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        self._gcloud_update_button = QPushButton("Update gcloud")
+        self._gcloud_update_button.clicked.connect(self._on_gcloud_update_clicked)
+
+        update_row = QHBoxLayout()
+        update_row.addWidget(self._gcloud_update_button)
+        update_row.addStretch(1)
+
+        layout.addWidget(self._gcloud_version_label)
+        layout.addLayout(update_row)
+
         # Sign-in/out happens here (Connection Manager has no sign-in
         # button of its own) — but Connection Manager's tree menu can
         # still sign out, so keep this status in sync with it too.
@@ -525,12 +543,24 @@ class SettingsView(QWidget):
                 on_result=self._set_gcloud_account,
                 on_error=lambda error: self._set_gcloud_account(None),
             )
+            self._gcloud_version_label.setText("Checking gcloud version…")
+            run_in_background(
+                gcp_auth.get_version,
+                on_result=lambda version: self._gcloud_version_label.setText(
+                    f"gcloud version: {version}"
+                ),
+                on_error=lambda error: self._gcloud_version_label.setText(
+                    "gcloud version: unknown"
+                ),
+            )
         else:
             self._gcloud_status_label.setText(
                 f"gcloud CLI not found. Install it from {gcp_auth.INSTALL_URL} and relaunch."
             )
             self._gcloud_sign_in_button.setEnabled(False)
             self._gcloud_sign_out_button.setEnabled(False)
+            self._gcloud_version_label.hide()
+            self._gcloud_update_button.setEnabled(False)
 
         return box
 
@@ -564,6 +594,40 @@ class SettingsView(QWidget):
         self._gcloud_sign_in_button.setEnabled(True)
         self._gcloud_sign_out_button.setEnabled(True)
         self._gcloud_status_label.setText(f"gcloud error: {error}")
+
+    def _on_gcloud_update_clicked(self) -> None:
+        self._gcloud_update_button.setEnabled(False)
+        self._gcloud_version_label.setText("Updating gcloud… this can take a few minutes.")
+        run_in_background(
+            gcp_auth.update,
+            on_result=self._on_gcloud_updated,
+            on_error=self._on_gcloud_update_error,
+        )
+
+    def _on_gcloud_updated(self, versions: tuple[str, str]) -> None:
+        old_version, new_version = versions
+        self._gcloud_update_button.setEnabled(True)
+        if old_version == new_version:
+            self._gcloud_version_label.setText(
+                f"gcloud version: {new_version} (already up to date)"
+            )
+        else:
+            self._gcloud_version_label.setText(
+                f"gcloud version: {new_version} (updated from {old_version})"
+            )
+
+    def _on_gcloud_update_error(self, error: Exception) -> None:
+        self._gcloud_update_button.setEnabled(True)
+        if isinstance(error, gcp_auth.GcloudUpdateUnsupported):
+            text = (
+                "This gcloud was installed by a package manager, so it can't update "
+                "itself. Update it with your package manager instead"
+            )
+            if error.suggested_command:
+                text += f":\n{error.suggested_command}"
+            self._gcloud_version_label.setText(text)
+        else:
+            self._gcloud_version_label.setText(f"Couldn't update gcloud: {error}")
 
     # -- GCP SSH key ------------------------------------------------------------
 
