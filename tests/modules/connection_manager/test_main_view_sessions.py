@@ -1340,6 +1340,14 @@ def test_refresh_project_reloads_both_categories(qtbot, monkeypatch):
     project_item = view._tree.topLevelItem(0).child(0)
 
     qtbot.waitUntil(lambda: instance_calls == ["p1"] and bucket_calls == ["p1"], timeout=2000)
+    # The calls being *made* isn't enough: a refresh is (rightly) ignored
+    # while a load is still in flight, so wait for both results to land.
+    qtbot.waitUntil(
+        lambda: not any(
+            project_item.child(i).data(0, main_view_module.IS_LOADING_ROLE) for i in range(2)
+        ),
+        timeout=2000,
+    )
 
     # A manual refresh re-triggers both, even though they're already loaded.
     view._refresh_project(project_item)
