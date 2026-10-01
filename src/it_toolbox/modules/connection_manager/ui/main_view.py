@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QInputDialog,
     QLineEdit,
+    QMainWindow,
     QMenu,
     QMessageBox,
     QTabWidget,
@@ -62,8 +63,14 @@ from it_toolbox.modules.connection_manager.ui.manage_hosts_dialog import (
 from it_toolbox.modules.connection_manager.ui.manage_manual_connections_dialog import (
     ManageManualConnectionsDialog,
 )
+from it_toolbox.modules.connection_manager.ui.password_reset_dialog import (
+    PasswordResetDialog,
+)
 from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
     ProjectSelectionDialog,
+)
+from it_toolbox.modules.connection_manager.ui.rdp_credentials_dialog import (
+    RdpCredentialsDialog,
 )
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
 from it_toolbox.widgets.ftp_browser_widget import FtpBrowserWidget
@@ -110,6 +117,11 @@ VM_ROLE = Qt.ItemDataRole.UserRole + 8
 IS_MANUAL_ROOT_ROLE = Qt.ItemDataRole.UserRole + 9
 MANUAL_CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 10
 IS_LOADING_ROLE = Qt.ItemDataRole.UserRole + 11
+# Marks an item as deliberately hidden for a reason *other* than the
+# search filter (currently just the empty-Buckets-category case in
+# _populate_buckets) -- the filter must never override this, regardless
+# of query match, or clearing/typing a search would fight with it.
+INTRINSIC_HIDE_ROLE = Qt.ItemDataRole.UserRole + 14
 IS_GLINET_ROOT_ROLE = Qt.ItemDataRole.UserRole + 12
 GLINET_HOST_ROLE = Qt.ItemDataRole.UserRole + 13
 
@@ -123,10 +135,17 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
 
 
+def _instance_key(instance: Instance) -> tuple[str, str, str]:
+    """What per-VM settings (SSH username overrides, saved RDP logins) are
+    keyed by: a VM name is only unique within its project and zone."""
+    return (instance.project_id, instance.zone, instance.name)
+
+
 def _instance_supports_password_reset(instance: Instance) -> bool:
-    """gcp_client.reset_windows_password() calls Compute Engine's
-    resetWindowsPassword API, which only exists for Windows instances —
-    it 404s against a Linux one. Gate the "Set Password…" menu item on
+    """gcp_client.reset_windows_password() works by asking the Windows
+    guest agent inside the VM to (re)create the account, so it only means
+    something for a Windows instance — against a Linux one the request
+    would just never be answered. Gate the "Set Password…" menu item on
     the same os_hint used to pick RDP/SSH defaults elsewhere
     (_resolve_double_click_kind) rather than always offering an action
     that's certain to fail for a known-Linux VM. An instance with no
@@ -172,6 +191,10 @@ class ConnectionManagerView(QWidget):
         # forgetting the account to connect as on every relaunch would
         # just reintroduce the same failure this override exists to fix.
         self._instance_ssh_username_overrides = settings.load_instance_ssh_username_overrides()
+        # Per-VM RDP logins (username + encrypted password), keyed the same
+        # way. Set by hand via "RDP Credentials…" or automatically after a
+        # successful "Set Password…"; see _start_session_from_instance.
+        self._instance_rdp_credentials = settings.load_instance_rdp_credentials()
         self._qemu_vm_ip_overrides = settings.load_qemu_vm_ip_overrides()
         self._all_projects: list[GcpProject] = []
         self._gcp_root_item: QTreeWidgetItem | None = None
@@ -182,12 +205,33 @@ class ConnectionManagerView(QWidget):
         self._active_sessions_dialog = ActiveSessionsDialog(parent=self)
         self._active_sessions_dialog.disconnect_requested.connect(self._on_disconnect_requested)
 
+        # Filters the tree by substring match on item text (case-
+        # insensitive) -- mirrors Identity Management's own search box,
+        # but simpler: no separate leaf-materialization step, since
+        # every connection already exists as a real tree item once
+        # loaded (this tree was never built around "too many to list as
+        # permanent children" the way Identity Management's device/user
+        # counts can be). Only ever filters what's already in the tree --
+        # a category that hasn't been expanded yet (still showing its
+        # "Loading…" placeholder) has nothing real to search until
+        # expanded, same limitation Identity Management's own search has
+        # for data it hasn't fetched yet.
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Filter connections…")
+        self._search_box.textChanged.connect(self._on_search_text_changed)
+
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Connections"])
         self._tree.itemExpanded.connect(self._on_item_expanded)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._tree.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
+
+        self._sidebar_widget = QWidget()
+        sidebar_layout = QVBoxLayout(self._sidebar_widget)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.addWidget(self._search_box)
+        sidebar_layout.addWidget(self._tree, 1)
 
         # A shared tabs widget (injected by ConnectionManagerModule/
         # MainWindow in the real app) is owned and wired up centrally —
@@ -239,12 +283,63 @@ class ConnectionManagerView(QWidget):
         )
 
     @property
-    def sidebar_tree(self) -> QTreeWidget:
-        """The GCP project/instance browser, hosted in the app sidebar
-        (nested under this module's entry) rather than in this view's own
-        layout — see ConnectionManagerModule.create_sidebar_widget().
+    def sidebar_widget(self) -> QWidget:
+        """The filter box + GCP/QEMU/manual connection browser tree,
+        hosted in the app sidebar (nested under this module's entry)
+        rather than in this view's own layout — see
+        ConnectionManagerModule.create_sidebar_widget().
         """
-        return self._tree
+        return self._sidebar_widget
+
+    # -- Filtering the tree --------------------------------------------------
+
+    def _on_search_text_changed(self, _text: str) -> None:
+        self._apply_tree_filter()
+
+    def _apply_tree_filter(self) -> None:
+        query = self._search_box.text().strip().lower()
+        for i in range(self._tree.topLevelItemCount()):
+            self._filter_tree_item(self._tree.topLevelItem(i), query)
+
+    def _filter_tree_item(self, item: QTreeWidgetItem, query: str) -> bool:
+        """Recursively hides items that don't match `query` (case-
+        insensitive substring; an empty query matches everything).
+
+        A container (project/host) stays visible if any descendant
+        matches even when its own name doesn't -- finding a matching VM
+        should surface the host it's under, not require typing the
+        host's own name too. A container whose *own* name matches shows
+        its entire subtree unconditionally -- searching "QEMU" means
+        "show me everything under QEMU", not just entries also
+        (redundantly) named "QEMU". Returns whether `item` ended up
+        visible, so a parent call can tell whether to stay visible too.
+
+        INTRINSIC_HIDE_ROLE (currently just an empty Buckets category)
+        always wins over a search match -- there's nothing to show
+        either way, and the search filter has no business overriding a
+        hide decision it didn't make.
+        """
+        if item.data(0, INTRINSIC_HIDE_ROLE):
+            item.setHidden(True)
+            return False
+        if not query or query in item.text(0).lower():
+            self._show_subtree(item)
+            return True
+        child_visible = False
+        for i in range(item.childCount()):
+            if self._filter_tree_item(item.child(i), query):
+                child_visible = True
+        item.setHidden(not child_visible)
+        return child_visible
+
+    @staticmethod
+    def _show_subtree(item: QTreeWidgetItem) -> None:
+        if item.data(0, INTRINSIC_HIDE_ROLE):
+            item.setHidden(True)
+            return
+        item.setHidden(False)
+        for i in range(item.childCount()):
+            ConnectionManagerView._show_subtree(item.child(i))
 
     # -- Sign in / out -----------------------------------------------------
 
@@ -345,8 +440,9 @@ class ConnectionManagerView(QWidget):
                 # rather than waiting for that expand to even start fetching.
                 self._load_category(category_item, project.project_id, category)
         gcp_category.setExpanded(True)
-        self._populate_qemu_hosts()
-        self._populate_manual_connections()
+        self._apply_tree_filter()  # covers the GCP items just added above
+        self._populate_qemu_hosts()  # each of these reapplies the
+        self._populate_manual_connections()  # filter again internally
         self._populate_glinet_hosts()
 
     def _on_select_projects_clicked(self) -> None:
@@ -460,6 +556,11 @@ class ConnectionManagerView(QWidget):
             return
         item.setData(0, IS_LOADING_ROLE, False)
         populate(item, data)
+        # Covers both _populate_instances and _populate_buckets in one
+        # place -- newly-arrived children (first expand, a periodic
+        # refresh, or "Refresh") respect an already-typed filter instead
+        # of always showing up unfiltered until the next keystroke.
+        self._apply_tree_filter()
 
     def _on_category_load_failed(self, item: QTreeWidgetItem, error: Exception) -> None:
         if not shiboken6.isValid(item):
@@ -503,6 +604,10 @@ class ConnectionManagerView(QWidget):
         # Stays hidden/shown correctly across periodic/manual refreshes
         # since setHidden() re-evaluates from the latest result every time
         # (buckets added later un-hide it; all deleted re-hides it).
+        # INTRINSIC_HIDE_ROLE marks this as *not* the search filter's
+        # business -- _filter_tree_item/_show_subtree must never override
+        # it, or clearing/typing a search would fight with it.
+        category_item.setData(0, INTRINSIC_HIDE_ROLE, not buckets)
         category_item.setHidden(not buckets)
         category_item.takeChildren()
         for bucket in buckets:
@@ -514,6 +619,7 @@ class ConnectionManagerView(QWidget):
         # Always surface errors — never leave a category hidden (from a
         # prior empty-but-successful load) while silently swallowing a
         # real failure on a later refresh.
+        category_item.setData(0, INTRINSIC_HIDE_ROLE, False)
         category_item.setHidden(False)
         category_item.takeChildren()
         category_item.addChild(QTreeWidgetItem([f"Error: {error}"]))
@@ -584,6 +690,7 @@ class ConnectionManagerView(QWidget):
             host_item.setData(0, CHILDREN_LOADED_ROLE, False)
             host_item.addChild(QTreeWidgetItem(["Loading…"]))
             self._qemu_root_item.addChild(host_item)
+        self._apply_tree_filter()
 
     def _find_qemu_host_item(self, host: QemuHost) -> QTreeWidgetItem | None:
         if self._qemu_root_item is None:
@@ -607,6 +714,7 @@ class ConnectionManagerView(QWidget):
         host_item.takeChildren()
         if not vms:
             host_item.addChild(QTreeWidgetItem(["(no VMs)"]))
+            self._apply_tree_filter()
             return
         for vm in vms:
             item = QTreeWidgetItem([vm.name])
@@ -614,6 +722,7 @@ class ConnectionManagerView(QWidget):
             item.setData(0, VM_ROLE, vm)
             item.setToolTip(0, f"State: {vm.state}")
             host_item.addChild(item)
+        self._apply_tree_filter()
 
     def _on_manage_hosts_clicked(self) -> None:
         dialog = ManageHostsDialog(self._load_qemu_hosts(), parent=self)
@@ -711,6 +820,7 @@ class ConnectionManagerView(QWidget):
             item.setData(0, MANUAL_CONNECTION_ROLE, connection)
             item.setToolTip(0, f"{connection.kind.upper()} {connection.host}:{connection.port}")
             self._manual_root_item.addChild(item)
+        self._apply_tree_filter()
 
     def _on_manage_manual_connections_clicked(self) -> None:
         dialog = ManageManualConnectionsDialog(self._load_manual_connections(), parent=self)
@@ -791,6 +901,7 @@ class ConnectionManagerView(QWidget):
             item.setData(0, GLINET_HOST_ROLE, host)
             item.setToolTip(0, host.url)
             self._glinet_root_item.addChild(item)
+        self._apply_tree_filter()
 
     def _on_manage_glinet_hosts_clicked(self) -> None:
         dialog = ManageGlinetHostsDialog(self._load_glinet_hosts(), parent=self)
@@ -920,12 +1031,12 @@ class ConnectionManagerView(QWidget):
         show_key_upload = _instance_supports_ssh_key_upload(instance)
         set_password_action = None
         upload_key_action = None
-        if show_password_reset or show_key_upload:
-            menu.addSeparator()
-            if show_password_reset:
-                set_password_action = menu.addAction("Set Password…")
-            if show_key_upload:
-                upload_key_action = menu.addAction("Upload Public Key…")
+        menu.addSeparator()
+        if show_password_reset:
+            set_password_action = menu.addAction("Set Password…")
+        rdp_credentials_action = menu.addAction("RDP Credentials…")
+        if show_key_upload:
+            upload_key_action = menu.addAction("Upload Public Key…")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
         if chosen is rdp_action:
             self._start_session_from_instance(instance, "rdp")
@@ -941,6 +1052,8 @@ class ConnectionManagerView(QWidget):
             self._run_instance_power_action(instance, "force_stop")
         elif set_password_action is not None and chosen is set_password_action:
             self._on_set_instance_password_clicked(instance)
+        elif chosen is rdp_credentials_action:
+            self._on_rdp_credentials_clicked(instance)
         elif upload_key_action is not None and chosen is upload_key_action:
             self._on_upload_ssh_key_clicked(instance)
 
@@ -1234,11 +1347,13 @@ class ConnectionManagerView(QWidget):
             )
             return
 
+        key = _instance_key(instance)
+        saved_rdp = self._instance_rdp_credentials.get(key) if kind == "rdp" else None
         username = None
-        if kind in ("ssh", "sftp"):
-            username = self._instance_ssh_username_overrides.get(
-                (instance.project_id, instance.zone, instance.name)
-            )
+        if saved_rdp is not None:
+            username = saved_rdp.username
+        elif kind in ("ssh", "sftp"):
+            username = self._instance_ssh_username_overrides.get(key)
         if username is None:
             username = settings.load_default_username()
         if username is None:
@@ -1253,18 +1368,21 @@ class ConnectionManagerView(QWidget):
         key_path = None
         key_passphrase = None
         if kind == "rdp":
-            # Not persisted anywhere (no keyring integration in this app) —
-            # the embedded RDP client needs it upfront for the NLA
+            # The embedded RDP client needs the password upfront for the NLA
             # handshake, unlike external mstsc/xfreerdp which prompt in
-            # their own window.
-            password, ok = QInputDialog.getText(
-                self,
-                "Password",
-                f"Password for {username or 'RDP'}@{instance.name}:",
-                QLineEdit.EchoMode.Password,
-            )
-            if not ok:
-                return
+            # their own window. Use the one saved for this VM (via "RDP
+            # Credentials…" or an earlier "Set Password…") when there is
+            # one; otherwise ask, and don't persist what's typed here.
+            password = self._saved_rdp_password(saved_rdp)
+            if password is None:
+                password, ok = QInputDialog.getText(
+                    self,
+                    "Password",
+                    f"Password for {username or 'RDP'}@{instance.name}:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if not ok:
+                    return
         elif kind == "sftp":
             # Same "never persisted for a GCP instance" reasoning as RDP's
             # password above -- there's no ManualConnection here to
@@ -1366,22 +1484,124 @@ class ConnectionManagerView(QWidget):
             return
         username = username.strip()
 
+        # The reset is a round trip through the guest agent inside the VM
+        # and can take a minute or more, so say so rather than looking hung.
+        previous_status = self._show_status(
+            f"Resetting the password for {username} on {instance.name} — this can take a minute…"
+        )
         async_utils.run_in_background(
             lambda: gcp_client.reset_windows_password(
                 gcp_auth.get_credentials(), instance.project_id, instance.zone, instance.name, username
             ),
-            on_result=lambda credential: self._on_password_reset(instance, credential),
-            on_error=self._on_instance_action_error,
+            on_result=lambda credential: self._on_password_reset(instance, credential, previous_status),
+            on_error=lambda error: self._on_password_reset_failed(error, previous_status),
         )
 
-    def _on_password_reset(self, instance: Instance, credential: tuple[str, str]) -> None:
+    def _show_status(self, message: str) -> str | None:
+        """Shows `message` in the main window's status bar and returns what
+        it replaced (None when there's no main window, e.g. standalone)."""
+        window = self.window()
+        if not isinstance(window, QMainWindow):
+            return None
+        status_bar = window.statusBar()
+        previous = status_bar.currentMessage()
+        status_bar.showMessage(message)
+        return previous
+
+    def _restore_status(self, previous: str | None) -> None:
+        if previous is None:
+            return
+        try:
+            window = self.window()
+            if isinstance(window, QMainWindow):
+                window.statusBar().showMessage(previous)
+        except RuntimeError:
+            pass  # window torn down before the reset finished
+
+    def _on_password_reset_failed(self, error: Exception, previous_status: str | None) -> None:
+        self._restore_status(previous_status)
+        self._on_instance_action_error(error)
+
+    def _on_password_reset(
+        self, instance: Instance, credential: tuple[str, str], previous_status: str | None = None
+    ) -> None:
+        self._restore_status(previous_status)
         username, password = credential
-        QMessageBox.information(
-            self,
-            "Password Reset",
-            f"New login for {instance.name} — shown once, not stored anywhere:\n\n"
-            f"Username: {username}\nPassword: {password}",
+        # The new login is what "Connect via RDP" needs from now on, so save
+        # it for this VM rather than making the user copy it into a prompt.
+        # Saving is best-effort (no SSH key to encrypt with, say) and must
+        # never stop the credentials being shown: this dialog is the only
+        # place the password ever appears in plain text.
+        try:
+            self._store_instance_rdp_credentials(
+                instance, username, settings.encrypt_instance_rdp_password(password)
+            )
+        except (settings.SecretDecryptionError, OSError) as exc:
+            saved_note = (
+                f"Couldn't save it as this VM's RDP login: {exc}\n"
+                "Copy it now; you'll be asked for the password on the next RDP connection."
+            )
+        else:
+            saved_note = (
+                "Saved as this VM's RDP login (password encrypted with your SSH key), so "
+                "Connect via RDP signs in automatically. Change it under RDP Credentials…"
+            )
+        # The password is masked (with a Copy button) rather than printed: see
+        # PasswordResetDialog.
+        PasswordResetDialog(instance.name, username, password, saved_note, parent=self).exec()
+
+    def _store_instance_rdp_credentials(
+        self, instance: Instance, username: str, password_encrypted: bytes | None
+    ) -> None:
+        self._instance_rdp_credentials[_instance_key(instance)] = settings.InstanceRdpCredentials(
+            username=username, password_encrypted=password_encrypted
         )
+        settings.save_instance_rdp_credentials(self._instance_rdp_credentials)
+
+    def _saved_rdp_password(self, saved: settings.InstanceRdpCredentials | None) -> str | None:
+        """The saved RDP password, or None when there isn't one or it can't
+        be decrypted (no SSH key, a passphrase-protected key, a key that was
+        replaced since) -- the caller then just prompts, as it always did."""
+        if saved is None or saved.password_encrypted is None:
+            return None
+        try:
+            return settings.decrypt_instance_rdp_password(saved.password_encrypted)
+        except settings.SecretDecryptionError:
+            return None
+
+    def _on_rdp_credentials_clicked(self, instance: Instance) -> None:
+        key = _instance_key(instance)
+        saved = self._instance_rdp_credentials.get(key)
+        dialog = RdpCredentialsDialog(
+            instance.name,
+            username=saved.username if saved else (settings.load_default_username() or ""),
+            has_saved=saved is not None,
+            has_saved_password=saved is not None and saved.password_encrypted is not None,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if dialog.cleared():
+            self._instance_rdp_credentials.pop(key, None)
+            settings.save_instance_rdp_credentials(self._instance_rdp_credentials)
+            return
+
+        username = dialog.username()
+        password = dialog.password()
+        if password:
+            try:
+                encrypted = settings.encrypt_instance_rdp_password(password)
+            except settings.SecretDecryptionError as exc:
+                QMessageBox.warning(self, "Couldn't save password", str(exc))
+                return
+        elif saved is not None and saved.username == username:
+            encrypted = saved.password_encrypted  # blank means "keep what's saved"
+        else:
+            # A new username (or nothing saved yet): a leftover password
+            # belonged to somebody else, so it would only cause a failed login.
+            encrypted = None
+        self._store_instance_rdp_credentials(instance, username, encrypted)
 
     def _on_instance_action_error(self, error: Exception) -> None:
         QMessageBox.warning(self, "Instance action failed", str(error))

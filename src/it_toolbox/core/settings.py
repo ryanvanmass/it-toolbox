@@ -1,5 +1,7 @@
+import base64
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 from cryptography.hazmat.primitives import serialization
 from platformdirs import user_data_dir
@@ -165,6 +167,72 @@ def save_instance_ssh_username_overrides(overrides: dict[tuple[str, str, str], s
         for (project_id, zone, name), username in overrides.items()
     ]
     instance_ssh_username_overrides_path().write_text(json.dumps(raw))
+
+
+class InstanceRdpCredentials(NamedTuple):
+    """A GCP VM's saved RDP login. `password_encrypted` is age-encrypted to
+    the user's SSH key (see encrypt_instance_rdp_password) -- never
+    plaintext -- and None means only the username is saved, so the
+    password is still prompted for on each connection.
+    """
+
+    username: str
+    password_encrypted: bytes | None
+
+
+def instance_rdp_credentials_path() -> Path:
+    return data_dir() / "instance_rdp_credentials.json"
+
+
+def load_instance_rdp_credentials() -> dict[tuple[str, str, str], InstanceRdpCredentials]:
+    """Per-GCP-instance RDP logins, set explicitly via "RDP Credentials…" or
+    saved automatically when "Set Password…" resets a Windows account (see
+    connection_manager/ui/main_view.py). Stored as a list of
+    {"project_id", "zone", "name", "username", "password_encrypted"} dicts
+    (JSON object keys must be strings, so the natural (project_id, zone,
+    name) tuple can't be a key directly; the encrypted password is
+    base64 text, or null) and returned keyed by that tuple, same shape as
+    load_instance_ssh_username_overrides. Fails soft to {} on a missing or
+    corrupt file, and skips individual malformed entries.
+    """
+    path = instance_rdp_credentials_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    credentials: dict[tuple[str, str, str], InstanceRdpCredentials] = {}
+    for entry in raw:
+        try:
+            encoded = entry.get("password_encrypted")
+            credentials[(entry["project_id"], entry["zone"], entry["name"])] = InstanceRdpCredentials(
+                username=entry["username"],
+                password_encrypted=base64.b64decode(encoded) if encoded else None,
+            )
+        except (KeyError, TypeError, AttributeError, ValueError):
+            continue
+    return credentials
+
+
+def save_instance_rdp_credentials(
+    credentials: dict[tuple[str, str, str], InstanceRdpCredentials],
+) -> None:
+    raw = [
+        {
+            "project_id": project_id,
+            "zone": zone,
+            "name": name,
+            "username": entry.username,
+            "password_encrypted": (
+                base64.b64encode(entry.password_encrypted).decode()
+                if entry.password_encrypted
+                else None
+            ),
+        }
+        for (project_id, zone, name), entry in credentials.items()
+    ]
+    instance_rdp_credentials_path().write_text(json.dumps(raw))
 
 
 def default_username_path() -> Path:
@@ -558,6 +626,37 @@ def decrypt_manual_connection_password(encrypted: bytes, passphrase: str | None 
     if key_path is None or not key_path.is_file():
         raise SecretDecryptionError(
             "No SSH private key found to decrypt the stored connection password "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _decrypt_secret(encrypted, key_path, passphrase)
+
+
+def resolve_instance_rdp_ssh_key_path() -> Path | None:
+    """Saved GCP-instance RDP passwords use the same default SSH key
+    resolution as JumpCloud/GL.iNet/manual connections (no separate
+    override setting) -- this thin wrapper exists purely as an
+    independent monkeypatch seam in tests, same reasoning as
+    resolve_glinet_ssh_key_path.
+    """
+    return default_ssh_key_path()
+
+
+def encrypt_instance_rdp_password(password: str) -> bytes:
+    """Raises SecretDecryptionError if no SSH key (or matching .pub) is found."""
+    key_path = resolve_instance_rdp_ssh_key_path()
+    if key_path is None:
+        raise SecretDecryptionError(
+            "No SSH key found to encrypt the RDP password with "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _encrypt_secret(password, key_path)
+
+
+def decrypt_instance_rdp_password(encrypted: bytes, passphrase: str | None = None) -> str:
+    key_path = resolve_instance_rdp_ssh_key_path()
+    if key_path is None or not key_path.is_file():
+        raise SecretDecryptionError(
+            "No SSH private key found to decrypt the saved RDP password "
             "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
         )
     return _decrypt_secret(encrypted, key_path, passphrase)

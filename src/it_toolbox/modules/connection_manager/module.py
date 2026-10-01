@@ -18,7 +18,7 @@ class ConnectionManagerModule(ToolModule):
         return self._widget
 
     def create_sidebar_widget(self) -> QWidget | None:
-        return self.create_widget().sidebar_tree
+        return self.create_widget().sidebar_widget
 
     def build_context_menu(self, parent: QWidget) -> QMenu | None:
         return self.create_widget().build_context_menu(parent)
