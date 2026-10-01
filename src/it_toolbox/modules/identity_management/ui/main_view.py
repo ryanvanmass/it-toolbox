@@ -22,7 +22,7 @@ from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.modules.connection_manager import gcp_client
 from it_toolbox.modules.connection_manager.models import GcpIamBinding, GcpProject
 from it_toolbox.modules.identity_management import jumpcloud_client
-from it_toolbox.modules.identity_management.models import Device, User
+from it_toolbox.modules.identity_management.models import Device, DeviceUser, User
 
 IS_JUMPCLOUD_ROOT_ROLE = Qt.ItemDataRole.UserRole
 CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -121,7 +121,7 @@ class IdentityManagementView(QWidget):
         self._gcp_iam_bindings: list[GcpIamBinding] = []
 
         self._search_box = QLineEdit()
-        self._search_box.setPlaceholderText("Search devices and users…")
+        self._search_box.setPlaceholderText("Search devices (name or serial) and users…")
         self._search_box.textChanged.connect(self._on_search_text_changed)
 
         self._tree = QTreeWidget()
@@ -402,9 +402,56 @@ class IdentityManagementView(QWidget):
 
     # -- Device/user detail -----------------------------------------------
 
-    def _build_device_detail_panel(self) -> QWidget:
+    @staticmethod
+    def _make_selectable(fields: dict[str, QLabel]) -> None:
+        # So any value can be copied straight out of the detail panel.
+        for label in fields.values():
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    @staticmethod
+    def _new_detail_panel() -> tuple[QWidget, QFormLayout]:
+        """A form pinned to the top of the panel. Without the stretch, a
+        QFormLayout hands the page's spare height to its rows, spreading
+        them far apart.
+        """
         panel = QWidget()
-        form = QFormLayout(panel)
+        outer = QVBoxLayout(panel)
+        form_host = QWidget()
+        form = QFormLayout(form_host)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        outer.addWidget(form_host)
+        outer.addStretch(1)
+        return panel, form
+
+    def _build_bound_users_widget(self) -> QWidget:
+        """Status line (Loading…/Unavailable/none) over a small
+        Name/Username/Permission table of the users bound to the device.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._bound_users_status = QLabel("")
+        self._bound_users_table = QTableWidget(0, 3)
+        self._bound_users_table.setHorizontalHeaderLabels(["Name", "Username", "Permission"])
+        self._bound_users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._bound_users_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._bound_users_table.verticalHeader().setVisible(False)
+        self._bound_users_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self._bound_users_table.hide()
+        layout.addWidget(self._bound_users_status)
+        layout.addWidget(self._bound_users_table)
+        return widget
+
+    def _set_bound_users_status(self, text: str) -> None:
+        self._bound_users_table.setRowCount(0)
+        self._bound_users_table.hide()
+        self._bound_users_status.setText(text)
+        self._bound_users_status.show()
+
+    def _build_device_detail_panel(self) -> QWidget:
+        panel, form = self._new_detail_panel()
 
         self._device_fields = {
             "hostname": QLabel(""),
@@ -412,6 +459,7 @@ class IdentityManagementView(QWidget):
             "os_version": QLabel(""),
             "arch": QLabel(""),
             "serial_number": QLabel(""),
+            "recovery_key": QLabel(""),
             "agent_version": QLabel(""),
             "remote_ip": QLabel(""),
             "last_contact": QLabel(""),
@@ -419,11 +467,14 @@ class IdentityManagementView(QWidget):
             "description": QLabel(""),
         }
         self._device_fields["description"].setWordWrap(True)
+        self._make_selectable(self._device_fields)
         form.addRow("Hostname:", self._device_fields["hostname"])
         form.addRow("Status:", self._device_fields["status"])
         form.addRow("OS Version:", self._device_fields["os_version"])
         form.addRow("Architecture:", self._device_fields["arch"])
         form.addRow("Serial Number:", self._device_fields["serial_number"])
+        form.addRow("Recovery Key:", self._device_fields["recovery_key"])
+        form.addRow("Bound Users:", self._build_bound_users_widget())
         form.addRow("Agent Version:", self._device_fields["agent_version"])
         form.addRow("Remote IP:", self._device_fields["remote_ip"])
         form.addRow("Last Contact:", self._device_fields["last_contact"])
@@ -433,8 +484,7 @@ class IdentityManagementView(QWidget):
         return panel
 
     def _build_user_detail_panel(self) -> QWidget:
-        panel = QWidget()
-        form = QFormLayout(panel)
+        panel, form = self._new_detail_panel()
 
         self._user_fields = {
             "email": QLabel(""),
@@ -447,6 +497,7 @@ class IdentityManagementView(QWidget):
             "mfa_configured": QLabel(""),
             "created": QLabel(""),
         }
+        self._make_selectable(self._user_fields)
         form.addRow("Email:", self._user_fields["email"])
         form.addRow("First Name:", self._user_fields["first_name"])
         form.addRow("Last Name:", self._user_fields["last_name"])
@@ -471,6 +522,8 @@ class IdentityManagementView(QWidget):
         self._device_fields["os_version"].setText(device.os_version or "Loading…")
         self._device_fields["arch"].setText(device.arch or "Loading…")
         self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
+        self._device_fields["recovery_key"].setText("Loading…")
+        self._set_bound_users_status("Loading…")
         self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
         self._device_fields["remote_ip"].setText(device.remote_ip or "Loading…")
         self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
@@ -484,6 +537,19 @@ class IdentityManagementView(QWidget):
             lambda: jumpcloud_client.get_device(api_key, device.id),
             on_result=self._populate_device_detail,
             on_error=self._on_detail_error,
+        )
+        async_utils.run_in_background(
+            lambda: jumpcloud_client.get_device_users(api_key, device.id),
+            on_result=lambda bound: self._populate_bound_users(device.id, bound),
+            on_error=lambda exc: self._populate_bound_users(device.id, None),
+        )
+        # Separate call/endpoint, and a failure here (e.g. a key without
+        # permission to read it) shouldn't pop a dialog over the rest of
+        # the detail — it just shows as unavailable.
+        async_utils.run_in_background(
+            lambda: jumpcloud_client.get_recovery_key(api_key, device.id),
+            on_result=lambda key: self._populate_recovery_key(device.id, key),
+            on_error=lambda exc: self._populate_recovery_key(device.id, None),
         )
 
     def _show_user_detail(self, user: User) -> None:
@@ -539,6 +605,52 @@ class IdentityManagementView(QWidget):
         except RuntimeError:
             pass  # widget torn down mid-flight
 
+    def _populate_bound_users(self, device_id: str, bound: list[DeviceUser] | None) -> None:
+        try:
+            if self._selected_device is None or self._selected_device.id != device_id:
+                return
+            if bound is None:
+                self._set_bound_users_status("Unavailable")
+                return
+            if not bound:
+                self._set_bound_users_status("—")
+                return
+            known = {u.id: u for u in self._users}
+            rows = []
+            for b in bound:
+                user = known.get(b.user_id)
+                name = f"{user.first_name} {user.last_name}".strip() if user else ""
+                username = user.username if user else b.user_id
+                level = "Administrator" if b.admin else "Standard"
+                if b.admin and b.passwordless:
+                    level += " (no password)"
+                rows.append((name or "—", username, level))
+            rows.sort(key=lambda r: (r[0] == "—", r[0].lower(), r[1].lower()))
+            self._bound_users_status.hide()
+            self._bound_users_table.setRowCount(len(rows))
+            for row, values in enumerate(rows):
+                for col, value in enumerate(values):
+                    self._bound_users_table.setItem(row, col, QTableWidgetItem(value))
+            # Size to the rows (no inner scrolling) rather than the
+            # form's default stretched height.
+            height = (
+                self._bound_users_table.horizontalHeader().height()
+                + self._bound_users_table.rowHeight(0) * len(rows)
+                + 2 * self._bound_users_table.frameWidth()
+            )
+            self._bound_users_table.setFixedHeight(height)
+            self._bound_users_table.show()
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
+    def _populate_recovery_key(self, device_id: str, key: str | None) -> None:
+        try:
+            if self._selected_device is None or self._selected_device.id != device_id:
+                return
+            self._device_fields["recovery_key"].setText("Unavailable" if key is None else key or "—")
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
     def _on_detail_error(self, error: Exception) -> None:
         try:
             QMessageBox.warning(self, "Failed to load device details", str(error))
@@ -588,39 +700,66 @@ class IdentityManagementView(QWidget):
     # so a search narrows the table too rather than just offering tree
     # shortcuts alongside an unfiltered one.
 
+    @staticmethod
+    def _device_matches(device: Device, query: str) -> bool:
+        return query in device.display_name.lower() or query in device.serial_number.lower()
+
+    @staticmethod
+    def _user_matches(user: User, query: str) -> bool:
+        return query in user.username.lower()
+
+    @staticmethod
+    def _gcp_project_matches(project: GcpProject, query: str) -> bool:
+        return query in (project.display_name or project.project_id).lower()
+
     def _on_search_text_changed(self, text: str) -> None:
         query = text.strip().lower()
         self._rebuild_search_results(
-            self._devices_category, self._devices, lambda d: d.display_name, DEVICE_ROLE, query
+            self._devices_category,
+            self._devices,
+            lambda d: d.display_name,
+            self._device_matches,
+            DEVICE_ROLE,
+            query,
         )
         self._rebuild_search_results(
-            self._users_category, self._users, lambda u: u.username, USER_ROLE, query
+            self._users_category,
+            self._users,
+            lambda u: u.username,
+            self._user_matches,
+            USER_ROLE,
+            query,
         )
         self._rebuild_search_results(
             self._gcp_projects_category,
             self._gcp_projects,
             lambda p: p.display_name or p.project_id,
+            self._gcp_project_matches,
             GCP_PROJECT_ROLE,
             query,
         )
-        self._filter_table_rows(self._devices_table, query)
-        self._filter_table_rows(self._users_table, query)
-        self._filter_table_rows(self._gcp_projects_table, query)
+        self._filter_table_rows(self._devices_table, DEVICE_ROLE, self._device_matches, query)
+        self._filter_table_rows(self._users_table, USER_ROLE, self._user_matches, query)
+        self._filter_table_rows(
+            self._gcp_projects_table, GCP_PROJECT_ROLE, self._gcp_project_matches, query
+        )
 
     @staticmethod
-    def _filter_table_rows(table: QTableWidget, query: str) -> None:
+    def _filter_table_rows(table: QTableWidget, role, match_fn, query: str) -> None:
         for row in range(table.rowCount()):
             item = table.item(row, 0)
-            text = item.text().lower() if item is not None else ""
-            table.setRowHidden(row, bool(query) and query not in text)
+            obj = item.data(role) if item is not None else None
+            table.setRowHidden(row, bool(query) and (obj is None or not match_fn(obj, query)))
 
     @staticmethod
-    def _rebuild_search_results(category, items, label_fn, role, query: str) -> None:
+    def _rebuild_search_results(
+        category, items, label_fn, match_fn, role, query: str
+    ) -> None:
         category.takeChildren()
         if not query:
             category.setHidden(False)
             return
-        matches = [item for item in items if query in label_fn(item).lower()]
+        matches = [item for item in items if match_fn(item, query)]
         for item in matches:
             leaf = QTreeWidgetItem([label_fn(item)])
             leaf.setData(0, role, item)

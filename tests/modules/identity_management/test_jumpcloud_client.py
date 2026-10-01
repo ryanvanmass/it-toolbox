@@ -38,7 +38,13 @@ def test_list_devices_single_page(monkeypatch):
             json_data={
                 "results": [
                     {"id": "d2", "displayName": "zeta", "os": "linux", "hostname": "zeta-host"},
-                    {"id": "d1", "displayName": "alpha", "os": "windows", "hostname": "alpha-host"},
+                    {
+                        "id": "d1",
+                        "displayName": "alpha",
+                        "os": "windows",
+                        "hostname": "alpha-host",
+                        "serialNumber": "SN1",
+                    },
                 ]
             }
         )
@@ -51,6 +57,7 @@ def test_list_devices_single_page(monkeypatch):
     assert devices[0].id == "d1"
     assert devices[0].os == "windows"
     assert devices[0].hostname == "alpha-host"
+    assert devices[0].serial_number == "SN1"
 
 
 def test_list_devices_paginates_until_a_short_page(monkeypatch):
@@ -269,3 +276,67 @@ def test_connection_raises_on_http_error(monkeypatch):
         raise AssertionError("expected JumpCloudApiError")
     except jumpcloud_client.JumpCloudApiError:
         pass
+
+
+def test_get_recovery_key_returns_key(monkeypatch):
+    def fake_get(url, headers, params, timeout):
+        assert url.endswith("/api/v2/systems/d1/fdekey")
+        return _FakeResponse(json_data={"key": "111111-222222"})
+
+    monkeypatch.setattr(jumpcloud_client.requests, "get", fake_get)
+
+    assert jumpcloud_client.get_recovery_key("jca_testkey", "d1") == "111111-222222"
+
+
+def test_get_recovery_key_returns_empty_on_404(monkeypatch):
+    monkeypatch.setattr(
+        jumpcloud_client.requests,
+        "get",
+        lambda url, headers, params, timeout: _FakeResponse(status_code=404, text="nope"),
+    )
+
+    assert jumpcloud_client.get_recovery_key("jca_testkey", "d1") == ""
+
+
+def test_get_recovery_key_raises_on_other_errors(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(
+        jumpcloud_client.requests,
+        "get",
+        lambda url, headers, params, timeout: _FakeResponse(status_code=403, text="no"),
+    )
+
+    with pytest.raises(jumpcloud_client.JumpCloudApiError):
+        jumpcloud_client.get_recovery_key("jca_testkey", "d1")
+
+
+def test_get_device_users_maps_permission_level(monkeypatch):
+    def fake_get(url, headers, params, timeout):
+        assert url.endswith("/api/v2/systems/d1/users")
+        return _FakeResponse(
+            json_data=[
+                {
+                    "id": "u1",
+                    "type": "user",
+                    "paths": [[{"attributes": {"sudo": {"enabled": True, "withoutPassword": True}}}]],
+                },
+                {"id": "u2", "type": "user", "paths": [[{"attributes": None}]]},
+                {
+                    "id": "u3",
+                    "type": "user",
+                    "compiledAttributes": {"sudo": {"enabled": True, "withoutPassword": False}},
+                    "paths": [[{"attributes": None}]],
+                },
+            ]
+        )
+
+    monkeypatch.setattr(jumpcloud_client.requests, "get", fake_get)
+
+    users = jumpcloud_client.get_device_users("jca_testkey", "d1")
+
+    assert [(u.user_id, u.admin, u.passwordless) for u in users] == [
+        ("u1", True, True),
+        ("u2", False, False),
+        ("u3", True, False),
+    ]
