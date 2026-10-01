@@ -107,11 +107,15 @@ def get_iam_policy(credentials: Credentials, project_id: str) -> list[GcpIamBind
     Manager's getIamPolicy is a POST (unlike every other read here) and
     returns bindings grouped by role, each with a list of members; flattened
     to one GcpIamBinding per member. No pagination on this endpoint.
+
+    Deliberately no X-Goog-User-Project: that would bill the call to the
+    inspected project and require the Resource Manager API to be enabled
+    in every project looked at (403 SERVICE_DISABLED otherwise). Like
+    list_projects, it's left to the caller's own quota project.
     """
     data = _post(
         f"{RESOURCE_MANAGER_BASE}/projects/{project_id}:getIamPolicy",
         credentials.token,
-        extra_headers={"X-Goog-User-Project": project_id},
     )
     bindings = [
         GcpIamBinding(project_id=project_id, role=binding["role"], member=member)

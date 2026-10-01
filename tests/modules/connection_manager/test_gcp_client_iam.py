@@ -29,7 +29,8 @@ def test_get_iam_policy_posts_to_get_iam_policy_endpoint(monkeypatch):
     (url, headers, body) = calls[0]
     assert url.endswith("/projects/proj:getIamPolicy")
     assert headers["Authorization"] == "Bearer fake-token"
-    assert headers["X-Goog-User-Project"] == "proj"
+    # Billing to the inspected project would need the API enabled there.
+    assert "X-Goog-User-Project" not in headers
     assert body is None
 
 
