@@ -1,5 +1,7 @@
+from PySide6.QtCore import Qt
+
 import it_toolbox.modules.identity_management.ui.main_view as main_view_module
-from it_toolbox.modules.identity_management.models import Device, User
+from it_toolbox.modules.identity_management.models import Device, DeviceUser, User
 from it_toolbox.modules.identity_management.ui.main_view import (
     DEVICE_ROLE,
     PAGE_DEVICE_DETAIL,
@@ -36,6 +38,14 @@ def _make_view(qtbot, monkeypatch, api_key="jca_test", devices=(), users=()):
     monkeypatch.setattr(
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.list_users",
         lambda key: list(users),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_recovery_key",
+        lambda key, device_id: "",
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device_users",
+        lambda key, device_id: [],
     )
     view = IdentityManagementView()
     qtbot.addWidget(view)
@@ -150,6 +160,22 @@ def test_search_creates_matching_tree_leaves(qtbot, monkeypatch):
     assert view._devices_category.childCount() == 1
     assert view._devices_category.child(0).text(0) == "alpha"
     assert view._devices_category.child(0).data(0, DEVICE_ROLE) == devices[0]
+
+
+def test_search_matches_device_serial_number(qtbot, monkeypatch):
+    devices = [
+        Device(id="d1", display_name="alpha", os="windows", serial_number="C02XK1ABCD"),
+        Device(id="d2", display_name="beta", os="linux", serial_number="ZZ999"),
+    ]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
+
+    view._search_box.setText("c02xk1")
+
+    assert view._devices_category.childCount() == 1
+    assert view._devices_category.child(0).text(0) == "alpha"
+    assert not view._devices_table.isRowHidden(0)
+    assert view._devices_table.isRowHidden(1)
 
 
 def test_search_matches_users_too(qtbot, monkeypatch):
@@ -293,6 +319,86 @@ def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
 
 
 # -- Detail panels --------------------------------------------------------
+
+
+def test_detail_values_are_selectable(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    flag = Qt.TextInteractionFlag.TextSelectableByMouse
+    for label in [*view._device_fields.values(), *view._user_fields.values()]:
+        assert label.textInteractionFlags() & flag
+
+
+def test_device_detail_shows_bound_users_with_permission_level(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows")
+    users = [User(id="u1", username="alice", email="a@x.com", first_name="Alice", last_name="Smith")]
+    view = _make_view(qtbot, monkeypatch, devices=[device], users=users)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    qtbot.waitUntil(lambda: len(view._users) == 1, timeout=2000)
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: device,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device_users",
+        lambda key, device_id: [
+            DeviceUser(user_id="u1", admin=True, passwordless=True),
+            DeviceUser(user_id="u9"),
+        ],
+    )
+
+    view._devices_table.setCurrentCell(0, 0)
+
+    table = view._bound_users_table
+    qtbot.waitUntil(lambda: table.rowCount() == 2, timeout=2000)
+    rows = [[table.item(r, c).text() for c in range(3)] for r in range(2)]
+    assert rows == [
+        ["Alice Smith", "alice", "Administrator (no password)"],
+        ["—", "u9", "Standard"],
+    ]
+
+
+def test_device_detail_shows_recovery_key(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows")
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: device,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_recovery_key",
+        lambda key, device_id: "111111-222222",
+    )
+
+    view._devices_table.setCurrentCell(0, 0)
+
+    qtbot.waitUntil(
+        lambda: view._device_fields["recovery_key"].text() == "111111-222222", timeout=2000
+    )
+
+
+def test_device_detail_recovery_key_error_shows_unavailable(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows")
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: device,
+    )
+
+    def boom(key, device_id):
+        raise RuntimeError("403")
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_recovery_key",
+        boom,
+    )
+
+    view._devices_table.setCurrentCell(0, 0)
+
+    qtbot.waitUntil(
+        lambda: view._device_fields["recovery_key"].text() == "Unavailable", timeout=2000
+    )
 
 
 def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeypatch):
