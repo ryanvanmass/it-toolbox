@@ -221,6 +221,21 @@ class IdentityManagementView(QWidget):
         for label in fields.values():
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
+    @staticmethod
+    def _new_detail_panel() -> tuple[QWidget, QFormLayout]:
+        """A form pinned to the top of the panel. Without the stretch, a
+        QFormLayout hands the page's spare height to its rows, spreading
+        them far apart.
+        """
+        panel = QWidget()
+        outer = QVBoxLayout(panel)
+        form_host = QWidget()
+        form = QFormLayout(form_host)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        outer.addWidget(form_host)
+        outer.addStretch(1)
+        return panel, form
+
     def _build_bound_users_widget(self) -> QWidget:
         """Status line (Loading…/Unavailable/none) over a small
         Name/Username/Permission table of the users bound to the device.
@@ -249,8 +264,7 @@ class IdentityManagementView(QWidget):
         self._bound_users_status.show()
 
     def _build_device_detail_panel(self) -> QWidget:
-        panel = QWidget()
-        form = QFormLayout(panel)
+        panel, form = self._new_detail_panel()
 
         self._device_fields = {
             "hostname": QLabel(""),
@@ -283,8 +297,7 @@ class IdentityManagementView(QWidget):
         return panel
 
     def _build_user_detail_panel(self) -> QWidget:
-        panel = QWidget()
-        form = QFormLayout(panel)
+        panel, form = self._new_detail_panel()
 
         self._user_fields = {
             "email": QLabel(""),
