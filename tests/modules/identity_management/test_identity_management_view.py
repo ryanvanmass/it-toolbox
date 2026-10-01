@@ -37,6 +37,10 @@ def _make_view(qtbot, monkeypatch, api_key="jca_test", devices=(), users=()):
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.list_users",
         lambda key: list(users),
     )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_recovery_key",
+        lambda key, device_id: "",
+    )
     view = IdentityManagementView()
     qtbot.addWidget(view)
     return view
@@ -309,6 +313,50 @@ def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
 
 
 # -- Detail panels --------------------------------------------------------
+
+
+def test_device_detail_shows_recovery_key(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows")
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: device,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_recovery_key",
+        lambda key, device_id: "111111-222222",
+    )
+
+    view._devices_table.setCurrentCell(0, 0)
+
+    qtbot.waitUntil(
+        lambda: view._device_fields["recovery_key"].text() == "111111-222222", timeout=2000
+    )
+
+
+def test_device_detail_recovery_key_error_shows_unavailable(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows")
+    view = _make_view(qtbot, monkeypatch, devices=[device])
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: device,
+    )
+
+    def boom(key, device_id):
+        raise RuntimeError("403")
+
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_recovery_key",
+        boom,
+    )
+
+    view._devices_table.setCurrentCell(0, 0)
+
+    qtbot.waitUntil(
+        lambda: view._device_fields["recovery_key"].text() == "Unavailable", timeout=2000
+    )
 
 
 def test_selecting_a_device_renders_partial_then_backfills_detail(qtbot, monkeypatch):

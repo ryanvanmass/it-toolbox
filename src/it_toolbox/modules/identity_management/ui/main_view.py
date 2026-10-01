@@ -225,6 +225,7 @@ class IdentityManagementView(QWidget):
             "os_version": QLabel(""),
             "arch": QLabel(""),
             "serial_number": QLabel(""),
+            "recovery_key": QLabel(""),
             "agent_version": QLabel(""),
             "remote_ip": QLabel(""),
             "last_contact": QLabel(""),
@@ -232,11 +233,16 @@ class IdentityManagementView(QWidget):
             "description": QLabel(""),
         }
         self._device_fields["description"].setWordWrap(True)
+        # Selectable so the key can be copied straight out of the panel.
+        self._device_fields["recovery_key"].setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         form.addRow("Hostname:", self._device_fields["hostname"])
         form.addRow("Status:", self._device_fields["status"])
         form.addRow("OS Version:", self._device_fields["os_version"])
         form.addRow("Architecture:", self._device_fields["arch"])
         form.addRow("Serial Number:", self._device_fields["serial_number"])
+        form.addRow("Recovery Key:", self._device_fields["recovery_key"])
         form.addRow("Agent Version:", self._device_fields["agent_version"])
         form.addRow("Remote IP:", self._device_fields["remote_ip"])
         form.addRow("Last Contact:", self._device_fields["last_contact"])
@@ -284,6 +290,7 @@ class IdentityManagementView(QWidget):
         self._device_fields["os_version"].setText(device.os_version or "Loading…")
         self._device_fields["arch"].setText(device.arch or "Loading…")
         self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
+        self._device_fields["recovery_key"].setText("Loading…")
         self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
         self._device_fields["remote_ip"].setText(device.remote_ip or "Loading…")
         self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
@@ -297,6 +304,14 @@ class IdentityManagementView(QWidget):
             lambda: jumpcloud_client.get_device(api_key, device.id),
             on_result=self._populate_device_detail,
             on_error=self._on_detail_error,
+        )
+        # Separate call/endpoint, and a failure here (e.g. a key without
+        # permission to read it) shouldn't pop a dialog over the rest of
+        # the detail — it just shows as unavailable.
+        async_utils.run_in_background(
+            lambda: jumpcloud_client.get_recovery_key(api_key, device.id),
+            on_result=lambda key: self._populate_recovery_key(device.id, key),
+            on_error=lambda exc: self._populate_recovery_key(device.id, None),
         )
 
     def _show_user_detail(self, user: User) -> None:
@@ -344,6 +359,14 @@ class IdentityManagementView(QWidget):
             self._device_fields["last_contact"].setText(device.last_contact or "—")
             self._device_fields["created"].setText(device.created or "—")
             self._device_fields["description"].setText(device.description or "—")
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
+    def _populate_recovery_key(self, device_id: str, key: str | None) -> None:
+        try:
+            if self._selected_device is None or self._selected_device.id != device_id:
+                return
+            self._device_fields["recovery_key"].setText("Unavailable" if key is None else key or "—")
         except RuntimeError:
             pass  # widget torn down mid-flight
 

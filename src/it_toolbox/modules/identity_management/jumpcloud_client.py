@@ -19,6 +19,7 @@ from it_toolbox.modules.identity_management.models import Device, User
 REQUEST_TIMEOUT_SEC = (10, 30)
 
 API_BASE_V1 = "https://console.jumpcloud.com/api"
+API_BASE_V2 = "https://console.jumpcloud.com/api/v2"
 
 # JumpCloud v1 list endpoints page via limit/skip and stop once a page
 # comes back shorter than requested — unverified against live docs, but
@@ -27,14 +28,16 @@ LIST_PAGE_LIMIT = 100
 
 
 class JumpCloudApiError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _get(url: str, api_key: str, params: dict | None = None) -> dict:
     headers = {"x-api-key": api_key, "Accept": "application/json"}
     response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT_SEC)
     if response.status_code >= 400:
-        raise JumpCloudApiError(f"{response.status_code} {url}: {response.text[:500]}")
+        raise JumpCloudApiError(f"{response.status_code} {url}: {response.text[:500]}", response.status_code)
     return response.json()
 
 
@@ -107,6 +110,19 @@ def list_devices(api_key: str) -> list[Device]:
 def get_device(api_key: str, device_id: str) -> Device:
     data = _get(f"{API_BASE_V1}/systems/{device_id}", api_key)
     return _device_from_detail_json(data)
+
+
+def get_recovery_key(api_key: str, device_id: str) -> str:
+    """The device's escrowed full-disk-encryption recovery key (BitLocker/
+    FileVault), or "" if JumpCloud holds none for it (a 404).
+    """
+    try:
+        data = _get(f"{API_BASE_V2}/systems/{device_id}/fdekey", api_key)
+    except JumpCloudApiError as exc:
+        if exc.status_code == 404:
+            return ""
+        raise
+    return data.get("key", "")
 
 
 def list_users(api_key: str) -> list[User]:

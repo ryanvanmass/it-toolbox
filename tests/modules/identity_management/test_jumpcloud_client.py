@@ -276,3 +276,36 @@ def test_connection_raises_on_http_error(monkeypatch):
         raise AssertionError("expected JumpCloudApiError")
     except jumpcloud_client.JumpCloudApiError:
         pass
+
+
+def test_get_recovery_key_returns_key(monkeypatch):
+    def fake_get(url, headers, params, timeout):
+        assert url.endswith("/api/v2/systems/d1/fdekey")
+        return _FakeResponse(json_data={"key": "111111-222222"})
+
+    monkeypatch.setattr(jumpcloud_client.requests, "get", fake_get)
+
+    assert jumpcloud_client.get_recovery_key("jca_testkey", "d1") == "111111-222222"
+
+
+def test_get_recovery_key_returns_empty_on_404(monkeypatch):
+    monkeypatch.setattr(
+        jumpcloud_client.requests,
+        "get",
+        lambda url, headers, params, timeout: _FakeResponse(status_code=404, text="nope"),
+    )
+
+    assert jumpcloud_client.get_recovery_key("jca_testkey", "d1") == ""
+
+
+def test_get_recovery_key_raises_on_other_errors(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(
+        jumpcloud_client.requests,
+        "get",
+        lambda url, headers, params, timeout: _FakeResponse(status_code=403, text="no"),
+    )
+
+    with pytest.raises(jumpcloud_client.JumpCloudApiError):
+        jumpcloud_client.get_recovery_key("jca_testkey", "d1")
