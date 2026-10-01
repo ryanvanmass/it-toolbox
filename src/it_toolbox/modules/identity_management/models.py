@@ -4,9 +4,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Device:
     """A JumpCloud-managed device (their term is "system"). List responses
-    only populate the first few fields; os_version/serial_number/
-    agent_version/created/remote_ip/arch/description are backfilled by a
-    get_device() detail call.
+    only populate the first few fields (including serial_number, so search
+    can match on it); os_version/agent_version/created/remote_ip/arch/
+    description are backfilled by a get_device() detail call.
     """
 
     id: str

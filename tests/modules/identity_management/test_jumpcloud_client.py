@@ -38,7 +38,13 @@ def test_list_devices_single_page(monkeypatch):
             json_data={
                 "results": [
                     {"id": "d2", "displayName": "zeta", "os": "linux", "hostname": "zeta-host"},
-                    {"id": "d1", "displayName": "alpha", "os": "windows", "hostname": "alpha-host"},
+                    {
+                        "id": "d1",
+                        "displayName": "alpha",
+                        "os": "windows",
+                        "hostname": "alpha-host",
+                        "serialNumber": "SN1",
+                    },
                 ]
             }
         )
@@ -51,6 +57,7 @@ def test_list_devices_single_page(monkeypatch):
     assert devices[0].id == "d1"
     assert devices[0].os == "windows"
     assert devices[0].hostname == "alpha-host"
+    assert devices[0].serial_number == "SN1"
 
 
 def test_list_devices_paginates_until_a_short_page(monkeypatch):

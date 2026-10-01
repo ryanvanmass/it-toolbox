@@ -77,7 +77,7 @@ class IdentityManagementView(QWidget):
         self._users: list[User] = []
 
         self._search_box = QLineEdit()
-        self._search_box.setPlaceholderText("Search devices and users…")
+        self._search_box.setPlaceholderText("Search devices (name or serial) and users…")
         self._search_box.textChanged.connect(self._on_search_text_changed)
 
         self._tree = QTreeWidget()
@@ -396,31 +396,51 @@ class IdentityManagementView(QWidget):
     # so a search narrows the table too rather than just offering tree
     # shortcuts alongside an unfiltered one.
 
+    @staticmethod
+    def _device_matches(device: Device, query: str) -> bool:
+        return query in device.display_name.lower() or query in device.serial_number.lower()
+
+    @staticmethod
+    def _user_matches(user: User, query: str) -> bool:
+        return query in user.username.lower()
+
     def _on_search_text_changed(self, text: str) -> None:
         query = text.strip().lower()
         self._rebuild_search_results(
-            self._devices_category, self._devices, lambda d: d.display_name, DEVICE_ROLE, query
+            self._devices_category,
+            self._devices,
+            lambda d: d.display_name,
+            self._device_matches,
+            DEVICE_ROLE,
+            query,
         )
         self._rebuild_search_results(
-            self._users_category, self._users, lambda u: u.username, USER_ROLE, query
+            self._users_category,
+            self._users,
+            lambda u: u.username,
+            self._user_matches,
+            USER_ROLE,
+            query,
         )
-        self._filter_table_rows(self._devices_table, query)
-        self._filter_table_rows(self._users_table, query)
+        self._filter_table_rows(self._devices_table, DEVICE_ROLE, self._device_matches, query)
+        self._filter_table_rows(self._users_table, USER_ROLE, self._user_matches, query)
 
     @staticmethod
-    def _filter_table_rows(table: QTableWidget, query: str) -> None:
+    def _filter_table_rows(table: QTableWidget, role, match_fn, query: str) -> None:
         for row in range(table.rowCount()):
             item = table.item(row, 0)
-            text = item.text().lower() if item is not None else ""
-            table.setRowHidden(row, bool(query) and query not in text)
+            obj = item.data(role) if item is not None else None
+            table.setRowHidden(row, bool(query) and (obj is None or not match_fn(obj, query)))
 
     @staticmethod
-    def _rebuild_search_results(category, items, label_fn, role, query: str) -> None:
+    def _rebuild_search_results(
+        category, items, label_fn, match_fn, role, query: str
+    ) -> None:
         category.takeChildren()
         if not query:
             category.setHidden(False)
             return
-        matches = [item for item in items if query in label_fn(item).lower()]
+        matches = [item for item in items if match_fn(item, query)]
         for item in matches:
             leaf = QTreeWidgetItem([label_fn(item)])
             leaf.setData(0, role, item)

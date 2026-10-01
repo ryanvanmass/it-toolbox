@@ -44,6 +44,7 @@ def _device_from_list_json(data: dict) -> Device:
         display_name=data.get("displayName") or data.get("hostname", data["id"]),
         os=data.get("os", ""),
         hostname=data.get("hostname", ""),
+        serial_number=data.get("serialNumber", ""),
         last_contact=data.get("lastContact", ""),
         active=data.get("active", True),
     )

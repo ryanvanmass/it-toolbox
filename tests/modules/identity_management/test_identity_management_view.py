@@ -152,6 +152,22 @@ def test_search_creates_matching_tree_leaves(qtbot, monkeypatch):
     assert view._devices_category.child(0).data(0, DEVICE_ROLE) == devices[0]
 
 
+def test_search_matches_device_serial_number(qtbot, monkeypatch):
+    devices = [
+        Device(id="d1", display_name="alpha", os="windows", serial_number="C02XK1ABCD"),
+        Device(id="d2", display_name="beta", os="linux", serial_number="ZZ999"),
+    ]
+    view = _make_view(qtbot, monkeypatch, devices=devices)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 2, timeout=2000)
+
+    view._search_box.setText("c02xk1")
+
+    assert view._devices_category.childCount() == 1
+    assert view._devices_category.child(0).text(0) == "alpha"
+    assert not view._devices_table.isRowHidden(0)
+    assert view._devices_table.isRowHidden(1)
+
+
 def test_search_matches_users_too(qtbot, monkeypatch):
     users = [
         User(id="u1", username="alice", email="alice@example.com"),
