@@ -3302,3 +3302,102 @@ def test_instance_menu_offers_rdp_credentials_for_windows_and_linux_alike(qtbot,
     # OS-specific Set Password…/Upload Public Key… gating is unchanged.
     assert "RDP Credentials…" in windows_texts and "Upload Public Key…" not in windows_texts
     assert "RDP Credentials…" in linux_texts and "Set Password…" not in linux_texts
+
+
+def test_populate_instances_sets_a_status_dot_per_instance(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.status_indicator import (
+        PAUSED,
+        RUNNING,
+        STOPPED,
+        status_icon,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    category_item = QTreeWidgetItem(["VMs"])
+    instances = [
+        Instance(name="up", zone="z", project_id="p1", status="RUNNING"),
+        Instance(name="down", zone="z", project_id="p1", status="TERMINATED"),
+        Instance(name="asleep", zone="z", project_id="p1", status="SUSPENDED"),
+    ]
+
+    view._populate_instances(category_item, instances)
+
+    keys = [category_item.child(i).icon(0).cacheKey() for i in range(3)]
+    assert keys == [status_icon(k).cacheKey() for k in (RUNNING, STOPPED, PAUSED)]
+    assert category_item.child(1).toolTip(0) == "Status: TERMINATED"
+
+
+def test_populate_qemu_vms_sets_a_status_dot_per_vm(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.status_indicator import (
+        PAUSED,
+        RUNNING,
+        STOPPED,
+        status_icon,
+    )
+
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    host_item = QTreeWidgetItem(["lab"])
+    vms = [
+        QemuVm(id="1", name="up", state="running"),
+        QemuVm(id="-", name="down", state="shut off"),
+        QemuVm(id="2", name="held", state="paused"),
+    ]
+
+    view._populate_qemu_vms(host_item, host, vms)
+
+    keys = [host_item.child(i).icon(0).cacheKey() for i in range(3)]
+    assert keys == [status_icon(k).cacheKey() for k in (RUNNING, STOPPED, PAUSED)]
+
+
+def _project_menu(qtbot, monkeypatch, project_id, choose):
+    """Right-clicks a GCP project node; returns the menu's action texts and
+    the URLs opened after the 'user' picks the action whose text is `choose`."""
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    view = _make_view(qtbot, monkeypatch)
+    item = QTreeWidgetItem([project_id])
+    item.setData(0, main_view_module.PROJECT_ID_ROLE, project_id)
+    monkeypatch.setattr(view._tree, "itemAt", lambda pos: item)
+    monkeypatch.setattr(view, "_refresh_project", lambda project_item: None)
+    seen = []
+
+    class _AutoPickMenu(QMenu):
+        def exec(self, *args):
+            seen.extend(action.text() for action in self.actions() if action.text())
+            for action in self.actions():
+                if action.text() == choose:
+                    action.trigger()
+                    return action
+            return None
+
+    opened = []
+
+    class _FakeDesktopServices:
+        @staticmethod
+        def openUrl(url):
+            opened.append(url.toString())
+            return True
+
+    monkeypatch.setattr(main_view_module, "QMenu", _AutoPickMenu)
+    monkeypatch.setattr(main_view_module, "QDesktopServices", _FakeDesktopServices)
+
+    view._on_tree_context_menu(QPoint(0, 0))
+    return seen, opened
+
+
+def test_project_menu_open_in_console_opens_the_project_dashboard(qtbot, monkeypatch):
+    texts, opened = _project_menu(qtbot, monkeypatch, "my-project-123", "Open in Console")
+
+    assert texts == ["Refresh", "Open in Console"]
+    assert opened == [
+        "https://console.cloud.google.com/home/dashboard?project=my-project-123"
+    ]
+
+
+def test_project_menu_refresh_does_not_open_the_console(qtbot, monkeypatch):
+    _, opened = _project_menu(qtbot, monkeypatch, "my-project-123", "Refresh")
+
+    assert opened == []

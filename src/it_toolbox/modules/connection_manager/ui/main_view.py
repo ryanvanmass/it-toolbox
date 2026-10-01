@@ -1,8 +1,10 @@
 import base64
 import platform
+from urllib.parse import quote
 
 import shiboken6
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -72,6 +74,11 @@ from it_toolbox.modules.connection_manager.ui.project_selection_dialog import (
 from it_toolbox.modules.connection_manager.ui.rdp_credentials_dialog import (
     RdpCredentialsDialog,
 )
+from it_toolbox.modules.connection_manager.ui.status_indicator import (
+    gcp_status_kind,
+    qemu_state_kind,
+    status_icon,
+)
 from it_toolbox.widgets.bucket_browser_widget import BucketBrowserWidget
 from it_toolbox.widgets.ftp_browser_widget import FtpBrowserWidget
 from it_toolbox.widgets.glinet_dashboard_widget import GlinetDashboardWidget
@@ -128,6 +135,11 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 # ssh's null device, for discarding a known_hosts write — see _embed_ssh's
 # skip_host_key_check.
 _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
+
+
+def gcp_console_url(project_id: str) -> str:
+    """The project's dashboard in the Google Cloud console (issue #22)."""
+    return f"https://console.cloud.google.com/home/dashboard?project={quote(project_id)}"
 
 
 def _instance_key(instance: Instance) -> tuple[str, str, str]:
@@ -512,6 +524,7 @@ class ConnectionManagerView(QWidget):
             item = QTreeWidgetItem([instance.name])
             item.setData(0, INSTANCE_ROLE, instance)
             item.setToolTip(0, f"Status: {instance.status}")
+            item.setIcon(0, status_icon(gcp_status_kind(instance.status)))
             category_item.addChild(item)
 
     def _populate_buckets(self, category_item: QTreeWidgetItem, buckets: list[GcsBucket]) -> None:
@@ -631,6 +644,7 @@ class ConnectionManagerView(QWidget):
             item.setData(0, HOST_ROLE, host)
             item.setData(0, VM_ROLE, vm)
             item.setToolTip(0, f"State: {vm.state}")
+            item.setIcon(0, status_icon(qemu_state_kind(vm.state)))
             host_item.addChild(item)
 
     def _on_manage_hosts_clicked(self) -> None:
@@ -917,8 +931,12 @@ class ConnectionManagerView(QWidget):
             and item.data(0, CATEGORY_ROLE) is None
             and item.data(0, INSTANCE_ROLE) is None
         ):
+            project_id = item.data(0, PROJECT_ID_ROLE)
             menu = QMenu(self)
             menu.addAction("Refresh").triggered.connect(lambda: self._refresh_project(item))
+            menu.addAction("Open in Console").triggered.connect(
+                lambda: QDesktopServices.openUrl(QUrl(gcp_console_url(project_id)))
+            )
             menu.exec(self._tree.viewport().mapToGlobal(pos))
             return
 
