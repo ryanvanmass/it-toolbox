@@ -221,6 +221,33 @@ class IdentityManagementView(QWidget):
         for label in fields.values():
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
+    def _build_bound_users_widget(self) -> QWidget:
+        """Status line (Loading…/Unavailable/none) over a small
+        Name/Username/Permission table of the users bound to the device.
+        """
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._bound_users_status = QLabel("")
+        self._bound_users_table = QTableWidget(0, 3)
+        self._bound_users_table.setHorizontalHeaderLabels(["Name", "Username", "Permission"])
+        self._bound_users_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._bound_users_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._bound_users_table.verticalHeader().setVisible(False)
+        self._bound_users_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self._bound_users_table.hide()
+        layout.addWidget(self._bound_users_status)
+        layout.addWidget(self._bound_users_table)
+        return widget
+
+    def _set_bound_users_status(self, text: str) -> None:
+        self._bound_users_table.setRowCount(0)
+        self._bound_users_table.hide()
+        self._bound_users_status.setText(text)
+        self._bound_users_status.show()
+
     def _build_device_detail_panel(self) -> QWidget:
         panel = QWidget()
         form = QFormLayout(panel)
@@ -232,7 +259,6 @@ class IdentityManagementView(QWidget):
             "arch": QLabel(""),
             "serial_number": QLabel(""),
             "recovery_key": QLabel(""),
-            "bound_users": QLabel(""),
             "agent_version": QLabel(""),
             "remote_ip": QLabel(""),
             "last_contact": QLabel(""),
@@ -240,7 +266,6 @@ class IdentityManagementView(QWidget):
             "description": QLabel(""),
         }
         self._device_fields["description"].setWordWrap(True)
-        self._device_fields["bound_users"].setWordWrap(True)
         self._make_selectable(self._device_fields)
         form.addRow("Hostname:", self._device_fields["hostname"])
         form.addRow("Status:", self._device_fields["status"])
@@ -248,7 +273,7 @@ class IdentityManagementView(QWidget):
         form.addRow("Architecture:", self._device_fields["arch"])
         form.addRow("Serial Number:", self._device_fields["serial_number"])
         form.addRow("Recovery Key:", self._device_fields["recovery_key"])
-        form.addRow("Bound Users:", self._device_fields["bound_users"])
+        form.addRow("Bound Users:", self._build_bound_users_widget())
         form.addRow("Agent Version:", self._device_fields["agent_version"])
         form.addRow("Remote IP:", self._device_fields["remote_ip"])
         form.addRow("Last Contact:", self._device_fields["last_contact"])
@@ -298,7 +323,7 @@ class IdentityManagementView(QWidget):
         self._device_fields["arch"].setText(device.arch or "Loading…")
         self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
         self._device_fields["recovery_key"].setText("Loading…")
-        self._device_fields["bound_users"].setText("Loading…")
+        self._set_bound_users_status("Loading…")
         self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
         self._device_fields["remote_ip"].setText(device.remote_ip or "Loading…")
         self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
@@ -380,19 +405,36 @@ class IdentityManagementView(QWidget):
             if self._selected_device is None or self._selected_device.id != device_id:
                 return
             if bound is None:
-                text = "Unavailable"
-            elif not bound:
-                text = "—"
-            else:
-                names = {u.id: u.username for u in self._users}
-                lines = []
-                for b in bound:
-                    level = "Administrator" if b.admin else "Standard"
-                    if b.admin and b.passwordless:
-                        level += " (no password)"
-                    lines.append(f"{names.get(b.user_id, b.user_id)} — {level}")
-                text = "\n".join(sorted(lines, key=str.lower))
-            self._device_fields["bound_users"].setText(text)
+                self._set_bound_users_status("Unavailable")
+                return
+            if not bound:
+                self._set_bound_users_status("—")
+                return
+            known = {u.id: u for u in self._users}
+            rows = []
+            for b in bound:
+                user = known.get(b.user_id)
+                name = f"{user.first_name} {user.last_name}".strip() if user else ""
+                username = user.username if user else b.user_id
+                level = "Administrator" if b.admin else "Standard"
+                if b.admin and b.passwordless:
+                    level += " (no password)"
+                rows.append((name or "—", username, level))
+            rows.sort(key=lambda r: (r[0] == "—", r[0].lower(), r[1].lower()))
+            self._bound_users_status.hide()
+            self._bound_users_table.setRowCount(len(rows))
+            for row, values in enumerate(rows):
+                for col, value in enumerate(values):
+                    self._bound_users_table.setItem(row, col, QTableWidgetItem(value))
+            # Size to the rows (no inner scrolling) rather than the
+            # form's default stretched height.
+            height = (
+                self._bound_users_table.horizontalHeader().height()
+                + self._bound_users_table.rowHeight(0) * len(rows)
+                + 2 * self._bound_users_table.frameWidth()
+            )
+            self._bound_users_table.setFixedHeight(height)
+            self._bound_users_table.show()
         except RuntimeError:
             pass  # widget torn down mid-flight
 

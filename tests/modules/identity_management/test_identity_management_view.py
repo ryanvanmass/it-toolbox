@@ -330,7 +330,7 @@ def test_detail_values_are_selectable(qtbot, monkeypatch):
 
 def test_device_detail_shows_bound_users_with_permission_level(qtbot, monkeypatch):
     device = Device(id="d1", display_name="alpha", os="windows")
-    users = [User(id="u1", username="alice", email="a@x.com")]
+    users = [User(id="u1", username="alice", email="a@x.com", first_name="Alice", last_name="Smith")]
     view = _make_view(qtbot, monkeypatch, devices=[device], users=users)
     qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
     qtbot.waitUntil(lambda: len(view._users) == 1, timeout=2000)
@@ -348,11 +348,13 @@ def test_device_detail_shows_bound_users_with_permission_level(qtbot, monkeypatc
 
     view._devices_table.setCurrentCell(0, 0)
 
-    qtbot.waitUntil(
-        lambda: view._device_fields["bound_users"].text()
-        == "alice — Administrator (no password)\nu9 — Standard",
-        timeout=2000,
-    )
+    table = view._bound_users_table
+    qtbot.waitUntil(lambda: table.rowCount() == 2, timeout=2000)
+    rows = [[table.item(r, c).text() for c in range(3)] for r in range(2)]
+    assert rows == [
+        ["Alice Smith", "alice", "Administrator (no password)"],
+        ["—", "u9", "Standard"],
+    ]
 
 
 def test_device_detail_shows_recovery_key(qtbot, monkeypatch):
