@@ -8,6 +8,7 @@ so this wrapper is thin. The Windows path hasn't been exercised on real
 Windows yet; verify there before trusting it.
 """
 
+import os
 import sys
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -20,7 +21,12 @@ else:
 
 class PtyHandle:
     def __init__(self, argv: list[str], cols: int = 80, rows: int = 24) -> None:
-        self._proc = _pty_impl.PtyProcess.spawn(argv, dimensions=(rows, cols))
+        # Without an explicit env the child inherits the app's own, whose TERM
+        # is unset or "dumb" when launched from a desktop entry; tmux and
+        # friends then fail with "terminal does not support clear". pyte
+        # emulates an xterm, so advertise one (POSIX only: unverified on Windows).
+        env = None if _IS_WINDOWS else {**os.environ, "TERM": "xterm-256color", "COLORTERM": "truecolor"}
+        self._proc = _pty_impl.PtyProcess.spawn(argv, dimensions=(rows, cols), env=env)
 
     @property
     def fd(self) -> int | None:
