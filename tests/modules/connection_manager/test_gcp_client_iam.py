@@ -1,4 +1,5 @@
 from it_toolbox.modules.connection_manager import gcp_client
+from it_toolbox.modules.connection_manager.models import GcpIamBinding
 
 
 class _FakeCredentials:
@@ -101,3 +102,21 @@ def test_get_iam_policy_raises_on_http_error(monkeypatch):
         raise AssertionError("expected GcpApiError")
     except gcp_client.GcpApiError:
         pass
+
+
+def test_resolve_role_titles_fills_titles_and_falls_back_on_error(monkeypatch):
+    def fake_get(url, headers, params, timeout):
+        if url.endswith("/v1/roles/compute.admin"):
+            return _FakeResponse(json_data={"title": "Compute Admin"})
+        return _FakeResponse(status_code=403, text="denied")
+
+    monkeypatch.setattr(gcp_client.requests, "get", fake_get)
+    bindings = [
+        GcpIamBinding(project_id="p", role="roles/compute.admin", member="user:a@x.com"),
+        GcpIamBinding(project_id="p", role="roles/compute.admin", member="user:b@x.com"),
+        GcpIamBinding(project_id="p", role="organizations/1/roles/custom", member="user:a@x.com"),
+    ]
+
+    resolved = gcp_client.resolve_role_titles(_FakeCredentials(), bindings)
+
+    assert [b.role_title for b in resolved] == ["Compute Admin", "Compute Admin", ""]

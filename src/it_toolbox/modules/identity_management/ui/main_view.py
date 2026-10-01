@@ -327,10 +327,16 @@ class IdentityManagementView(QWidget):
         self._gcp_bindings_status_label.setText("Loading…")
         self._stack.setCurrentIndex(PAGE_GCP_PROJECT_DETAIL)
         async_utils.run_in_background(
-            lambda: gcp_client.get_iam_policy(gcp_auth.get_credentials(), project.project_id),
+            lambda: self._load_gcp_bindings(project),
             on_result=lambda bindings: self._populate_gcp_iam_bindings(project, bindings),
             on_error=self._on_gcp_iam_load_error,
         )
+
+    @staticmethod
+    def _load_gcp_bindings(project: GcpProject) -> list[GcpIamBinding]:
+        credentials = gcp_auth.get_credentials()
+        bindings = gcp_client.get_iam_policy(credentials, project.project_id)
+        return gcp_client.resolve_role_titles(credentials, bindings)
 
     def _populate_gcp_iam_bindings(self, project: GcpProject, bindings: list[GcpIamBinding]) -> None:
         try:
@@ -352,14 +358,20 @@ class IdentityManagementView(QWidget):
     def _render_gcp_bindings_table(self, query: str) -> None:
         query = query.strip().lower()
         matches = [
-            b for b in self._gcp_iam_bindings if query in b.member.lower() or query in b.role.lower()
+            b
+            for b in self._gcp_iam_bindings
+            if query in b.member.lower()
+            or query in b.role.lower()
+            or query in b.role_title.lower()
         ]
         self._gcp_bindings_table.setRowCount(len(matches))
         for row, binding in enumerate(matches):
             type_label, principal = _split_member(binding.member)
             self._gcp_bindings_table.setItem(row, 0, QTableWidgetItem(principal))
             self._gcp_bindings_table.setItem(row, 1, QTableWidgetItem(type_label))
-            self._gcp_bindings_table.setItem(row, 2, QTableWidgetItem(binding.role))
+            role_item = QTableWidgetItem(binding.role_title or binding.role)
+            role_item.setToolTip(binding.role)
+            self._gcp_bindings_table.setItem(row, 2, role_item)
 
     def _on_gcp_iam_load_error(self, error: Exception) -> None:
         try:

@@ -23,6 +23,7 @@ class GcpIamBinding:
     project_id: str
     role: str
     member: str  # e.g. "user:alice@example.com", "serviceAccount:...", "group:...", "domain:..."
+    role_title: str = ""  # human-readable role name; "" until resolved/if unavailable
 
 
 @dataclass(frozen=True)

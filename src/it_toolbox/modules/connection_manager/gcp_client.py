@@ -12,6 +12,8 @@ have simple, reliable timeouts and no native call threading of their own.
 import base64
 import json
 import time
+import dataclasses
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -37,6 +39,7 @@ DOWNLOAD_TIMEOUT_SEC = (10, 300)
 
 RESOURCE_MANAGER_BASE = "https://cloudresourcemanager.googleapis.com/v3"
 COMPUTE_BASE = "https://compute.googleapis.com/compute/v1"
+IAM_BASE = "https://iam.googleapis.com/v1"
 STORAGE_BASE = "https://storage.googleapis.com/storage/v1"
 
 # Windows password reset (see reset_windows_password): the metadata key the
@@ -100,6 +103,31 @@ def list_projects(credentials: Credentials) -> list[GcpProject]:
             break
 
     return sorted(projects, key=lambda p: p.display_name.lower())
+
+
+def _get_role_title(token: str, role: str) -> str:
+    """A role's display title (e.g. "Compute Admin" for roles/compute.admin),
+    or "" if it can't be read — custom org/project roles in particular need
+    iam.roles.get, which a caller may not have.
+    """
+    try:
+        return _get(f"{IAM_BASE}/{role}", token).get("title", "")
+    except (GcpApiError, requests.RequestException):
+        return ""
+
+
+def resolve_role_titles(
+    credentials: Credentials, bindings: list[GcpIamBinding]
+) -> list[GcpIamBinding]:
+    """Fill in role_title on each binding, one lookup per distinct role.
+    Never raises: an unresolvable role just keeps an empty title.
+    """
+    roles = sorted({b.role for b in bindings})
+    if not roles:
+        return bindings
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        titles = dict(zip(roles, pool.map(lambda r: _get_role_title(credentials.token, r), roles)))
+    return [dataclasses.replace(b, role_title=titles[b.role]) for b in bindings]
 
 
 def get_iam_policy(credentials: Credentials, project_id: str) -> list[GcpIamBinding]:

@@ -69,6 +69,10 @@ def _make_view(
         "it_toolbox.modules.identity_management.ui.main_view.gcp_client.list_projects",
         lambda credentials: list(gcp_projects),
     )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.gcp_client.resolve_role_titles",
+        lambda credentials, bindings: bindings,
+    )
     view = IdentityManagementView()
     qtbot.addWidget(view)
     return view
@@ -770,6 +774,38 @@ def test_selecting_a_gcp_project_row_shows_its_iam_bindings(qtbot, monkeypatch):
     assert view._gcp_bindings_table.item(0, 1).text() == "User"
     assert view._gcp_bindings_table.item(0, 2).text() == "roles/owner"
     assert view._gcp_bindings_table.item(1, 1).text() == "Service Account"
+
+
+def test_gcp_bindings_show_role_title_and_filter_matches_it(qtbot, monkeypatch):
+    project = GcpProject(project_id="proj-a", display_name="Alpha")
+    bindings = [
+        GcpIamBinding(
+            project_id="proj-a",
+            role="roles/compute.admin",
+            member="user:alice@example.com",
+            role_title="Compute Admin",
+        ),
+        GcpIamBinding(project_id="proj-a", role="organizations/1/roles/x", member="user:bob@example.com"),
+    ]
+    view = _make_view(
+        qtbot, monkeypatch, gcp_available=True, gcp_account="a@example.com", gcp_projects=[project]
+    )
+    qtbot.waitUntil(lambda: view._gcp_projects_table.rowCount() == 1, timeout=2000)
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.gcp_client.get_iam_policy",
+        lambda credentials, project_id: list(bindings),
+    )
+
+    view._gcp_projects_table.setCurrentCell(0, 0)
+    qtbot.waitUntil(lambda: view._gcp_bindings_table.rowCount() == 2, timeout=2000)
+
+    assert view._gcp_bindings_table.item(0, 2).text() == "Compute Admin"
+    assert view._gcp_bindings_table.item(0, 2).toolTip() == "roles/compute.admin"
+    # Unresolved titles fall back to the raw role ID.
+    assert view._gcp_bindings_table.item(1, 2).text() == "organizations/1/roles/x"
+
+    view._gcp_bindings_filter_box.setText("compute admin")
+    assert view._gcp_bindings_table.rowCount() == 1
 
 
 def test_selecting_a_gcp_project_search_result_shows_its_iam_bindings(qtbot, monkeypatch):
