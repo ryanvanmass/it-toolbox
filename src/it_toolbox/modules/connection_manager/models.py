@@ -2,12 +2,28 @@ from dataclasses import dataclass
 
 RDP_PORT = 3389
 SSH_PORT = 22
+SFTP_PORT = 22  # SFTP is a subsystem of SSH, not a separate protocol/port
+FTP_PORT = 21
 
 
 @dataclass(frozen=True)
 class GcpProject:
     project_id: str
     display_name: str
+
+
+@dataclass(frozen=True)
+class GcpIamBinding:
+    """One (member, role) pair for a project — a getIamPolicy response's
+    bindings are grouped by role with a list of members; this is already
+    flattened to one row per member, since "who has this role" (not "this
+    role has these members") is what identity management needs to show.
+    """
+
+    project_id: str
+    role: str
+    member: str  # e.g. "user:alice@example.com", "serviceAccount:...", "group:...", "domain:..."
+    role_title: str = ""  # human-readable role name; "" until resolved/if unavailable
 
 
 @dataclass(frozen=True)
@@ -124,14 +140,122 @@ class VmCreateSpec:
 
 
 @dataclass(frozen=True)
+class GlinetHost:
+    """A manually-registered GL.iNet router — no account-based discovery,
+    same rationale as QemuHost. `url` matches pyglinet's GlInet() constructor
+    shape directly (a full "https://<ip>/rpc" URL, not separate host/port/
+    https fields). `password_encrypted` is always ciphertext (age-encrypted
+    to the user's SSH key, see core/settings.py's encrypt_glinet_password) —
+    never plaintext, so printing/logging a GlinetHost can't leak a router
+    password. None means no password has been stored yet.
+    """
+
+    name: str
+    url: str
+    username: str = "root"
+    verify_ssl: bool = False
+    password_encrypted: bytes | None = None
+
+
+@dataclass(frozen=True)
+class GlinetClientInfo:
+    """One device connected to a GL.iNet router (pyglinet's "client")."""
+
+    mac: str
+    name: str
+    ip: str
+    online: bool
+    vendor: str = ""
+
+
+@dataclass(frozen=True)
+class GlinetWifiRadio:
+    device: str  # e.g. "radio0" -- required for device-level set_config params
+    iface_name: str  # e.g. "default_radio0" -- required for iface-level set_config params
+    band: str  # e.g. "2G" / "5G"
+    ssid: str
+    enabled: bool
+    guest: bool = False
+
+
+@dataclass(frozen=True)
+class GlinetOverview:
+    """A GL.iNet router's at-a-glance status, from a single system.get_status() call."""
+
+    uptime: str
+    lan_ip: str
+    memory_used_pct: float | None
+    cpu_temp: float | None
+    wireless_client_count: int
+    cable_client_count: int
+    wifi_radios: tuple[GlinetWifiRadio, ...]
+
+
+@dataclass(frozen=True)
+class GlinetVpnTunnel:
+    """One configured VPN tunnel. On routers with GL.iNet's newer
+    multi-tunnel "VPN Policy" feature, there can be any number of these,
+    each independently named/enabled -- name is then the policy's own
+    name (e.g. "Bonkcloud"), not a fixed "WireGuard Client" label."""
+
+    name: str
+    type: str  # "wireguard" or "openvpn"
+    enabled: bool  # the tunnel/policy's own on/off toggle
+    up: bool  # actually connected right now
+    # Routing criteria (from vpn-client's separate get_tunnel() policy
+    # call) -- empty strings/False for a tunnel from the classic
+    # single-tunnel fallback endpoints, which expose no such policy.
+    from_summary: str = ""
+    to_summary: str = ""
+    via_summary: str = ""
+    killswitch: bool = False
+    # Longer-form detail for from_summary/to_summary (e.g. the actual
+    # interface names or address list a count summarizes) -- shown as a
+    # tooltip rather than in the table cell itself, since a raw address
+    # list is too long to sit in a column. Empty when the criteria is
+    # already fully expressed by the summary (e.g. "All clients").
+    from_detail: str = ""
+    to_detail: str = ""
+
+
+@dataclass(frozen=True)
 class ManualConnection:
-    """A directly user-entered RDP or SSH endpoint — no account, project,
-    or host discovery involved, unlike the GCP/QEMU families. Connects
-    straight to host:port, with no tunnel in front of it.
+    """A directly user-entered RDP, SSH, SFTP, or FTP endpoint — no
+    account, project, or host discovery involved, unlike the GCP/QEMU
+    families. Connects straight to host:port, with no tunnel in front of
+    it -- unless gateway_host is set, in which case host:port is reached
+    *through* an SSH tunnel to the gateway instead (mirrors mRemoteNG's
+    SSH-tunneling feature; see core/ssh_tunnel.py). The gateway defaults
+    to the same key/agent-based auth every other SSH connection in this
+    app uses; gateway_password is an explicit opt-in for a gateway that
+    only accepts password auth (a real, if less secure, need -- confirmed
+    by a real gateway that rejected the app's key with a plain
+    "Permission denied (publickey,password)"). Stored as plain text in
+    manual_connections.json -- this app has no credential-vault story
+    anywhere else either, so this isn't a new weaker link, just an
+    explicit one worth flagging. gateway_prompt_for_password sidesteps
+    that entirely (mirrors the RDP password, which was already always
+    prompted, never stored): when set, gateway_password is ignored and
+    the connect flow asks for it fresh each time instead.
+
+    `password_encrypted` is a separate, unrelated credential: only ever
+    populated for "sftp"/"ftp" connections whose password the user chose
+    to remember — always ciphertext (age-encrypted to the user's SSH key,
+    see core/settings.py's encrypt_manual_connection_password), same
+    contract as GlinetHost.password_encrypted. None means no password
+    stored (RDP/SSH never persist one; a not-yet-remembered SFTP/FTP one
+    is prompted for each time). An SFTP/FTP connection is never tunneled
+    through a gateway -- gateway_host is an SSH/RDP-only concept here.
     """
 
     name: str
     host: str
     port: int
-    kind: str  # "rdp" or "ssh"
+    kind: str  # "rdp", "ssh", "sftp", or "ftp"
     username: str | None = None
+    password_encrypted: bytes | None = None
+    gateway_host: str | None = None
+    gateway_port: int = SSH_PORT
+    gateway_username: str | None = None
+    gateway_password: str | None = None
+    gateway_prompt_for_password: bool = False

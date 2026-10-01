@@ -23,7 +23,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: linux-packages
+          pattern: linux-*
+          merge-multiple: true
           path: dist/packages
 
       - uses: actions/download-artifact@v4

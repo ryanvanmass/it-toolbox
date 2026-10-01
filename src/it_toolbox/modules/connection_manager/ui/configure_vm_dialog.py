@@ -2,9 +2,17 @@
 vCPUs/memory, add or remove disks, change/eject CD-ROM media (only
 offered when the VM actually has a cdrom device -- confirmed live that
 a VM deployed without an ISO chosen at create time has none at all),
-and change its network (only offered when it has exactly one network
+change its network (only offered when it has exactly one network
 interface -- multiple-NIC VMs are a real, deliberately deferred case,
-see docs/qemu-vm-provisioning-status.md).
+see docs/qemu-vm-provisioning-status.md), change its display device
+(SPICE/VNC) -- mainly a recovery path for a VM that ended up with VNC
+graphics instead of SPICE (see qemu_client.diagnose_missing_spice_port,
+the "no SPICE port available" connect error that causes), always shown
+regardless of the VM's current device since there's no discovery step
+needed for it, unlike CD-ROM/Network -- and reorder its boot devices
+(Hard Disk/CD-ROM/Network, checked entries tried top-to-bottom, matching
+virt-manager's own "Boot Options" tab), always shown for the same reason
+as Display.
 
 Openable for a running VM too (not just a stopped one) -- confirmed
 live, per operation, what that actually means:
@@ -45,6 +53,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -62,12 +71,18 @@ from it_toolbox.modules.connection_manager.ui.memory_size_widget import MemorySi
 from it_toolbox.modules.connection_manager.ui.searchable_combo import make_searchable, resolve_data
 
 DISK_TARGET_ROLE = Qt.ItemDataRole.UserRole
+BOOT_DEVICE_ROLE = Qt.ItemDataRole.UserRole
 _NONE_ISO_LABEL = "(None — eject)"
+# libvirt's own boot device names, and this app's plain-English labels for
+# them -- fd (floppy) deliberately left out, since nothing in this app
+# ever creates or manages a floppy device.
+_BOOT_DEVICE_LABELS = (("hd", "Hard Disk"), ("cdrom", "CD-ROM"), ("network", "Network"))
 
 
 class ConfigureVmDialog(QDialog):
     def __init__(
         self, host: QemuHost, vm: QemuVm, current_vcpus: int, current_memory_mib: int,
+        current_display_device: str | None, current_boot_order: list[str],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -76,6 +91,7 @@ class ConfigureVmDialog(QDialog):
         self._is_running = vm.state == "running"
         self._current_vcpus = current_vcpus
         self._current_memory_mib = current_memory_mib
+        self._current_display_device = current_display_device
         self._cdrom_target: str | None = None
         self._network_mac: str | None = None
         self._current_network: str | None = None
@@ -103,6 +119,81 @@ class ConfigureVmDialog(QDialog):
             resize_note.setWordWrap(True)
             resize_note.setStyleSheet("color: gray;")
             resource_form.addRow("", resize_note)
+
+        # -- Display device (SPICE/VNC) ------------------------------------
+        self._display_combo = QComboBox()
+        self._display_combo.addItem("SPICE", "spice")
+        self._display_combo.addItem("VNC", "vnc")
+        index = self._display_combo.findData(current_display_device)
+        # No matching item (no graphics device at all, or an unrecognized
+        # type) -- default the picker to SPICE rather than leaving it on
+        # whatever the combo's own first item happens to be, since SPICE
+        # is what this app can actually connect to.
+        self._display_combo.setCurrentIndex(index if index != -1 else 0)
+        # The baseline _on_accept compares against -- not current_display_device
+        # directly, since that can be None (no graphics device at all) while
+        # the combo itself always shows *some* selection (defaulted to SPICE
+        # above); comparing against the combo's own starting value means
+        # leaving that default untouched doesn't look like a deliberate
+        # change, matching every other optional section's "nothing happens
+        # unless you actually interact" behavior.
+        self._initial_display_value = self._display_combo.currentData()
+
+        display_form = QFormLayout()
+        display_form.addRow("Current:", QLabel(current_display_device or "(none)"))
+        display_form.addRow("Change to:", self._display_combo)
+        if self._is_running:
+            # Not a hot-pluggable change -- like vCPU/memory, this always
+            # just stages the new device for the VM's next restart.
+            display_note = QLabel("Display device changes apply the next time this VM restarts.")
+            display_note.setWordWrap(True)
+            display_note.setStyleSheet("color: gray;")
+            display_form.addRow("", display_note)
+        self._display_box = QGroupBox("Display")
+        self._display_box.setLayout(display_form)
+
+        # -- Boot order -----------------------------------------------------
+        self._boot_order_list = QListWidget()
+        self._boot_order_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        # Devices already in the current order come first (checked, in
+        # their existing order); anything not currently in the order is
+        # appended unchecked -- present so it can be enabled, but not
+        # counted as part of the effective order until it is.
+        boot_device_labels = dict(_BOOT_DEVICE_LABELS)
+        ordered_devices = list(current_boot_order) + [
+            dev for dev, _label in _BOOT_DEVICE_LABELS if dev not in current_boot_order
+        ]
+        for dev in ordered_devices:
+            item = QListWidgetItem(boot_device_labels[dev])
+            item.setData(BOOT_DEVICE_ROLE, dev)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if dev in current_boot_order else Qt.CheckState.Unchecked
+            )
+            self._boot_order_list.addItem(item)
+        self._initial_boot_order = list(current_boot_order)
+
+        move_up_button = QPushButton("Move Up")
+        move_up_button.clicked.connect(lambda: self._move_boot_device(-1))
+        move_down_button = QPushButton("Move Down")
+        move_down_button.clicked.connect(lambda: self._move_boot_device(1))
+        boot_order_buttons = QHBoxLayout()
+        boot_order_buttons.addWidget(move_up_button)
+        boot_order_buttons.addWidget(move_down_button)
+
+        boot_order_note = QLabel(
+            "Checked devices are tried in this order when the VM (re)starts; unchecked "
+            "devices are skipped. Applies the next time this VM restarts."
+        )
+        boot_order_note.setWordWrap(True)
+        boot_order_note.setStyleSheet("color: gray;")
+
+        boot_order_layout = QVBoxLayout()
+        boot_order_layout.addWidget(self._boot_order_list)
+        boot_order_layout.addLayout(boot_order_buttons)
+        boot_order_layout.addWidget(boot_order_note)
+        self._boot_order_box = QGroupBox("Boot Order")
+        self._boot_order_box.setLayout(boot_order_layout)
 
         # -- Disks --------------------------------------------------------
         self._disks_list = QListWidget()
@@ -206,6 +297,8 @@ class ConfigureVmDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(resource_form)
+        layout.addWidget(self._display_box)
+        layout.addWidget(self._boot_order_box)
         layout.addWidget(self._disks_box)
         layout.addWidget(self._cdrom_box)
         layout.addWidget(self._network_box)
@@ -322,6 +415,17 @@ class ConfigureVmDialog(QDialog):
     def _on_change_network_toggled(self, checked: bool) -> None:
         self._network_combo.setEnabled(checked)
 
+    def _move_boot_device(self, delta: int) -> None:
+        row = self._boot_order_list.currentRow()
+        if row == -1:
+            return
+        new_row = row + delta
+        if not (0 <= new_row < self._boot_order_list.count()):
+            return
+        item = self._boot_order_list.takeItem(row)
+        self._boot_order_list.insertItem(new_row, item)
+        self._boot_order_list.setCurrentRow(new_row)
+
     def _on_error(self, error: Exception) -> None:
         self._show_error(str(error))
 
@@ -358,9 +462,20 @@ class ConfigureVmDialog(QDialog):
             return
         network_actually_changes = change_network and new_network != self._current_network
 
+        new_display_device = self._display_combo.currentData()
+        display_actually_changes = new_display_device != self._initial_display_value
+
+        new_boot_order = [
+            self._boot_order_list.item(i).data(BOOT_DEVICE_ROLE)
+            for i in range(self._boot_order_list.count())
+            if self._boot_order_list.item(i).checkState() == Qt.CheckState.Checked
+        ]
+        boot_order_actually_changes = new_boot_order != self._initial_boot_order
+
         if (
             vcpus is None and memory_mib is None and not add_disk and not disks_to_remove
-            and not change_media and not network_actually_changes
+            and not change_media and not network_actually_changes and not display_actually_changes
+            and not boot_order_actually_changes
         ):
             # Nothing actually changed -- close without making any call.
             self.accept()
@@ -369,6 +484,10 @@ class ConfigureVmDialog(QDialog):
         def do_work() -> None:
             if vcpus is not None or memory_mib is not None:
                 qemu_provisioning.resize_vm(self._host, self._vm.name, vcpus=vcpus, memory_mib=memory_mib)
+            if display_actually_changes:
+                qemu_provisioning.set_display_device(self._host, self._vm.name, new_display_device)
+            if boot_order_actually_changes:
+                qemu_provisioning.set_boot_order(self._host, self._vm.name, new_boot_order)
             for target in disks_to_remove:
                 qemu_provisioning.remove_disk(self._host, self._vm.name, target, live=self._is_running)
             if add_disk:

@@ -14,11 +14,12 @@ isolated here rather than rippling into models.py or the UI.
 
 import requests
 
-from it_toolbox.modules.identity_management.models import Device, User
+from it_toolbox.modules.identity_management.models import Device, DeviceUser, User
 
 REQUEST_TIMEOUT_SEC = (10, 30)
 
 API_BASE_V1 = "https://console.jumpcloud.com/api"
+API_BASE_V2 = "https://console.jumpcloud.com/api/v2"
 
 # JumpCloud v1 list endpoints page via limit/skip and stop once a page
 # comes back shorter than requested — unverified against live docs, but
@@ -27,14 +28,16 @@ LIST_PAGE_LIMIT = 100
 
 
 class JumpCloudApiError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _get(url: str, api_key: str, params: dict | None = None) -> dict:
     headers = {"x-api-key": api_key, "Accept": "application/json"}
     response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT_SEC)
     if response.status_code >= 400:
-        raise JumpCloudApiError(f"{response.status_code} {url}: {response.text[:500]}")
+        raise JumpCloudApiError(f"{response.status_code} {url}: {response.text[:500]}", response.status_code)
     return response.json()
 
 
@@ -44,6 +47,7 @@ def _device_from_list_json(data: dict) -> Device:
         display_name=data.get("displayName") or data.get("hostname", data["id"]),
         os=data.get("os", ""),
         hostname=data.get("hostname", ""),
+        serial_number=data.get("serialNumber", ""),
         last_contact=data.get("lastContact", ""),
         active=data.get("active", True),
     )
@@ -106,6 +110,55 @@ def list_devices(api_key: str) -> list[Device]:
 def get_device(api_key: str, device_id: str) -> Device:
     data = _get(f"{API_BASE_V1}/systems/{device_id}", api_key)
     return _device_from_detail_json(data)
+
+
+def get_recovery_key(api_key: str, device_id: str) -> str:
+    """The device's escrowed full-disk-encryption recovery key (BitLocker/
+    FileVault), or "" if JumpCloud holds none for it (a 404).
+    """
+    try:
+        data = _get(f"{API_BASE_V2}/systems/{device_id}/fdekey", api_key)
+    except JumpCloudApiError as exc:
+        if exc.status_code == 404:
+            return ""
+        raise
+    return data.get("key", "")
+
+
+def _device_user_from_json(data: dict) -> DeviceUser:
+    # compiledAttributes is JumpCloud's merge of the binding attributes
+    # across every path to this user (direct and via groups), so it's the
+    # authoritative permission level. The per-hop path attributes are only
+    # a fallback in case a response omits it.
+    sudos = [(data.get("compiledAttributes") or {}).get("sudo") or {}]
+    for path in data.get("paths") or []:
+        for hop in path if isinstance(path, list) else []:
+            sudos.append((hop.get("attributes") or {}).get("sudo") or {})
+    enabled = [s for s in sudos if s.get("enabled")]
+    return DeviceUser(
+        user_id=data["id"],
+        admin=bool(enabled),
+        passwordless=any(s.get("withoutPassword") for s in enabled),
+    )
+
+
+def get_device_users(api_key: str, device_id: str) -> list[DeviceUser]:
+    """Users bound to a device, with their permission level."""
+    users: list[DeviceUser] = []
+    skip = 0
+    while True:
+        data = _get(
+            f"{API_BASE_V2}/systems/{device_id}/users",
+            api_key,
+            params={"limit": LIST_PAGE_LIMIT, "skip": skip},
+        )
+        # v2 list endpoints return a bare JSON array.
+        results = data if isinstance(data, list) else data.get("results", [])
+        users.extend(_device_user_from_json(u) for u in results)
+        if len(results) < LIST_PAGE_LIMIT:
+            break
+        skip += LIST_PAGE_LIMIT
+    return users
 
 
 def list_users(api_key: str) -> list[User]:

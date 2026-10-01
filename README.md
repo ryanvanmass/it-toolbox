@@ -74,7 +74,10 @@ connection manager for RDP, SSH, and Cloud Storage.
 [latest release](https://github.com/ryanvanmass/it-toolbox/releases/latest)
 and install it (`sudo dpkg -i it-toolbox_*.deb` or `sudo rpm -i
 it-toolbox-*.rpm`) — it bundles its own Python environment, so nothing
-beyond `python3` itself is required. See `docs/releasing.md` for how
+beyond your distro's `python3` is required. The package is built against
+one specific Python version (currently Ubuntu 24.04's 3.12 for the `.deb`,
+Fedora 44's 3.14 for the `.rpm`) and won't install on a distro release
+with a different one. See `docs/releasing.md` for how
 these are built.
 
 Otherwise, from a git checkout on any platform:

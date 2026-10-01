@@ -2,7 +2,12 @@ import subprocess
 
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.auth import gcp_auth
-from it_toolbox.modules.connection_manager import qemu_client, qemu_provisioning
+from it_toolbox.core.auth.auth_events import auth_events
+from it_toolbox.modules.connection_manager import (
+    glinet_client,
+    qemu_client,
+    qemu_provisioning,
+)
 from it_toolbox.modules.settings.ui import main_view as settings_main_view
 from it_toolbox.modules.settings.ui.main_view import SettingsView
 
@@ -24,6 +29,7 @@ def _make_view(
     gcloud_available=False,
     platform_system="Linux",
     qemu_available=False,
+    glinet_available=False,
     virt_install_available=False,
     default_rdp_resolution=None,
     rdp_keyboard_layout=0x0409,
@@ -60,6 +66,7 @@ def _make_view(
     monkeypatch.setattr(settings, "resolve_gcp_ssh_public_key", lambda: gcp_ssh_public_key)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
     monkeypatch.setattr(qemu_client, "is_available", lambda: qemu_available)
+    monkeypatch.setattr(glinet_client, "is_available", lambda: glinet_available)
     monkeypatch.setattr(qemu_provisioning, "is_available", lambda: virt_install_available)
     monkeypatch.setattr(settings_main_view.platform, "system", lambda: platform_system)
     view = SettingsView()
@@ -479,6 +486,44 @@ def test_gcloud_sign_out_updates_status(qtbot, monkeypatch):
     qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
 
 
+def test_gcloud_sign_in_broadcasts_account_changed(qtbot, monkeypatch):
+    # Connection Manager has no sign-in button of its own — it learns about
+    # a Settings sign-in via this signal.
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: None)
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "Not signed in" in view._gcloud_status_label.text())
+
+    monkeypatch.setattr(gcp_auth, "sign_in", lambda: "someone@example.com")
+    with qtbot.waitSignal(auth_events.account_changed, timeout=5000) as blocker:
+        view._on_gcloud_sign_in_clicked()
+
+    assert blocker.args == ["someone@example.com"]
+
+
+def test_gcloud_sign_out_broadcasts_account_changed(qtbot, monkeypatch):
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: "someone@example.com")
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "someone@example.com" in view._gcloud_status_label.text())
+
+    monkeypatch.setattr(gcp_auth, "sign_out", lambda: None)
+    with qtbot.waitSignal(auth_events.account_changed, timeout=5000) as blocker:
+        view._on_gcloud_sign_out_clicked()
+
+    assert blocker.args == [None]
+
+
+def test_gcloud_status_follows_account_changed_from_elsewhere(qtbot, monkeypatch):
+    # e.g. Connection Manager's GCP tree "Sign out" menu action.
+    monkeypatch.setattr(gcp_auth, "get_active_account", lambda: "someone@example.com")
+    view = _make_view(qtbot, monkeypatch, gcloud_available=True)
+    qtbot.waitUntil(lambda: "someone@example.com" in view._gcloud_status_label.text())
+
+    auth_events.account_changed.emit(None)
+
+    assert view._gcloud_status_label.text() == "Not signed in"
+    assert not view._gcloud_sign_out_button.isEnabled()
+
+
 def test_gcp_ssh_key_section_shows_resolved_public_key(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch, gcp_ssh_public_key="ssh-ed25519 AAAA alice@laptop")
 
@@ -623,6 +668,19 @@ def test_qemu_section_shows_install_instructions_when_missing(qtbot, monkeypatch
 
     assert "virsh not found" in view._qemu_status_label.text()
     assert "apt install libvirt-clients" in view._qemu_status_label.text()
+
+
+def test_glinet_section_shows_found_when_pyglinet_available(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, glinet_available=True)
+
+    assert "python-glinet found" in view._glinet_status_label.text()
+
+
+def test_glinet_section_shows_install_instructions_when_missing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, glinet_available=False)
+
+    assert "not installed" in view._glinet_status_label.text()
+    assert "pip install python-glinet" in view._glinet_status_label.text()
 
 
 def test_qemu_section_shows_virt_install_found(qtbot, monkeypatch):
