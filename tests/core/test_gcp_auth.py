@@ -17,12 +17,21 @@ sudo dnf makecache && sudo dnf upgrade google-cloud-cli
 """
 
 
+_BUNDLED_PYTHON_STDERR = """ERROR: Cannot use bundled Python installation to update Google Cloud CLI in
+non-interactive mode. Please run again in interactive mode.
+"""
+
+
 class _FakeGcloud:
     """Stands in for subprocess.run: answers `gcloud version` with the
     current version and `gcloud components update` with the given outcome.
     """
 
-    def __init__(self, version="540.0.0", updated_version=None, update_stderr=None):
+    def __init__(
+        self, version="540.0.0", updated_version=None, update_stderr=None, needs_python_copy=False
+    ):
+        self.needs_python_copy = needs_python_copy
+        self.update_env = None
         self.version = version
         self.updated_version = updated_version
         self.update_stderr = update_stderr
@@ -33,7 +42,13 @@ class _FakeGcloud:
         if args[1] == "version":
             stdout = json.dumps({"Google Cloud SDK": self.version, "core": "2026.09.01"})
             return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+        if args[1:3] == ["components", "copy-bundled-python"]:
+            return subprocess.CompletedProcess(args, 0, stdout="C:\\py\\python.exe\n", stderr="")
         if args[1:3] == ["components", "update"]:
+            if self.needs_python_copy and "CLOUDSDK_PYTHON" not in (kwargs.get("env") or {}):
+                return subprocess.CompletedProcess(
+                    args, 1, stdout="", stderr=_BUNDLED_PYTHON_STDERR
+                )
             if self.update_stderr is not None:
                 return subprocess.CompletedProcess(args, 1, stdout="", stderr=self.update_stderr)
             if self.updated_version is not None:
@@ -64,6 +79,14 @@ def test_update_runs_components_update_quietly(fake_gcloud):
 
     assert gcp_auth.update() == ("540.0.0", "541.0.0")
     assert ["components", "update", "--quiet"] in fake.calls
+
+
+def test_update_retries_with_a_python_copy_when_bundled_python_blocks_it(fake_gcloud):
+    fake = fake_gcloud(version="540.0.0", updated_version="541.0.0", needs_python_copy=True)
+
+    assert gcp_auth.update() == ("540.0.0", "541.0.0")
+    assert ["components", "copy-bundled-python"] in fake.calls
+    assert fake.calls.count(["components", "update", "--quiet"]) == 2
 
 
 def test_update_when_already_up_to_date_returns_same_versions(fake_gcloud):

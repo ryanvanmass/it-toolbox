@@ -1,4 +1,5 @@
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -37,12 +38,18 @@ class GcloudUpdateUnsupported(Exception):
 _COMPONENT_MANAGER_DISABLED = "component manager is disabled"
 _SUGGESTED_COMMAND_MARKER = "for this installation:"
 
+# Windows installs that ship their own Python refuse to update it in place
+# when not run interactively (our case: no TTY). gcloud's documented
+# workaround is to run it with CLOUDSDK_PYTHON pointing at a copy of that
+# Python, which `components copy-bundled-python` makes and prints the path of.
+_BUNDLED_PYTHON_ERROR = "cannot use bundled python installation"
+
 
 def is_available() -> bool:
     return shutil.which(GCLOUD_CMD) is not None
 
 
-def _run(*args: str) -> str:
+def _run(*args: str, env: dict[str, str] | None = None) -> str:
     if not is_available():
         raise GcloudNotFound(
             f"gcloud CLI not found on PATH. Install it from {INSTALL_URL} and relaunch."
@@ -53,6 +60,7 @@ def _run(*args: str) -> str:
         text=True,
         check=False,
         shell=_IS_WINDOWS,
+        env=env,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"gcloud {' '.join(args)} failed")
@@ -100,7 +108,18 @@ def update() -> tuple[str, str]:
     """
     old_version = get_version()
     try:
-        _run("components", "update", "--quiet")
+        try:
+            _run("components", "update", "--quiet")
+        except RuntimeError as error:
+            if _BUNDLED_PYTHON_ERROR not in " ".join(str(error).lower().split()):
+                raise
+            python_copy = _run("components", "copy-bundled-python")
+            _run(
+                "components",
+                "update",
+                "--quiet",
+                env={**os.environ, "CLOUDSDK_PYTHON": python_copy},
+            )
     except RuntimeError as error:
         message = str(error)
         # gcloud hard-wraps its error text, so the phrase can straddle a line.
