@@ -215,6 +215,12 @@ class IdentityManagementView(QWidget):
 
     # -- Device/user detail -----------------------------------------------
 
+    @staticmethod
+    def _make_selectable(fields: dict[str, QLabel]) -> None:
+        # So any value can be copied straight out of the detail panel.
+        for label in fields.values():
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
     def _build_device_detail_panel(self) -> QWidget:
         panel = QWidget()
         form = QFormLayout(panel)
@@ -233,10 +239,7 @@ class IdentityManagementView(QWidget):
             "description": QLabel(""),
         }
         self._device_fields["description"].setWordWrap(True)
-        # Selectable so the key can be copied straight out of the panel.
-        self._device_fields["recovery_key"].setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        self._make_selectable(self._device_fields)
         form.addRow("Hostname:", self._device_fields["hostname"])
         form.addRow("Status:", self._device_fields["status"])
         form.addRow("OS Version:", self._device_fields["os_version"])
@@ -266,6 +269,7 @@ class IdentityManagementView(QWidget):
             "mfa_configured": QLabel(""),
             "created": QLabel(""),
         }
+        self._make_selectable(self._user_fields)
         form.addRow("Email:", self._user_fields["email"])
         form.addRow("First Name:", self._user_fields["first_name"])
         form.addRow("Last Name:", self._user_fields["last_name"])

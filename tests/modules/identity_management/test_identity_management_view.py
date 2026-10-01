@@ -1,3 +1,5 @@
+from PySide6.QtCore import Qt
+
 import it_toolbox.modules.identity_management.ui.main_view as main_view_module
 from it_toolbox.modules.identity_management.models import Device, User
 from it_toolbox.modules.identity_management.ui.main_view import (
@@ -313,6 +315,13 @@ def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
 
 
 # -- Detail panels --------------------------------------------------------
+
+
+def test_detail_values_are_selectable(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    flag = Qt.TextInteractionFlag.TextSelectableByMouse
+    for label in [*view._device_fields.values(), *view._user_fields.values()]:
+        assert label.textInteractionFlags() & flag
 
 
 def test_device_detail_shows_recovery_key(qtbot, monkeypatch):
