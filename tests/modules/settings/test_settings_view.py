@@ -573,6 +573,46 @@ def test_gcloud_update_reports_new_version(qtbot, monkeypatch):
     assert view._gcloud_update_button.isEnabled()
 
 
+def test_gcloud_update_shows_progress_and_elapsed_time_until_done(qtbot, monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def _slow_update():
+        release.wait(timeout=5)
+        return ("540.0.0", "541.0.0")
+
+    view = _make_gcloud_view(qtbot, monkeypatch)
+    monkeypatch.setattr(gcp_auth, "update", _slow_update)
+
+    view._on_gcloud_update_clicked()
+
+    assert not view._gcloud_update_progress.isHidden()
+    assert view._gcloud_update_ticker.isActive()
+    assert "Updating gcloud" in view._gcloud_version_label.text()
+    assert "0:0" in view._gcloud_version_label.text()  # elapsed m:ss
+
+    release.set()
+    qtbot.waitUntil(lambda: "541.0.0" in view._gcloud_version_label.text())
+    assert view._gcloud_update_progress.isHidden()
+    assert not view._gcloud_update_ticker.isActive()
+
+
+def test_gcloud_update_failure_stops_progress(qtbot, monkeypatch):
+    view = _make_gcloud_view(qtbot, monkeypatch)
+
+    def _raise():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(gcp_auth, "update", _raise)
+
+    view._on_gcloud_update_clicked()
+
+    qtbot.waitUntil(lambda: "Couldn't update gcloud" in view._gcloud_version_label.text())
+    assert view._gcloud_update_progress.isHidden()
+    assert not view._gcloud_update_ticker.isActive()
+
+
 def test_gcloud_update_reports_already_up_to_date(qtbot, monkeypatch):
     view = _make_gcloud_view(qtbot, monkeypatch)
     monkeypatch.setattr(gcp_auth, "update", lambda: ("540.0.0", "540.0.0"))

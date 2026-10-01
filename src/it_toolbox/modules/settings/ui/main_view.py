@@ -25,7 +25,7 @@ import platform
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtCore import QElapsedTimer, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -522,8 +522,22 @@ class SettingsView(QWidget):
         self._gcloud_update_button = QPushButton("Update gcloud")
         self._gcloud_update_button.clicked.connect(self._on_gcloud_update_clicked)
 
+        # Indeterminate (gcloud reports no percentage) -- it's there so a
+        # long update visibly isn't hung, alongside a ticking elapsed time.
+        self._gcloud_update_progress = QProgressBar()
+        self._gcloud_update_progress.setRange(0, 0)
+        self._gcloud_update_progress.setTextVisible(False)
+        self._gcloud_update_progress.setMaximumWidth(160)
+        self._gcloud_update_progress.hide()
+
+        self._gcloud_update_clock = QElapsedTimer()
+        self._gcloud_update_ticker = QTimer(self)
+        self._gcloud_update_ticker.setInterval(1000)
+        self._gcloud_update_ticker.timeout.connect(self._tick_gcloud_update)
+
         update_row = QHBoxLayout()
         update_row.addWidget(self._gcloud_update_button)
+        update_row.addWidget(self._gcloud_update_progress)
         update_row.addStretch(1)
 
         layout.addWidget(self._gcloud_version_label)
@@ -597,16 +611,31 @@ class SettingsView(QWidget):
 
     def _on_gcloud_update_clicked(self) -> None:
         self._gcloud_update_button.setEnabled(False)
-        self._gcloud_version_label.setText("Updating gcloud… this can take a few minutes.")
+        self._gcloud_update_progress.show()
+        self._gcloud_update_clock.start()
+        self._tick_gcloud_update()
+        self._gcloud_update_ticker.start()
         run_in_background(
             gcp_auth.update,
             on_result=self._on_gcloud_updated,
             on_error=self._on_gcloud_update_error,
         )
 
+    def _tick_gcloud_update(self) -> None:
+        seconds = self._gcloud_update_clock.elapsed() // 1000
+        self._gcloud_version_label.setText(
+            f"Updating gcloud… {seconds // 60}:{seconds % 60:02d} elapsed "
+            "(this can take several minutes — it hasn't hung)"
+        )
+
+    def _finish_gcloud_update(self) -> None:
+        self._gcloud_update_ticker.stop()
+        self._gcloud_update_progress.hide()
+        self._gcloud_update_button.setEnabled(True)
+
     def _on_gcloud_updated(self, versions: tuple[str, str]) -> None:
         old_version, new_version = versions
-        self._gcloud_update_button.setEnabled(True)
+        self._finish_gcloud_update()
         if old_version == new_version:
             self._gcloud_version_label.setText(
                 f"gcloud version: {new_version} (already up to date)"
@@ -617,7 +646,7 @@ class SettingsView(QWidget):
             )
 
     def _on_gcloud_update_error(self, error: Exception) -> None:
-        self._gcloud_update_button.setEnabled(True)
+        self._finish_gcloud_update()
         if isinstance(error, gcp_auth.GcloudUpdateUnsupported):
             text = (
                 "This gcloud was installed by a package manager, so it can't update "
