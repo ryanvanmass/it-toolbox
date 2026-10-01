@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt
 
 import it_toolbox.modules.identity_management.ui.main_view as main_view_module
-from it_toolbox.modules.identity_management.models import Device, User
+from it_toolbox.modules.identity_management.models import Device, DeviceUser, User
 from it_toolbox.modules.identity_management.ui.main_view import (
     DEVICE_ROLE,
     PAGE_DEVICE_DETAIL,
@@ -42,6 +42,10 @@ def _make_view(qtbot, monkeypatch, api_key="jca_test", devices=(), users=()):
     monkeypatch.setattr(
         "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_recovery_key",
         lambda key, device_id: "",
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device_users",
+        lambda key, device_id: [],
     )
     view = IdentityManagementView()
     qtbot.addWidget(view)
@@ -322,6 +326,33 @@ def test_detail_values_are_selectable(qtbot, monkeypatch):
     flag = Qt.TextInteractionFlag.TextSelectableByMouse
     for label in [*view._device_fields.values(), *view._user_fields.values()]:
         assert label.textInteractionFlags() & flag
+
+
+def test_device_detail_shows_bound_users_with_permission_level(qtbot, monkeypatch):
+    device = Device(id="d1", display_name="alpha", os="windows")
+    users = [User(id="u1", username="alice", email="a@x.com")]
+    view = _make_view(qtbot, monkeypatch, devices=[device], users=users)
+    qtbot.waitUntil(lambda: view._devices_table.rowCount() == 1, timeout=2000)
+    qtbot.waitUntil(lambda: len(view._users) == 1, timeout=2000)
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device",
+        lambda key, device_id: device,
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.identity_management.ui.main_view.jumpcloud_client.get_device_users",
+        lambda key, device_id: [
+            DeviceUser(user_id="u1", admin=True, passwordless=True),
+            DeviceUser(user_id="u9"),
+        ],
+    )
+
+    view._devices_table.setCurrentCell(0, 0)
+
+    qtbot.waitUntil(
+        lambda: view._device_fields["bound_users"].text()
+        == "alice — Administrator (no password)\nu9 — Standard",
+        timeout=2000,
+    )
 
 
 def test_device_detail_shows_recovery_key(qtbot, monkeypatch):

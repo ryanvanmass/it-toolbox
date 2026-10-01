@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils, settings
 from it_toolbox.modules.identity_management import jumpcloud_client
-from it_toolbox.modules.identity_management.models import Device, User
+from it_toolbox.modules.identity_management.models import Device, DeviceUser, User
 
 IS_JUMPCLOUD_ROOT_ROLE = Qt.ItemDataRole.UserRole
 CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -232,6 +232,7 @@ class IdentityManagementView(QWidget):
             "arch": QLabel(""),
             "serial_number": QLabel(""),
             "recovery_key": QLabel(""),
+            "bound_users": QLabel(""),
             "agent_version": QLabel(""),
             "remote_ip": QLabel(""),
             "last_contact": QLabel(""),
@@ -239,6 +240,7 @@ class IdentityManagementView(QWidget):
             "description": QLabel(""),
         }
         self._device_fields["description"].setWordWrap(True)
+        self._device_fields["bound_users"].setWordWrap(True)
         self._make_selectable(self._device_fields)
         form.addRow("Hostname:", self._device_fields["hostname"])
         form.addRow("Status:", self._device_fields["status"])
@@ -246,6 +248,7 @@ class IdentityManagementView(QWidget):
         form.addRow("Architecture:", self._device_fields["arch"])
         form.addRow("Serial Number:", self._device_fields["serial_number"])
         form.addRow("Recovery Key:", self._device_fields["recovery_key"])
+        form.addRow("Bound Users:", self._device_fields["bound_users"])
         form.addRow("Agent Version:", self._device_fields["agent_version"])
         form.addRow("Remote IP:", self._device_fields["remote_ip"])
         form.addRow("Last Contact:", self._device_fields["last_contact"])
@@ -295,6 +298,7 @@ class IdentityManagementView(QWidget):
         self._device_fields["arch"].setText(device.arch or "Loading…")
         self._device_fields["serial_number"].setText(device.serial_number or "Loading…")
         self._device_fields["recovery_key"].setText("Loading…")
+        self._device_fields["bound_users"].setText("Loading…")
         self._device_fields["agent_version"].setText(device.agent_version or "Loading…")
         self._device_fields["remote_ip"].setText(device.remote_ip or "Loading…")
         self._device_fields["last_contact"].setText(device.last_contact or "Loading…")
@@ -308,6 +312,11 @@ class IdentityManagementView(QWidget):
             lambda: jumpcloud_client.get_device(api_key, device.id),
             on_result=self._populate_device_detail,
             on_error=self._on_detail_error,
+        )
+        async_utils.run_in_background(
+            lambda: jumpcloud_client.get_device_users(api_key, device.id),
+            on_result=lambda bound: self._populate_bound_users(device.id, bound),
+            on_error=lambda exc: self._populate_bound_users(device.id, None),
         )
         # Separate call/endpoint, and a failure here (e.g. a key without
         # permission to read it) shouldn't pop a dialog over the rest of
@@ -363,6 +372,27 @@ class IdentityManagementView(QWidget):
             self._device_fields["last_contact"].setText(device.last_contact or "—")
             self._device_fields["created"].setText(device.created or "—")
             self._device_fields["description"].setText(device.description or "—")
+        except RuntimeError:
+            pass  # widget torn down mid-flight
+
+    def _populate_bound_users(self, device_id: str, bound: list[DeviceUser] | None) -> None:
+        try:
+            if self._selected_device is None or self._selected_device.id != device_id:
+                return
+            if bound is None:
+                text = "Unavailable"
+            elif not bound:
+                text = "—"
+            else:
+                names = {u.id: u.username for u in self._users}
+                lines = []
+                for b in bound:
+                    level = "Administrator" if b.admin else "Standard"
+                    if b.admin and b.passwordless:
+                        level += " (no password)"
+                    lines.append(f"{names.get(b.user_id, b.user_id)} — {level}")
+                text = "\n".join(sorted(lines, key=str.lower))
+            self._device_fields["bound_users"].setText(text)
         except RuntimeError:
             pass  # widget torn down mid-flight
 

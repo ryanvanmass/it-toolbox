@@ -14,7 +14,7 @@ isolated here rather than rippling into models.py or the UI.
 
 import requests
 
-from it_toolbox.modules.identity_management.models import Device, User
+from it_toolbox.modules.identity_management.models import Device, DeviceUser, User
 
 REQUEST_TIMEOUT_SEC = (10, 30)
 
@@ -123,6 +123,39 @@ def get_recovery_key(api_key: str, device_id: str) -> str:
             return ""
         raise
     return data.get("key", "")
+
+
+def _device_user_from_json(data: dict) -> DeviceUser:
+    # Each result is a graph node; the binding attributes (sudo) live on
+    # the path elements leading to it. A user can be bound by several
+    # paths (directly and via groups), so any admin path wins.
+    admin = passwordless = False
+    for path in data.get("paths") or []:
+        for hop in path if isinstance(path, list) else []:
+            sudo = (hop.get("attributes") or {}).get("sudo") or {}
+            if sudo.get("enabled"):
+                admin = True
+                passwordless = passwordless or bool(sudo.get("withoutPassword"))
+    return DeviceUser(user_id=data["id"], admin=admin, passwordless=passwordless)
+
+
+def get_device_users(api_key: str, device_id: str) -> list[DeviceUser]:
+    """Users bound to a device, with their permission level."""
+    users: list[DeviceUser] = []
+    skip = 0
+    while True:
+        data = _get(
+            f"{API_BASE_V2}/systems/{device_id}/users",
+            api_key,
+            params={"limit": LIST_PAGE_LIMIT, "skip": skip},
+        )
+        # v2 list endpoints return a bare JSON array.
+        results = data if isinstance(data, list) else data.get("results", [])
+        users.extend(_device_user_from_json(u) for u in results)
+        if len(results) < LIST_PAGE_LIMIT:
+            break
+        skip += LIST_PAGE_LIMIT
+    return users
 
 
 def list_users(api_key: str) -> list[User]:

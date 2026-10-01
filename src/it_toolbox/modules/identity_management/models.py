@@ -25,6 +25,17 @@ class Device:
 
 
 @dataclass(frozen=True)
+class DeviceUser:
+    """A user bound to a device. admin/passwordless come from the binding's
+    sudo attributes (JumpCloud's permission level for a bound user).
+    """
+
+    user_id: str
+    admin: bool = False
+    passwordless: bool = False
+
+
+@dataclass(frozen=True)
 class User:
     """list_users() returns every field below directly -- unlike Device,
     there's no separate detail endpoint/backfill for users.

@@ -309,3 +309,27 @@ def test_get_recovery_key_raises_on_other_errors(monkeypatch):
 
     with pytest.raises(jumpcloud_client.JumpCloudApiError):
         jumpcloud_client.get_recovery_key("jca_testkey", "d1")
+
+
+def test_get_device_users_maps_permission_level(monkeypatch):
+    def fake_get(url, headers, params, timeout):
+        assert url.endswith("/api/v2/systems/d1/users")
+        return _FakeResponse(
+            json_data=[
+                {
+                    "id": "u1",
+                    "type": "user",
+                    "paths": [[{"attributes": {"sudo": {"enabled": True, "withoutPassword": True}}}]],
+                },
+                {"id": "u2", "type": "user", "paths": [[{"attributes": None}]]},
+            ]
+        )
+
+    monkeypatch.setattr(jumpcloud_client.requests, "get", fake_get)
+
+    users = jumpcloud_client.get_device_users("jca_testkey", "d1")
+
+    assert [(u.user_id, u.admin, u.passwordless) for u in users] == [
+        ("u1", True, True),
+        ("u2", False, False),
+    ]
