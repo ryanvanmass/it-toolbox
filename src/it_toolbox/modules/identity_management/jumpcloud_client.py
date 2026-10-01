@@ -126,17 +126,20 @@ def get_recovery_key(api_key: str, device_id: str) -> str:
 
 
 def _device_user_from_json(data: dict) -> DeviceUser:
-    # Each result is a graph node; the binding attributes (sudo) live on
-    # the path elements leading to it. A user can be bound by several
-    # paths (directly and via groups), so any admin path wins.
-    admin = passwordless = False
+    # compiledAttributes is JumpCloud's merge of the binding attributes
+    # across every path to this user (direct and via groups), so it's the
+    # authoritative permission level. The per-hop path attributes are only
+    # a fallback in case a response omits it.
+    sudos = [(data.get("compiledAttributes") or {}).get("sudo") or {}]
     for path in data.get("paths") or []:
         for hop in path if isinstance(path, list) else []:
-            sudo = (hop.get("attributes") or {}).get("sudo") or {}
-            if sudo.get("enabled"):
-                admin = True
-                passwordless = passwordless or bool(sudo.get("withoutPassword"))
-    return DeviceUser(user_id=data["id"], admin=admin, passwordless=passwordless)
+            sudos.append((hop.get("attributes") or {}).get("sudo") or {})
+    enabled = [s for s in sudos if s.get("enabled")]
+    return DeviceUser(
+        user_id=data["id"],
+        admin=bool(enabled),
+        passwordless=any(s.get("withoutPassword") for s in enabled),
+    )
 
 
 def get_device_users(api_key: str, device_id: str) -> list[DeviceUser]:

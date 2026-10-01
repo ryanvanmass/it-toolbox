@@ -322,6 +322,12 @@ def test_get_device_users_maps_permission_level(monkeypatch):
                     "paths": [[{"attributes": {"sudo": {"enabled": True, "withoutPassword": True}}}]],
                 },
                 {"id": "u2", "type": "user", "paths": [[{"attributes": None}]]},
+                {
+                    "id": "u3",
+                    "type": "user",
+                    "compiledAttributes": {"sudo": {"enabled": True, "withoutPassword": False}},
+                    "paths": [[{"attributes": None}]],
+                },
             ]
         )
 
@@ -332,4 +338,5 @@ def test_get_device_users_maps_permission_level(monkeypatch):
     assert [(u.user_id, u.admin, u.passwordless) for u in users] == [
         ("u1", True, True),
         ("u2", False, False),
+        ("u3", True, False),
     ]
