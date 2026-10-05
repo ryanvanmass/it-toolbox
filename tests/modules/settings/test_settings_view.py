@@ -1021,3 +1021,23 @@ def test_fetch_freerdp_shows_error_on_script_failure(qtbot, monkeypatch, tmp_pat
 
     qtbot.waitUntil(lambda: "Couldn't fetch FreeRDP DLLs" in view._freerdp_status_label.text())
     assert view._freerdp_fetch_button.isEnabled()
+
+
+def test_backup_section_restore_cancelled_changes_nothing(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    monkeypatch.setattr(
+        settings_main_view.QFileDialog, "getOpenFileName", lambda *a, **k: ("", "")
+    )
+    view._backup_restore_button.click()
+    assert view._backup_status_label.text() == ""
+
+
+def test_backup_section_reports_invalid_backup(qtbot, monkeypatch, tmp_path):
+    view = _make_view(qtbot, monkeypatch)
+    bad = tmp_path / "bad.zip"
+    bad.write_text("nope")
+    monkeypatch.setattr(
+        settings_main_view.QFileDialog, "getOpenFileName", lambda *a, **k: (str(bad), "")
+    )
+    view._backup_restore_button.click()
+    assert "Couldn't read backup" in view._backup_status_label.text()

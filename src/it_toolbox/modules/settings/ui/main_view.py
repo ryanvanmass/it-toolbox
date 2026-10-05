@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import rclone_client, settings, update_checker
+from it_toolbox.core import config_backup, rclone_client, settings, update_checker
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
@@ -158,7 +158,14 @@ class SettingsView(QWidget):
         # behaves", etc., but nothing distinguished them from each other or
         # from a one-off like "Double-Click Action" in the old flat list.
         categories: list[tuple[str, list[QGroupBox]]] = [
-            ("General", [self._build_updates_section(), self._build_double_click_action_section()]),
+            (
+                "General",
+                [
+                    self._build_updates_section(),
+                    self._build_double_click_action_section(),
+                    self._build_backup_section(),
+                ],
+            ),
             (
                 "Integrations",
                 [
@@ -746,6 +753,82 @@ class SettingsView(QWidget):
         dialog = ApiKeyDialog(parent=self)
         if dialog.exec() == ApiKeyDialog.DialogCode.Accepted:
             self._refresh_jumpcloud_status()
+
+    # -- Config backup/restore -----------------------------------------------
+
+    def _build_backup_section(self) -> QGroupBox:
+        box = QGroupBox("Backup && Restore")
+        layout = QVBoxLayout(box)
+
+        note = QLabel(
+            "Save your connections, hosts, overrides and preferences to a zip, "
+            "or restore them from one. Saved passwords and the JumpCloud API key "
+            "stay encrypted to your SSH key, so they only work on a machine that "
+            "has that same key. rclone remotes and downloaded tools aren't included."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QHBoxLayout()
+        self._backup_export_button = QPushButton("Back Up Config…")
+        self._backup_export_button.clicked.connect(self._on_backup_config_clicked)
+        buttons.addWidget(self._backup_export_button)
+        self._backup_restore_button = QPushButton("Restore Config…")
+        self._backup_restore_button.clicked.connect(self._on_restore_config_clicked)
+        buttons.addWidget(self._backup_restore_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self._backup_status_label = QLabel()
+        self._backup_status_label.setWordWrap(True)
+        layout.addWidget(self._backup_status_label)
+        return box
+
+    def _on_backup_config_clicked(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Back up IT Toolbox config",
+            str(Path.home() / config_backup.default_backup_filename()),
+            "Zip archive (*.zip)",
+        )
+        if not path:
+            return
+        try:
+            count = config_backup.export_config(Path(path))
+        except OSError as exc:
+            self._backup_status_label.setText(f"Couldn't write backup: {exc}")
+            return
+        self._backup_status_label.setText(f"Backed up {count} config files to {path}.")
+
+    def _on_restore_config_clicked(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Restore IT Toolbox config", str(Path.home()), "Zip archive (*.zip)"
+        )
+        if not path:
+            return
+        try:
+            config_backup.read_backup(Path(path))
+        except config_backup.BackupError as exc:
+            self._backup_status_label.setText(str(exc))
+            return
+        choice = QMessageBox.question(
+            self,
+            "Restore config",
+            "This replaces all current connections, hosts and preferences with "
+            "the ones in the backup. Your current config is saved first so you "
+            "can undo it.\n\nContinue?",
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            count, safety = config_backup.restore_config(Path(path))
+        except (config_backup.BackupError, OSError) as exc:
+            self._backup_status_label.setText(f"Couldn't restore: {exc}")
+            return
+        self._backup_status_label.setText(
+            f"Restored {count} config files. Restart IT Toolbox to apply them. "
+            f"Previous config saved to {safety}."
+        )
 
     # -- QEMU/libvirt ---------------------------------------------------------
 
