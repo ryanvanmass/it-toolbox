@@ -17,7 +17,16 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.registry import load_modules
-from it_toolbox.widgets.rdp_widget import RdpWidget
+
+try:
+    # RdpWidget loads the FreeRDP native libraries at import time and
+    # raises OSError if they're missing (always the case on a fresh
+    # Windows install until Settings fetches them) -- same guard as
+    # connection_manager/ui/main_view.py, since an unguarded import here
+    # stops the whole app launching, not just RDP.
+    from it_toolbox.widgets.rdp_widget import RdpWidget
+except (ImportError, OSError):
+    RdpWidget = None
 
 # Windows' native window/taskbar chrome only ever renders a raster icon
 # (no SVG rasterizer in the picture at all) -- .ico is also a Qt-supported
@@ -178,7 +187,7 @@ class MainWindow(QMainWindow):
         if index == -1:
             return None
         widget = self._session_tabs.widget(index)
-        if not isinstance(widget, RdpWidget):
+        if RdpWidget is None or not isinstance(widget, RdpWidget):
             return None
         menu = QMenu(self)
         menu.addAction("Refresh Resolution").triggered.connect(widget.refresh_resolution)

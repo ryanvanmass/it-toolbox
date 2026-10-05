@@ -284,3 +284,27 @@ print("OK")
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout
+
+
+def test_app_imports_and_tab_menu_works_when_freerdp_libs_are_missing(qtbot, monkeypatch):
+    # Regression: app.py imported RdpWidget unguarded, so missing FreeRDP
+    # DLLs (OSError at import) stopped the whole app launching on Windows.
+    import importlib
+
+    import it_toolbox.app as app_module
+
+    monkeypatch.setitem(sys.modules, "it_toolbox.widgets.rdp_widget", None)  # import -> ImportError
+    try:
+        reloaded = importlib.reload(app_module)
+        assert reloaded.RdpWidget is None
+
+        _disable_external_tools(monkeypatch)
+        window = reloaded.MainWindow()
+        qtbot.addWidget(window)
+        plain_widget = QWidget()
+        qtbot.addWidget(plain_widget)
+        index = window._session_tabs.addTab(plain_widget, "a terminal")
+        assert window._build_session_tab_menu(index) is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(app_module)
