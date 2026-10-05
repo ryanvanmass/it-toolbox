@@ -33,7 +33,8 @@ connection manager for RDP, SSH, and Cloud Storage.
   verification status.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
-  rclone, gcloud, QEMU/libvirt, and FreeRDP. See
+  rclone, gcloud, QEMU/libvirt, and FreeRDP, plus config backup/restore
+  to a zip. See
   `docs/app-settings-status.md` for its current verification status.
 - **Identity Management** — a separate module (no GCP account needed)
   browsing JumpCloud devices and users, with a detail panel and a
