@@ -27,7 +27,7 @@
     looks populated.
 
 .EXAMPLE
-    .\scripts\fetch_freerdp_windows.ps1
+    .\src\it_toolbox\resources\scripts\fetch_freerdp_windows.ps1
 #>
 
 param(

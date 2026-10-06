@@ -72,7 +72,13 @@ try:
 except (ImportError, OSError):
     freerdp_client = None
 
-_FREERDP_FETCH_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "fetch_freerdp_windows.ps1"
+# Shipped inside the package (resources/scripts, via pyproject.toml's
+# package-data) rather than the repo's top-level scripts/ folder -- the
+# Windows installer only copies the pip-installed package into
+# {app}\Lib\site-packages, so a repo-relative path never exists there.
+_FREERDP_FETCH_SCRIPT = (
+    Path(__file__).resolve().parents[3] / "resources" / "scripts" / "fetch_freerdp_windows.ps1"
+)
 _FREERDP_DEST_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
 
 
@@ -1070,8 +1076,9 @@ class SettingsView(QWidget):
         if not _FREERDP_FETCH_SCRIPT.is_file():
             self._freerdp_status_label.setText(
                 f"Fetch script not found at {_FREERDP_FETCH_SCRIPT} — this app installation "
-                "doesn't include it. Download it manually from the it-toolbox repo's scripts/ "
-                "folder, or build FreeRDP yourself (docs/windows-freerdp-setup.md)."
+                "doesn't include it. Download it manually from the it-toolbox repo "
+                "(src/it_toolbox/resources/scripts/), or build FreeRDP yourself "
+                "(docs/windows-freerdp-setup.md)."
             )
             return
 

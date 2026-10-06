@@ -46,4 +46,7 @@ where = ["src"]
 # The app's own window icon (app.py) -- also the single source packaging/
 # {linux,windows}'s build scripts copy from for the desktop entry/installer
 # icon, so it has to actually ship in the wheel, not just exist in the repo.
-"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg"]
+# The Settings page's "Fetch FreeRDP DLLs" button runs scripts/*.ps1 from
+# here, so it must ship in the wheel too (the Windows installer has no
+# repo checkout to fall back on).
+"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "scripts/*.ps1"]
