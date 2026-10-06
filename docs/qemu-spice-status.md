@@ -131,6 +131,32 @@ checked against docs:
 
 See the git log on this branch for the full detail behind each of these.
 
+## Clipboard sync — host→guest text (2026-10-06)
+
+Mirrors the embedded-RDP clipboard feature (`docs/embedded-rdp-status.md`,
+PR #33) over spice-vdagent instead of cliprdr. Host→guest text only;
+guest→host is out of scope.
+
+- `SpiceSession.announce_clipboard_text()` caches the host text and, once
+  the agent is connected and advertises `VD_AGENT_CAP_CLIPBOARD_BY_DEMAND`
+  (5), calls `MainChannel.clipboard_selection_grab(0, [1])` (selection
+  CLIPBOARD, type UTF8_TEXT). The `main-clipboard-selection-request`
+  signal answers the guest's paste with `clipboard_selection_notify()`.
+  Copying non-text on the host releases our grab; a guest-side copy
+  (`main-clipboard-selection-grab`) means the grab is no longer ours.
+  The cached text is re-announced whenever the agent (re)connects.
+- `SpiceSessionWorker.send_clipboard_text()` hops onto the GLib thread
+  via `GLib.idle_add`, same as the input/resize calls.
+- `SpiceWidget` pushes on `QApplication.clipboard().dataChanged` and once
+  on connect, and disconnects that signal in `close_session()`. Like RDP,
+  every open session tab receives every host copy.
+
+Constants checked against spice-protocol's `spice/vd_agent.h`; signal and
+method signatures checked against spice-glib 0.42's typelib (PyGObject
+accepts a plain list for `types` and `bytes` for `data`). The session
+logic was exercised against a fake `MainChannel`. **Not yet verified
+against a live guest** — the dev VM was unreachable when this landed.
+
 ## Environment note — updated
 
 The original plan (below) was written on a Windows dev machine with no
