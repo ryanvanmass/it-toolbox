@@ -276,7 +276,8 @@ from it_toolbox.app import MainWindow
 MainWindow()
 
 import it_toolbox.modules.connection_manager.ui.main_view as mv
-assert mv.SpiceWidget is None
+assert mv.SpiceSessionWorker is None
+assert mv._spice_mode() is None
 print("OK")
 """
     result = subprocess.run(
