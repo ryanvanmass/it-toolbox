@@ -1,6 +1,13 @@
 import subprocess
 
-from it_toolbox.core import linux_backend, linux_tools, rclone_client, settings, update_checker, wsl_distro
+from it_toolbox.core import (
+    linux_backend,
+    linux_tools,
+    rclone_client,
+    settings,
+    update_checker,
+    wsl_distro,
+)
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.core.linux_tools_events import linux_tools_events

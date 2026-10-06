@@ -67,11 +67,11 @@ from it_toolbox.modules.connection_manager import (
     qemu_provisioning,
 )
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
-from it_toolbox.wsl_helper import selftest_service
 from it_toolbox.widgets.rclone_location_picker import (
     clear_rclone_path,
     prompt_for_rclone_path,
 )
+from it_toolbox.wsl_helper import selftest_service
 
 # FreeRDP DLL loading happens as an import-time side effect in
 # core/rdp/freerdp_client.py (raises OSError there if the libraries
