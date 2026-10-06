@@ -21,6 +21,10 @@ import sys
 assert sys.prefix.endswith('Contents/Resources/python'), sys.prefix
 import it_toolbox.app, PySide6.QtWidgets, cryptography, bcrypt, pyrage, paramiko
 from importlib.metadata import version
+# build.sh prunes Qt; the .svg app icon still needs the qsvg plugin.
+from PySide6.QtGui import QGuiApplication, QImageReader
+app = QGuiApplication(['smoke', '-platform', 'offscreen'])
+assert b'svg' in [bytes(f) for f in QImageReader.supportedImageFormats()], 'qsvg plugin missing'
 print('it-toolbox', version('it-toolbox'), 'on Python', sys.version.split()[0])
 "
 

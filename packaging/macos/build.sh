@@ -75,6 +75,101 @@ rm -f "$APP/Contents/Resources/python/lib/python${PY_MINOR}/EXTERNALLY-MANAGED"
 #    runtime (the launcher also sets PYTHONDONTWRITEBYTECODE).
 "$PY" -m pip install --no-warn-script-location --upgrade pip
 "$PY" -m pip install --no-warn-script-location "${WHEEL[0]}"
+
+# 3b. Slim PySide6 down to what the app uses: QtCore, QtGui and QtWidgets
+#     (plus the platform/style/imageformat/iconengine plugins they load --
+#     the app icon is an .svg here, so qsvg/qsvgicon stay). Linux and
+#     Windows install the full PySide6 unchanged; only the .dmg, which would
+#     otherwise ship ~1GB of Qt it never loads, is pruned. PySide6-Addons
+#     (WebEngine, 3D, Multimedia, Charts...) goes entirely; from
+#     PySide6-Essentials the unused Python bindings, the QML/Quick stack and
+#     the developer tools (Designer, Linguist, qmlls...) are removed. Then
+#     only the Qt frameworks the remaining Mach-O files actually link
+#     (transitively, per `otool -L`) are kept, and every universal2 file is
+#     thinned to its arm64 slice -- the .app is arm64-only anyway.
+"$PY" -m pip uninstall -y PySide6_Addons
+PYSIDE_DIR=$("$PY" -c "import PySide6, os; print(os.path.dirname(PySide6.__file__))")
+python3 - "$PYSIDE_DIR" <<'PYEOF'
+import glob, os, re, shutil, subprocess, sys
+pyside = sys.argv[1]
+qt = os.path.join(pyside, "Qt")
+
+def rm(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.remove(path)
+
+KEEP_BINDINGS = {"QtCore", "QtGui", "QtWidgets"}
+for so in glob.glob(os.path.join(pyside, "Qt*.abi3.so")):
+    if os.path.basename(so).split(".")[0] not in KEEP_BINDINGS:
+        rm(so)
+for pattern in ("libpyside6qml.*", "*.app", "lrelease", "lupdate", "qmlformat",
+                "qmllint", "qmlls", "svgtoqml", "Qt/libexec", "Qt/qml",
+                "Qt/metatypes", "Qt/plugins/designer", "Qt/plugins/qmltooling",
+                "Qt/plugins/qmllint", "Qt/plugins/sqldrivers",
+                "Qt/plugins/vectorimageformats", "Qt/plugins/tls",
+                "Qt/plugins/networkinformation",
+                "Qt/plugins/platforminputcontexts"):
+    for path in glob.glob(os.path.join(pyside, pattern)):
+        rm(path)
+# Only Qt's own base translations (standard dialogs/buttons) are relevant.
+for qm in glob.glob(os.path.join(qt, "translations", "*.qm")):
+    if not os.path.basename(qm).startswith("qtbase_"):
+        rm(qm)
+
+MAGICS = {bytes.fromhex(m) for m in ("feedfacf", "cffaedfe", "cafebabe", "bebafeca")}
+def macho_files(top):
+    for root, dirs, files in os.walk(top):
+        for name in files:
+            path = os.path.join(root, name)
+            if not os.path.islink(path):
+                with open(path, "rb") as f:
+                    if f.read(4) in MAGICS:
+                        yield path
+
+FRAMEWORK_REF = re.compile(r"@rpath/(Qt\w+)\.framework/")
+def linked_frameworks(path):
+    out = subprocess.run(["otool", "-L", path], check=True,
+                         capture_output=True, text=True).stdout
+    return set(FRAMEWORK_REF.findall(out))
+
+lib = os.path.join(qt, "lib")
+frameworks = {f[:-len(".framework")] for f in os.listdir(lib) if f.endswith(".framework")}
+needed, queue = set(), []
+for path in macho_files(pyside):
+    if not path.startswith(lib + os.sep):
+        queue += linked_frameworks(path)
+while queue:
+    name = queue.pop()
+    if name in needed:
+        continue
+    if name not in frameworks:
+        sys.exit(f"Qt framework {name} is linked but not in the bundle")
+    needed.add(name)
+    queue += linked_frameworks(os.path.join(lib, f"{name}.framework", name))
+for name in frameworks - needed:
+    rm(os.path.join(lib, f"{name}.framework"))
+print("Kept Qt frameworks:", " ".join(sorted(needed)))
+PYEOF
+# Thin every universal2 Mach-O in the interpreter tree to arm64.
+python3 - "$APP/Contents/Resources/python" <<'PYEOF'
+import os, subprocess, sys
+for root, dirs, files in os.walk(sys.argv[1]):
+    for name in files:
+        path = os.path.join(root, name)
+        if os.path.islink(path):
+            continue
+        with open(path, "rb") as f:
+            if f.read(4) != bytes.fromhex("cafebabe"):
+                continue
+        archs = subprocess.run(["lipo", "-archs", path], capture_output=True,
+                               text=True).stdout.split()
+        if "arm64" in archs and len(archs) > 1:
+            subprocess.run(["lipo", "-thin", "arm64", path, "-output", path], check=True)
+PYEOF
+du -sh "$APP/Contents/Resources/python"
+
 "$PY" -m compileall -q -j 0 "$APP/Contents/Resources/python/lib" >/dev/null || true
 
 # 4. The bundle skeleton: launcher, interpreter symlink, Info.plist, icon.
@@ -91,12 +186,12 @@ cp src/it_toolbox/resources/icons/it-toolbox.icns "$APP/Contents/Resources/"
 #    locations (Frameworks/, PlugIns/...), not a Python tree under
 #    Resources/ -- so every Mach-O file (the interpreter, libpython, Qt's
 #    frameworks/plugins, compiled extension modules) and every nested
-#    bundle (Qt's .frameworks, QtWebEngineProcess.app) is signed explicitly
-#    first, then the bundle itself. Deepest paths go first: signing a
+#    bundle (Qt's .frameworks) is signed explicitly first, then the bundle
+#    itself. Deepest paths go first: signing a
 #    bundle requires everything nested inside it to be signed already.
 #    Mach-O files are found by magic number rather than `file`, whose
-#    output for universal2 binaries (most of the PySide6 wheels) is one line
-#    per architecture. Ad-hoc only: no Developer ID, so a browser-downloaded
+#    output for any universal2 binary left after 3b is one line per
+#    architecture. Ad-hoc only: no Developer ID, so a browser-downloaded
 #    .dmg still needs right-click > Open on first launch (see
 #    docs/releasing.md).
 python3 - "$APP/Contents/Resources/python" <<'PYEOF' | xargs -0 -n 50 codesign --force --sign -
