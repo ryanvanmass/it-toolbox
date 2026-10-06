@@ -1,0 +1,70 @@
+name: Package WSL rootfs
+
+# Builds the rootfs for the app-managed "it-toolbox" WSL distro that hosts
+# the Windows build's Linux-only tools (docs/wsl-interconnect-plan.md).
+# Versioned independently of the app: pushing a `wsl-rootfs-<N>` tag
+# publishes the tarball the app with wsl_distro.ROOTFS_VERSION = N
+# downloads. PRs touching the image or the tool registry just build it.
+
+on:
+  push:
+    tags:
+      - "wsl-rootfs-*"
+  pull_request:
+    paths:
+      - "packaging/wsl/**"
+      - "src/it_toolbox/core/linux_tools.py"
+      - "src/it_toolbox/core/wsl_distro.py"
+      - ".github/workflows/package-wsl.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rootfs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve rootfs version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/wsl-rootfs-* ]]; then
+            echo "version=${GITHUB_REF_NAME#wsl-rootfs-}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(sed -n 's/^ROOTFS_VERSION = \([0-9]\+\)$/\1/p' src/it_toolbox/core/wsl_distro.py)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build rootfs
+        run: bash packaging/wsl/build.sh "${{ steps.version.outputs.version }}"
+
+      - name: Smoke-test every registry tool inside the image
+        run: |
+          docker run --rm --user toolbox "it-toolbox-wsl-rootfs-${{ steps.version.outputs.version }}" sh -c '
+            set -e
+            for b in virsh virt-install ssh python3; do command -v "$b"; done
+            python3 -c "import gi; gi.require_version(\"SpiceClientGLib\", \"2.0\"); from gi.repository import SpiceClientGLib"
+            test "$(cat /etc/it-toolbox-rootfs)" = "${{ steps.version.outputs.version }}"
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wsl-rootfs
+          path: dist/wsl/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/wsl-rootfs-')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Marked pre-release and never "latest", so the app's own update
+          # checker (core/update_checker.py) never mistakes a rootfs release
+          # for an app release: /releases/latest skips pre-releases, and the
+          # beta channel skips tags that don't parse as a version.
+          prerelease: true
+          make_latest: false
+          body: Rootfs for the app-managed it-toolbox WSL distro. Downloaded by the app from Settings, not installed by hand.
+          files: |
+            dist/wsl/*.tar.gz
+            dist/wsl/*.sha256

@@ -278,3 +278,14 @@ def test_get_installed_version_reads_real_package_metadata():
     version = update_checker.get_installed_version()
     assert isinstance(version, str)
     assert version
+
+
+def test_newest_release_ignores_wsl_rootfs_releases():
+    # package-wsl.yml publishes `wsl-rootfs-<N>` releases to the same repo
+    # (as pre-releases) -- the beta channel must never offer one as an app
+    # update.
+    releases = [
+        {"tag_name": "wsl-rootfs-7"},
+        {"tag_name": "v0.3.9-beta.2"},
+    ]
+    assert update_checker._newest_release(releases)["tag_name"] == "v0.3.9-beta.2"
