@@ -90,24 +90,31 @@ cp src/it_toolbox/resources/icons/it-toolbox.icns "$APP/Contents/Resources/"
 #    and `codesign --deep` only descends into the standard nested-code
 #    locations (Frameworks/, PlugIns/...), not a Python tree under
 #    Resources/ -- so every Mach-O file (the interpreter, libpython, Qt's
-#    frameworks/plugins, compiled extension modules) is signed explicitly
-#    first, then the bundle itself. Ad-hoc only: no Developer ID, so a
-#    browser-downloaded .dmg still needs right-click > Open on first launch
-#    (see docs/releasing.md).
+#    frameworks/plugins, compiled extension modules) and every nested
+#    bundle (Qt's .frameworks, QtWebEngineProcess.app) is signed explicitly
+#    first, then the bundle itself. Deepest paths go first: signing a
+#    bundle requires everything nested inside it to be signed already.
 #    Mach-O files are found by magic number rather than `file`, whose
 #    output for universal2 binaries (most of the PySide6 wheels) is one line
-#    per architecture.
-python3 - "$APP/Contents/Resources/python" <<'PYEOF' | xargs -0 codesign --force --sign -
+#    per architecture. Ad-hoc only: no Developer ID, so a browser-downloaded
+#    .dmg still needs right-click > Open on first launch (see
+#    docs/releasing.md).
+python3 - "$APP/Contents/Resources/python" <<'PYEOF' | xargs -0 -n 50 codesign --force --sign -
 import os, sys
 MAGICS = {bytes.fromhex(m) for m in ("feedfacf", "cffaedfe", "cafebabe", "bebafeca")}
-for root, _, files in os.walk(sys.argv[1]):
+targets = []
+for root, dirs, files in os.walk(sys.argv[1]):
+    targets += [os.path.join(root, d) for d in dirs if d.endswith((".app", ".framework"))]
     for name in files:
         path = os.path.join(root, name)
         if os.path.islink(path):
             continue
         with open(path, "rb") as f:
             if f.read(4) in MAGICS:
-                sys.stdout.write(path + "\0")
+                targets.append(path)
+# Ties (same depth) are fine in any order -- only nesting matters.
+for path in sorted(targets, key=lambda p: p.count(os.sep), reverse=True):
+    sys.stdout.write(path + "\0")
 PYEOF
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
