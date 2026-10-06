@@ -1,5 +1,7 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QMenu,
     QMessageBox,
     QTabWidget,
@@ -9,7 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, rclone_client, settings
+from it_toolbox.core import async_utils, rclone_client, rclone_mount, settings
 from it_toolbox.modules.cloud_storage.models import RemoteConfig
 from it_toolbox.modules.cloud_storage.ui.add_remote_dialog import AddRemoteDialog
 from it_toolbox.widgets.rclone_browser_widget import RcloneBrowserWidget
@@ -41,6 +43,8 @@ class CloudStorageView(QWidget):
             self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
             self._tabs.currentChanged.connect(self._on_tab_changed)
         self._owned_tab_widgets: set[QWidget] = set()
+        # Remotes with a mount/unmount in flight -> its tree-label suffix.
+        self._mount_busy: dict[str, str] = {}
 
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Remotes"])
@@ -56,6 +60,10 @@ class CloudStorageView(QWidget):
         self._remotes_root.setData(0, IS_REMOTES_ROOT_ROLE, True)
         self._tree.addTopLevelItem(self._remotes_root)
         self._remotes_root.setExpanded(True)
+
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(rclone_mount.manager.unmount_all)
 
         self.refresh_remotes()
 
@@ -121,6 +129,7 @@ class CloudStorageView(QWidget):
                 item = QTreeWidgetItem([remote.name])
                 item.setData(0, REMOTE_ROLE, remote)
                 category_item.addChild(item)
+                self._update_mount_indicator(item)
 
     def _on_load_error(self, error: Exception) -> None:
         QMessageBox.warning(self, "Failed to load remotes", str(error))
@@ -142,10 +151,29 @@ class CloudStorageView(QWidget):
             return
         menu = QMenu(self)
         browse_action = menu.addAction("Browse")
+        mount_point = rclone_mount.manager.mount_point(remote.name)
+        open_mount_action = mount_action = unmount_action = None
+        if mount_point is not None:
+            open_mount_action = menu.addAction("Open Mounted Folder")
+            unmount_action = menu.addAction("Unmount")
+        else:
+            mount_action = menu.addAction("Mount Locally")
+        if remote.name in self._mount_busy:
+            for action in (mount_action, unmount_action):
+                if action is not None:
+                    action.setEnabled(False)
         remove_action = menu.addAction("Remove")
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
         if chosen is browse_action:
             self._open_browser(remote)
+        elif chosen is mount_action:
+            self._mount_remote(remote)
+        elif chosen is unmount_action:
+            self._unmount_remote(remote)
+        elif chosen is open_mount_action:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(mount_point))
         elif chosen is remove_action:
             self._remove_remote(remote)
 
@@ -172,6 +200,64 @@ class CloudStorageView(QWidget):
         if dialog.exec() == AddRemoteDialog.DialogCode.Accepted:
             self.refresh_remotes()
 
+    # -- Mounts ---------------------------------------------------------
+
+    def _mount_remote(self, remote: RemoteConfig) -> None:
+        problem = rclone_mount.mount_support_problem()
+        if problem is not None:
+            QMessageBox.warning(self, "Can't mount remote", problem)
+            return
+        self._mount_busy[remote.name] = "mounting…"
+        self._refresh_mount_indicators()
+        async_utils.run_in_background(
+            lambda: rclone_mount.manager.mount(remote.name),
+            on_result=lambda _: self._on_mount_changed(remote.name),
+            on_error=lambda e: self._on_mount_error(remote.name, "Failed to mount remote", e),
+        )
+
+    def _unmount_remote(self, remote: RemoteConfig) -> None:
+        # unmount() first waits for pending uploads, which can take a while.
+        self._mount_busy[remote.name] = (
+            "finishing uploads…"
+            if rclone_mount.manager.has_pending_uploads(remote.name)
+            else "unmounting…"
+        )
+        self._refresh_mount_indicators()
+        async_utils.run_in_background(
+            lambda: rclone_mount.manager.unmount(remote.name),
+            on_result=lambda _: self._on_mount_changed(remote.name),
+            on_error=lambda e: self._on_mount_error(remote.name, "Failed to unmount remote", e),
+        )
+
+    def _on_mount_changed(self, remote_name: str) -> None:
+        self._mount_busy.pop(remote_name, None)
+        self._refresh_mount_indicators()
+
+    def _on_mount_error(self, remote_name: str, title: str, error: Exception) -> None:
+        self._on_mount_changed(remote_name)
+        QMessageBox.warning(self, title, str(error))
+
+    def _refresh_mount_indicators(self) -> None:
+        for i in range(self._remotes_root.childCount()):
+            category = self._remotes_root.child(i)
+            for j in range(category.childCount()):
+                self._update_mount_indicator(category.child(j))
+
+    def _update_mount_indicator(self, item: QTreeWidgetItem) -> None:
+        remote = item.data(0, REMOTE_ROLE)
+        if remote is None:
+            return
+        mount_point = rclone_mount.manager.mount_point(remote.name)
+        if remote.name in self._mount_busy:
+            item.setText(0, f"{remote.name} ({self._mount_busy[remote.name]})")
+            item.setToolTip(0, "")
+        elif mount_point is not None:
+            item.setText(0, f"{remote.name} (mounted)")
+            item.setToolTip(0, f"Mounted at {mount_point}")
+        else:
+            item.setText(0, remote.name)
+            item.setToolTip(0, "")
+
     def _remove_remote(self, remote: RemoteConfig) -> None:
         confirmed = QMessageBox.question(
             self,
@@ -182,10 +268,15 @@ class CloudStorageView(QWidget):
         if confirmed != QMessageBox.StandardButton.Yes:
             return
         async_utils.run_in_background(
-            lambda: rclone_client.delete_remote(remote.name),
+            lambda: self._unmount_and_delete(remote.name),
             on_result=lambda _: self.refresh_remotes(),
             on_error=self._on_load_error,
         )
+
+    @staticmethod
+    def _unmount_and_delete(remote_name: str) -> None:
+        rclone_mount.manager.unmount(remote_name)
+        rclone_client.delete_remote(remote_name)
 
     # -- Tabs -------------------------------------------------------------
 
