@@ -37,6 +37,7 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 
+from it_toolbox.core.subprocess_utils import no_window_kwargs
 from it_toolbox.modules.connection_manager.models import (
     QemuHost,
     StoragePool,
@@ -82,6 +83,7 @@ def _run_virt_install(*args: str) -> str:
             capture_output=True,
             text=True,
             timeout=VIRT_INSTALL_TIMEOUT_SEC,
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise QemuApiError("virt-install not found — install the virt-install/virtinst package") from e

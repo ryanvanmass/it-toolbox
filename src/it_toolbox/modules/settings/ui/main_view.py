@@ -50,6 +50,7 @@ from it_toolbox.core import config_backup, rclone_client, settings, update_check
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
+from it_toolbox.core.subprocess_utils import no_window_kwargs
 from it_toolbox.modules.connection_manager import (
     glinet_client,
     qemu_client,
@@ -1096,6 +1097,7 @@ class SettingsView(QWidget):
             capture_output=True,
             text=True,
             timeout=120,
+            **no_window_kwargs(),
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "fetch_freerdp_windows.ps1 failed")
