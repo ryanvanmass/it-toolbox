@@ -133,6 +133,11 @@ class SpiceSession:
         # actually ours.
         self._clipboard_text: str | None = None
         self._clipboard_grabbed = False
+        # True while cached text is still waiting for an agent that can
+        # take it -- see _on_agent_update. Kept separate from
+        # `_clipboard_grabbed` so a guest-side copy (which also drops our
+        # grab) isn't stomped by re-announcing stale host text.
+        self._clipboard_pending = False
 
         # Cached from the display-primary-create signal — see module
         # docstring for why this is read from the signal, not pulled via
@@ -344,15 +349,17 @@ class SpiceSession:
         for it (_on_clipboard_selection_request). The guest's own
         clipboard is never read. Caches the text regardless of agent state
         and only grabs if the agent is connected and supports clipboard --
-        _on_agent_connected_changed re-announces it once that happens.
+        _on_agent_update re-announces it once that happens.
         Must be called on the GLib main loop thread (see
         SpiceSessionWorker.send_clipboard_text).
         """
         self._clipboard_text = text or None
+        self._clipboard_pending = self._clipboard_text is not None
         if self._main_channel is None:
             return
         if not self._main_channel.agent_test_capability(_VD_AGENT_CAP_CLIPBOARD_BY_DEMAND):
             return
+        self._clipboard_pending = False
         if self._clipboard_text is not None:
             self._main_channel.clipboard_selection_grab(
                 _VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, [_VD_AGENT_CLIPBOARD_UTF8_TEXT]
@@ -397,6 +404,7 @@ class SpiceSession:
             self._main_channel = channel
             GObject.Object.connect(channel, "channel-event", self._on_main_channel_event)
             GObject.Object.connect(channel, "notify::agent-connected", self._on_agent_connected_changed)
+            GObject.Object.connect(channel, "main-agent-update", self._on_agent_update)
             GObject.Object.connect(channel, "main-clipboard-selection-grab", self._on_clipboard_selection_grab)
             GObject.Object.connect(channel, "main-clipboard-selection-request", self._on_clipboard_selection_request)
         elif isinstance(channel, SpiceClientGLib.DisplayChannel):
@@ -431,13 +439,22 @@ class SpiceSession:
         # False (e.g. the guest's agent service stopping), since there's
         # nothing this callback needs to redo for that case.
         if not channel.get_property("agent-connected"):
-            # A restarted agent starts with no grab from this client.
+            # A restarted agent starts with no grab from this client;
+            # whatever host text is cached gets re-offered once it's back.
             self._clipboard_grabbed = False
+            self._clipboard_pending = self._clipboard_text is not None
             return
-        if self._clipboard_text is not None:
-            self.announce_clipboard_text(self._clipboard_text)
         if self.on_agent_connected is not None:
             self.on_agent_connected()
+
+    def _on_agent_update(self, channel: SpiceClientGLib.MainChannel) -> None:
+        # agent-connected flips True *before* the agent has announced its
+        # capabilities (confirmed live: agent_test_capability() is still
+        # False for every bit at that point), so re-announcing cached text
+        # from _on_agent_connected_changed silently does nothing.
+        # main-agent-update fires again once the capabilities arrive.
+        if self._clipboard_pending:
+            self.announce_clipboard_text(self._clipboard_text)
 
     def _on_session_disconnected(self, session: SpiceClientGLib.Session) -> None:
         self._connected.set()

@@ -144,7 +144,11 @@ guest→host is out of scope.
   signal answers the guest's paste with `clipboard_selection_notify()`.
   Copying non-text on the host releases our grab; a guest-side copy
   (`main-clipboard-selection-grab`) means the grab is no longer ours.
-  The cached text is re-announced whenever the agent (re)connects.
+  Cached text that couldn't be offered yet (no agent, or an agent that
+  hasn't announced its capabilities) is re-announced from
+  `main-agent-update`. Not from `notify::agent-connected`: that fires
+  before the capabilities arrive, so every `agent_test_capability()` is
+  still False there (found in the live test below).
 - `SpiceSessionWorker.send_clipboard_text()` hops onto the GLib thread
   via `GLib.idle_add`, same as the input/resize calls.
 - `SpiceWidget` pushes on `QApplication.clipboard().dataChanged` and once
@@ -153,9 +157,16 @@ guest→host is out of scope.
 
 Constants checked against spice-protocol's `spice/vd_agent.h`; signal and
 method signatures checked against spice-glib 0.42's typelib (PyGObject
-accepts a plain list for `types` and `bytes` for `data`). The session
-logic was exercised against a fake `MainChannel`. **Not yet verified
-against a live guest** — the dev VM was unreachable when this landed.
+accepts a plain list for `types` and `bytes` for `data`).
+
+**Verified live (2026-10-06)** with the real `SpiceWidget` (offscreen
+Qt) against a nested QEMU 10.1 guest: Fedora 44 cloud image, Xvfb,
+spice-vdagent 0.23, `com.redhat.spice.0` spicevmc channel. The guest
+read each paste back with `xclip -o -selection clipboard`. All of these
+pass: text copied before connecting, a live host copy, Unicode +
+multiline text, a non-text host copy releasing the grab, text again
+after that, a guest-side copy not being overwritten, and cached text
+re-offered after restarting the guest's agent.
 
 ## Environment note — updated
 
