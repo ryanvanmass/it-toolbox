@@ -87,7 +87,14 @@ rm -f "$APP/Contents/Resources/python/lib/python${PY_MINOR}/EXTERNALLY-MANAGED"
 #     only the Qt frameworks the remaining Mach-O files actually link
 #     (transitively, per `otool -L`) are kept, and every universal2 file is
 #     thinned to its arm64 slice -- the .app is arm64-only anyway.
+# The Addons wheel also lists files it shares with Essentials (PySide6's
+# __init__.py, the .pyi stubs), so uninstalling it takes those too --
+# reinstall the same Essentials/meta version straight after (from pip's
+# cache) to put them back.
+PYSIDE_VERSION=$("$PY" -c "from importlib.metadata import version; print(version('PySide6_Essentials'))")
 "$PY" -m pip uninstall -y PySide6_Addons
+"$PY" -m pip install --no-warn-script-location --no-deps --force-reinstall \
+    "PySide6==$PYSIDE_VERSION" "PySide6_Essentials==$PYSIDE_VERSION"
 PYSIDE_DIR=$("$PY" -c "import PySide6, os; print(os.path.dirname(PySide6.__file__))")
 python3 - "$PYSIDE_DIR" <<'PYEOF'
 import glob, os, re, shutil, subprocess, sys
