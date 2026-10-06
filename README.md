@@ -33,7 +33,8 @@ connection manager for RDP, SSH, and Cloud Storage.
   verification status.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
-  rclone, gcloud, QEMU/libvirt, and FreeRDP, plus config backup/restore
+  rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools
+  WSL distro, plus config backup/restore
   to a zip. See
   `docs/app-settings-status.md` for its current verification status.
 - **Identity Management** — a separate module (no GCP account needed)
@@ -59,6 +60,11 @@ connection manager for RDP, SSH, and Cloud Storage.
 - **Cloud Storage module**: needs the `rclone` CLI on PATH — see
   [rclone.org/downloads](https://rclone.org/downloads/). Every other
   module works without it.
+- **Windows, for QEMU/libvirt and embedded SPICE**: these run inside a
+  small Linux distro the app manages itself under WSL2. Set it up once
+  from Settings > Integrations > Linux tools (WSL); it's an ~80 MB
+  download and needs WSL installed (the same page can start that). See
+  `docs/wsl-interconnect-plan.md`.
 - **Linux only, for embedded QEMU/SPICE**: needs your distro's
   GObject-Introspection SPICE client library — there's no PyPI-installable
   equivalent, so it has to come from the system package manager (Fedora:

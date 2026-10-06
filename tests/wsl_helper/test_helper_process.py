@@ -25,7 +25,7 @@ def test_helper_argv_sets_pythonpath_via_env():
     argv = helper_process.helper_argv(linux_backend.NativeBackend(), "spice")
     assert argv[0] == "env"
     assert argv[1] == f"PYTHONPATH={helper_process.package_root()}"
-    assert argv[2:] == ["python3", "-m", "it_toolbox.wsl_helper", "spice"]
+    assert argv[2:] == ["PYTHONDONTWRITEBYTECODE=1", "python3", "-m", "it_toolbox.wsl_helper", "spice"]
 
 
 def test_helper_argv_translates_pythonpath_for_wsl(monkeypatch):

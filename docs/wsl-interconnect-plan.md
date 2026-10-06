@@ -1,9 +1,76 @@
-# WSL interconnect — plan
+# WSL interconnect — plan and status
 
-Status: **planning only, nothing built yet.** Written against `main` at
-`b72db35` (v0.3.9-beta.2). Read this first if you're picking the work up
-in a new session; it follows the same handoff convention as the other
-`docs/*-status.md` files.
+Status: **built on `feature/wsl-interconnect` (all six milestones), and
+verified end to end on Linux with podman standing in for `wsl.exe`; not
+yet verified on a real Windows machine.** Read this first if you're
+picking the work up in a new session; it follows the same handoff
+convention as the other `docs/*-status.md` files. The plan below is kept
+as written, with "As built" notes where the code differs.
+
+## Status and verification
+
+Verified (2026-10-06, Linux, podman):
+
+- **Rootfs builds**: `packaging/wsl/build.sh 1` produces a 79 MB tarball.
+  Inside it, as the `toolbox` user: `virsh` 11.3.0, `virt-install`
+  (`--osinfo list` returns 939 entries), `ssh`, Python 3.13 with
+  `SpiceClientGLib` 2.0 importable.
+- **Embedded SPICE through the helper, against a real VM**: the real
+  `SpiceWidget` (offscreen Qt on the host) drove a `RemoteSpiceWorker`,
+  whose helper ran inside the built rootfs image (`podman run -i
+  --network=host`, mounting `src/` where Windows would mount the install
+  dir) and connected to a real QEMU SPICE server. 223 dirty-band frames
+  rendered the guest's SeaBIOS/iPXE screen pixel-perfect (720x400); an
+  Esc keypress sent from the app opened SeaBIOS's boot menu in the guest
+  (input path confirmed); closing the tab stopped the helper cleanly
+  (exit 0, 0.13 s).
+- **Unit/integration tests**: 996 passing, including the real helper
+  spawned natively (handshake, token check, echo service, exit on stdin
+  EOF) and a guard that nothing the helper imports pulls in PySide6.
+
+Not yet verified, needs a real Windows machine (in this order):
+
+1. Settings > Linux tools (WSL) on a machine without WSL ("Install
+   WSL…"), then "Set Up Linux Tools" against a published `wsl-rootfs-1`
+   release (none published yet; see `docs/releasing.md`).
+2. "Check Tools" all green, including "App ↔ WSL helper connection",
+   which exercises `wsl.exe --exec`, the `/mnt/c/...` PYTHONPATH and WSL2
+   localhost forwarding together.
+3. QEMU tree + power actions + Deploy VM against a real `qemu+ssh://`
+   host, then Connect via SPICE.
+4. Uninstall removes the distro.
+
+### As built, versus the plan
+
+- `wsl_distro.status()` never spawns `wsl.exe`: the distro is found via
+  the `HKCU\...\Lxss` registry key, and its rootfs version comes from a
+  marker file next to its disk (`data_dir()/wsl/rootfs-version`), not
+  from `/etc/it-toolbox-rootfs` inside it. The QEMU tree checks this on
+  the UI thread at startup, so it has to be free.
+- `WslBackend.is_tool_available` is free too: a distro at this app's
+  `ROOTFS_VERSION` contains every registry tool by construction.
+  `probe_tool` is the real check, behind Settings' "Check Tools".
+- SSH keys are synced at setup, in the background at app startup, and on
+  the "Copy SSH Keys into WSL" button, rather than before every
+  connection.
+- The helper's parameters (URI, port, password) travel in the START
+  message, not on the command line, so they never show in a process
+  list. A `selftest` echo service exists alongside `spice`.
+- `SpiceSessionWorker` was split into a Qt-free `SpiceSessionRunner`
+  (shared by the in-process worker and the helper) and a thin signal
+  wrapper; `SpiceWidget` takes an optional injected `worker`.
+
+### Adding a Linux tool later
+
+1. Add a `LinuxTool` entry to `src/it_toolbox/core/linux_tools.py`.
+2. Bump `ROOTFS_VERSION` in `src/it_toolbox/core/wsl_distro.py` and
+   publish `wsl-rootfs-<N>` (see `docs/releasing.md`).
+3. Run it through `linux_backend.get_backend().run([...])` and gate the
+   feature on `linux_backend.is_tool_available("<id>")`.
+4. Only if it needs a live stream: add a service module under
+   `src/it_toolbox/wsl_helper/` (`run(conn, params, stop)`), register it
+   in `wsl_helper/__main__.py`'s `SERVICES`, and drive it from the app
+   with `core/wsl/helper_process.HelperProcess`.
 
 ## Goal
 

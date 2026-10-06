@@ -28,8 +28,18 @@ def helper_argv(backend: linux_backend.LinuxBackend, service: str, python: str =
     pythonpath = backend.to_linux_path(package_root())
     # `env` rather than Popen(env=...): on Windows that env would apply to
     # wsl.exe, not to the Linux process it starts.
+    # PYTHONDONTWRITEBYTECODE: the package lives in the (read-only, from
+    # here) Windows install dir; don't even try writing __pycache__ there.
     return backend.popen_argv(
-        ["env", f"PYTHONPATH={pythonpath}", python, "-m", "it_toolbox.wsl_helper", service]
+        [
+            "env",
+            f"PYTHONPATH={pythonpath}",
+            "PYTHONDONTWRITEBYTECODE=1",
+            python,
+            "-m",
+            "it_toolbox.wsl_helper",
+            service,
+        ]
     )
 
 

@@ -59,12 +59,15 @@ from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.core.linux_tools_events import linux_tools_events
+from it_toolbox.core.wsl import transport
+from it_toolbox.core.wsl.helper_process import HelperProcess
 from it_toolbox.modules.connection_manager import (
     glinet_client,
     qemu_client,
     qemu_provisioning,
 )
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
+from it_toolbox.wsl_helper import selftest_service
 from it_toolbox.widgets.rclone_location_picker import (
     clear_rclone_path,
     prompt_for_rclone_path,
@@ -83,6 +86,21 @@ except (ImportError, OSError):
 
 _FREERDP_FETCH_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "fetch_freerdp_windows.ps1"
 _FREERDP_DEST_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
+
+
+def _helper_selftest(backend) -> bool:
+    """Runs the WSL helper's echo service: proves the spawn, handshake and
+    WSL2 localhost forwarding the embedded SPICE viewer depends on all
+    work, without needing a VM."""
+    helper = HelperProcess("selftest", {}, backend=backend)
+    try:
+        conn = helper.start()
+        msg_type, _payload = conn.recv()
+        return msg_type == selftest_service.READY
+    except (transport.TransportError, OSError, EOFError):
+        return False
+    finally:
+        helper.stop()
 
 
 class _DownloadProgressSignal(QObject):
@@ -1102,15 +1120,17 @@ class SettingsView(QWidget):
         self._set_linux_tools_busy(True)
         self._linux_tools_detail_label.setText("Checking tools inside WSL…")
         self._linux_tools_detail_label.show()
-        run_in_background(
-            lambda: [(tool, backend.probe_tool(tool)) for tool in linux_tools.TOOLS],
-            on_result=self._on_linux_tools_checked,
-            on_error=self._on_linux_tools_error,
-        )
 
-    def _on_linux_tools_checked(self, results: list[tuple[linux_tools.LinuxTool, bool]]) -> None:
+        def check() -> list[tuple[str, bool]]:
+            results = [(tool.display_name, backend.probe_tool(tool)) for tool in linux_tools.TOOLS]
+            results.append(("App ↔ WSL helper connection", _helper_selftest(backend)))
+            return results
+
+        run_in_background(check, on_result=self._on_linux_tools_checked, on_error=self._on_linux_tools_error)
+
+    def _on_linux_tools_checked(self, results: list[tuple[str, bool]]) -> None:
         self._set_linux_tools_busy(False)
-        lines = [f"{'✓' if ok else '✗'} {tool.display_name}" for tool, ok in results]
+        lines = [f"{'✓' if ok else '✗'} {name}" for name, ok in results]
         if not all(ok for _, ok in results):
             lines.append("Something's missing — try \"Remove Linux Tools\" and set them up again.")
         self._linux_tools_detail_label.setText("\n".join(lines))

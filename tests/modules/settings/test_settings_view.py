@@ -1174,12 +1174,24 @@ def test_linux_tools_setup_failure_is_reported(qtbot, monkeypatch):
 def test_linux_tools_check_lists_each_tool(qtbot, monkeypatch):
     view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.READY, 1)
     monkeypatch.setattr(linux_backend, "get_backend", lambda: _FakeWslBackend())
+    monkeypatch.setattr(settings_main_view, "_helper_selftest", lambda backend: True)
 
     view._linux_tools_check_button.click()
 
     qtbot.waitUntil(lambda: "✗ " + linux_tools.get("spice").display_name in view._linux_tools_detail_label.text())
     assert "✓ " + linux_tools.get("virsh").display_name in view._linux_tools_detail_label.text()
+    assert "✓ App ↔ WSL helper connection" in view._linux_tools_detail_label.text()
     assert "Something's missing" in view._linux_tools_detail_label.text()
+
+
+def test_helper_selftest_runs_the_real_helper(monkeypatch):
+    import sys
+
+    class _ThisPython(linux_backend.NativeBackend):
+        def popen_argv(self, argv):
+            return [sys.executable if a == "python3" else a for a in argv]
+
+    assert settings_main_view._helper_selftest(_ThisPython()) is True
 
 
 def test_linux_tools_remove_asks_then_removes(qtbot, monkeypatch):
