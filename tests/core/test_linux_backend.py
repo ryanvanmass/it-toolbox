@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 import pytest
 
@@ -144,3 +145,18 @@ def test_windows_to_wsl_path(windows, linux):
 def test_windows_to_wsl_path_rejects_unc():
     with pytest.raises(ValueError):
         linux_backend.windows_to_wsl_path(r"\\server\share\x")
+
+
+def test_backends_hide_console_windows_on_windows(monkeypatch):
+    # PR #90's shared helper: every background wsl.exe/virsh spawn must
+    # carry CREATE_NO_WINDOW on Windows, or a console flashes up.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(wsl_distro, "wsl_exe", lambda: "wsl.exe")
+    assert linux_backend.WslBackend().popen_kwargs()["creationflags"] == 0x08000000
+    assert linux_backend.NativeBackend().popen_kwargs() == {"creationflags": 0x08000000}
+
+    calls = []
+    monkeypatch.setattr(linux_backend.subprocess, "run", lambda cmd, **kwargs: calls.append(kwargs) or _completed())
+    linux_backend.WslBackend().run(["virsh"], timeout=8)
+    assert calls[0]["creationflags"] == 0x08000000

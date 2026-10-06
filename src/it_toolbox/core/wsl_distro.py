@@ -30,6 +30,7 @@ from pathlib import Path
 import requests
 
 from it_toolbox.core import settings
+from it_toolbox.core.subprocess_utils import no_window_kwargs
 from it_toolbox.core.update_checker import REPO
 
 DISTRO_NAME = "it-toolbox"
@@ -104,11 +105,6 @@ def wsl_env() -> dict[str, str]:
     when piped; WSL_UTF8=1 switches them to UTF-8 on any WSL new enough
     to matter here."""
     return {**os.environ, "WSL_UTF8": "1"}
-
-
-def creationflags() -> int:
-    # No console window flashing up behind a GUI-subsystem app.
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def clean_wsl_output(text: str) -> str:
@@ -190,7 +186,7 @@ def _run_wsl(*args: str, timeout: float = _WSL_COMMAND_TIMEOUT_SEC) -> str:
             errors="replace",
             timeout=timeout,
             env=wsl_env(),
-            creationflags=creationflags(),
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise WslDistroError("wsl.exe not found — is WSL installed?") from e

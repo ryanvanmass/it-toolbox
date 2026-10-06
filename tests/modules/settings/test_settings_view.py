@@ -989,6 +989,16 @@ def test_fetch_freerdp_shows_error_when_script_missing(qtbot, monkeypatch):
     assert "Fetch script not found" in view._freerdp_status_label.text()
 
 
+def test_fetch_freerdp_script_ships_inside_the_package():
+    # The Windows installer only carries the pip-installed package, not the
+    # repo -- the script has to resolve to a file under it_toolbox itself.
+    import it_toolbox
+
+    package_dir = settings_main_view.Path(it_toolbox.__file__).resolve().parent
+    assert settings_main_view._FREERDP_FETCH_SCRIPT.is_file()
+    assert package_dir in settings_main_view._FREERDP_FETCH_SCRIPT.parents
+
+
 def test_fetch_freerdp_runs_script_and_re_checks_status_on_success(qtbot, monkeypatch, tmp_path):
     # freerdp_client is genuinely importable on this dev machine (real
     # libfreerdp3 was installed for the embedded-RDP work) — so a real

@@ -21,6 +21,7 @@ from pathlib import PureWindowsPath
 from typing import Protocol
 
 from it_toolbox.core import linux_tools, wsl_distro
+from it_toolbox.core.subprocess_utils import no_window_kwargs
 
 # A stopped WSL distro takes a few seconds to boot on its first call --
 # long enough to blow through callers' normal timeouts (virsh's is 8s).
@@ -53,9 +54,10 @@ class NativeBackend:
         # Same subprocess.run shape callers used directly before this
         # module existed -- their tests monkeypatch subprocess.run and
         # assert on exactly these keyword arguments.
-        if input is None:
-            return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
-        return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, input=input)
+        extra = no_window_kwargs()
+        if input is not None:
+            extra["input"] = input
+        return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, **extra)
 
     def is_tool_available(self, tool: linux_tools.LinuxTool) -> bool:
         return shutil.which(tool.binary) is not None
@@ -64,7 +66,7 @@ class NativeBackend:
         return list(argv)
 
     def popen_kwargs(self) -> dict:
-        return {}
+        return no_window_kwargs()
 
     def to_linux_path(self, path: str) -> str:
         return path
@@ -82,7 +84,8 @@ class WslBackend:
         return [wsl_distro.wsl_exe(), "-d", self.distro, "--exec", *argv]
 
     def popen_kwargs(self) -> dict:
-        return {"env": wsl_distro.wsl_env(), "creationflags": wsl_distro.creationflags()}
+        # No console window flashing up behind a GUI-subsystem app.
+        return {"env": wsl_distro.wsl_env(), **no_window_kwargs()}
 
     def run(
         self, argv: Sequence[str], *, timeout: float, input: str | None = None
