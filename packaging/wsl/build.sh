@@ -26,6 +26,7 @@ echo "Packages: $PACKAGES"
 "$ENGINE" build \
     --build-arg "PACKAGES=$PACKAGES" \
     --build-arg "ROOTFS_VERSION=$VERSION" \
+    -f "$REPO_ROOT/packaging/wsl/Containerfile" \
     -t "$NAME" "$REPO_ROOT/packaging/wsl"
 
 mkdir -p "$OUT_DIR"
