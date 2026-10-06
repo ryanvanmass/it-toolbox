@@ -24,6 +24,10 @@ permissions:
 jobs:
   rootfs:
     runs-on: ubuntu-latest
+    env:
+      # ubuntu-latest ships both podman and docker; build.sh would pick
+      # podman, and the smoke test below needs the image in the same store.
+      CONTAINER_ENGINE: docker
     steps:
       - uses: actions/checkout@v4
 

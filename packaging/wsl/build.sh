@@ -4,14 +4,15 @@
 #   packaging/wsl/build.sh <rootfs-version>
 #
 # The version must match core/wsl_distro.ROOTFS_VERSION for the app to
-# accept it. Uses podman if present, otherwise docker.
+# accept it. Uses $CONTAINER_ENGINE if set, else podman if present, else
+# docker.
 set -euo pipefail
 
 VERSION="${1:?usage: build.sh <rootfs-version>}"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT_DIR="$REPO_ROOT/dist/wsl"
 NAME="it-toolbox-wsl-rootfs-$VERSION"
-ENGINE="$(command -v podman || command -v docker)"
+ENGINE="${CONTAINER_ENGINE:-$(command -v podman || command -v docker)}"
 
 expected="$(sed -n 's/^ROOTFS_VERSION = \([0-9]\+\)$/\1/p' "$REPO_ROOT/src/it_toolbox/core/wsl_distro.py")"
 if [[ "$VERSION" != "$expected" ]]; then
