@@ -2,7 +2,12 @@ import subprocess
 
 import pytest
 
-from it_toolbox.core import linux_backend, rclone_client, shell_discovery, subprocess_utils
+from it_toolbox.core import (
+    linux_backend,
+    rclone_client,
+    shell_discovery,
+    subprocess_utils,
+)
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.modules.connection_manager import qemu_client, qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost
