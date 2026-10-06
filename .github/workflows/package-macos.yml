@@ -3,6 +3,13 @@ name: Package macOS
 on:
   workflow_call:
   workflow_dispatch:
+  # Also on PRs that touch the macOS bundle itself -- nothing else exercises
+  # it before a release, and a broken bundle otherwise only shows up when a
+  # tag is pushed.
+  pull_request:
+    paths:
+      - "packaging/macos/**"
+      - ".github/workflows/package-macos.yml"
 
 jobs:
   package:
