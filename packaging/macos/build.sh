@@ -143,10 +143,20 @@ def linked_frameworks(path):
 
 lib = os.path.join(qt, "lib")
 frameworks = {f[:-len(".framework")] for f in os.listdir(lib) if f.endswith(".framework")}
+plugins = os.path.join(qt, "plugins")
 needed, queue = set(), []
-for path in macho_files(pyside):
-    if not path.startswith(lib + os.sep):
-        queue += linked_frameworks(path)
+for path in list(macho_files(pyside)):
+    if path.startswith(lib + os.sep):
+        continue
+    links = linked_frameworks(path)
+    # A plugin built against an Addons framework (e.g. imageformats/libqpdf
+    # needs QtPdf) is for a feature that went with it -- drop the plugin.
+    if path.startswith(plugins + os.sep) and links - frameworks:
+        print("Dropping plugin", os.path.relpath(path, plugins),
+              "(needs " + ", ".join(sorted(links - frameworks)) + ")")
+        rm(path)
+        continue
+    queue += links
 while queue:
     name = queue.pop()
     if name in needed:
