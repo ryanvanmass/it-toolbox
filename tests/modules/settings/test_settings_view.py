@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 from it_toolbox.core import rclone_client, settings, update_checker
 from it_toolbox.core.auth import gcp_auth
@@ -242,6 +243,61 @@ def test_install_update_button_shown_on_windows_with_installer_asset(qtbot, monk
     qtbot.waitUntil(lambda: "Update available" in view._update_status_label.text())
     assert not view._install_update_button.isHidden()
     assert view._pending_installer_url == "https://example.com/setup.exe"
+
+
+def _offer_macos_update(qtbot, monkeypatch, bundle):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Darwin")
+    monkeypatch.setattr(update_checker, "running_app_bundle", lambda: bundle)
+    monkeypatch.setattr(
+        update_checker,
+        "get_latest_release",
+        lambda include_prerelease=False: update_checker.ReleaseInfo(
+            version="2.0.0",
+            html_url="https://example.com/v2",
+            windows_installer_url="https://example.com/setup.exe",
+            macos_dmg_url="https://example.com/IT-Toolbox-2.0.0-arm64.dmg",
+        ),
+    )
+    view._check_updates_button.click()
+    qtbot.waitUntil(lambda: "Update available" in view._update_status_label.text())
+    return view
+
+
+def test_install_update_button_shown_on_macos_inside_the_app_bundle(qtbot, monkeypatch):
+    view = _offer_macos_update(qtbot, monkeypatch, bundle=Path("/Applications/IT Toolbox.app"))
+
+    assert not view._install_update_button.isHidden()
+    assert view._pending_installer_url == "https://example.com/IT-Toolbox-2.0.0-arm64.dmg"
+
+
+def test_install_update_button_hidden_on_macos_source_install(qtbot, monkeypatch):
+    view = _offer_macos_update(qtbot, monkeypatch, bundle=None)
+
+    assert view._install_update_button.isHidden()
+
+
+def test_install_update_on_macos_uses_the_macos_installer(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Darwin")
+    view._pending_installer_url = "https://example.com/IT-Toolbox-2.0.0-arm64.dmg"
+    view._install_update_button.show()
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox,
+        "question",
+        lambda *a, **k: settings_main_view.QMessageBox.StandardButton.Yes,
+    )
+    calls = []
+    monkeypatch.setattr(
+        update_checker,
+        "download_and_install_macos_update",
+        lambda url, on_progress=None: calls.append(url),
+    )
+    quit_calls = []
+    monkeypatch.setattr(view, "_quit_application", lambda: quit_calls.append(True))
+
+    view._install_update_button.click()
+
+    qtbot.waitUntil(lambda: quit_calls == [True])
+    assert calls == ["https://example.com/IT-Toolbox-2.0.0-arm64.dmg"]
 
 
 def test_install_update_declined_does_not_download(qtbot, monkeypatch):

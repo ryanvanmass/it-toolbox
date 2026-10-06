@@ -77,8 +77,8 @@ _FREERDP_DEST_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
 
 
 class _DownloadProgressSignal(QObject):
-    """update_checker.download_and_install_windows_update's on_progress
-    runs on a background thread -- a QObject's Signal is the standard
+    """update_checker.download_and_install_{windows,macos}_update's
+    on_progress runs on a background thread -- a QObject's Signal is the standard
     safe way to get that back to the main thread (Qt auto-queues
     delivery across threads), the same underlying mechanism
     async_utils._WorkerSignals already relies on for on_result/on_error.
@@ -331,11 +331,26 @@ class SettingsView(QWidget):
             )
             self._latest_release_url = release.html_url
             self._update_link_button.show()
-            if platform.system() == "Windows" and release.windows_installer_url is not None:
-                self._pending_installer_url = release.windows_installer_url
+            installer_url = self._installer_url_for_this_platform(release)
+            if installer_url is not None:
+                self._pending_installer_url = installer_url
                 self._install_update_button.show()
         else:
             self._update_status_label.setText(f"Up to date (v{installed_version})")
+
+    @staticmethod
+    def _installer_url_for_this_platform(release: update_checker.ReleaseInfo) -> str | None:
+        """The release asset the in-app updater can install here, if any:
+        the Windows installer, or on macOS the .dmg -- but only when
+        running from the IT Toolbox.app bundle, since a source install has
+        no bundle to replace. Linux packages update via the system package
+        manager, so there's never one there."""
+        system = platform.system()
+        if system == "Windows":
+            return release.windows_installer_url
+        if system == "Darwin" and update_checker.running_app_bundle() is not None:
+            return release.macos_dmg_url
+        return None
 
     def _on_check_updates_error(self, error: Exception) -> None:
         self._check_updates_button.setEnabled(True)
@@ -348,12 +363,13 @@ class SettingsView(QWidget):
     def _on_install_update_clicked(self) -> None:
         if self._pending_installer_url is None:
             return
+        is_macos = platform.system() == "Darwin"
         choice = QMessageBox.question(
             self,
             "Install Update",
             "IT Toolbox will close to install the update, then reopen. "
-            "Windows may ask you to approve the installer.\n\n"
-            "Continue?",
+            + ("" if is_macos else "Windows may ask you to approve the installer.")
+            + "\n\nContinue?",
         )
         if choice != QMessageBox.StandardButton.Yes:
             return
@@ -375,10 +391,13 @@ class SettingsView(QWidget):
         self._update_download_progress_signal.progress.connect(self._on_update_download_progress)
         report_progress = self._update_download_progress_signal.progress.emit
 
+        install = (
+            update_checker.download_and_install_macos_update
+            if is_macos
+            else update_checker.download_and_install_windows_update
+        )
         run_in_background(
-            lambda: update_checker.download_and_install_windows_update(
-                installer_url, on_progress=report_progress
-            ),
+            lambda: install(installer_url, on_progress=report_progress),
             on_result=self._on_update_installed,
             on_error=self._on_update_install_error,
         )
