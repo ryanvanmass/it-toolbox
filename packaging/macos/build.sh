@@ -94,12 +94,21 @@ cp src/it_toolbox/resources/icons/it-toolbox.icns "$APP/Contents/Resources/"
 #    first, then the bundle itself. Ad-hoc only: no Developer ID, so a
 #    browser-downloaded .dmg still needs right-click > Open on first launch
 #    (see docs/releasing.md).
-find "$APP/Contents/Resources/python" -type f -print0 \
-  | xargs -0 file --no-pad \
-  | awk -F': ' '/Mach-O/ { print $1 }' \
-  | while IFS= read -r macho; do
-        codesign --force --sign - "$macho"
-    done
+#    Mach-O files are found by magic number rather than `file`, whose
+#    output for universal2 binaries (most of the PySide6 wheels) is one line
+#    per architecture.
+python3 - "$APP/Contents/Resources/python" <<'PYEOF' | xargs -0 codesign --force --sign -
+import os, sys
+MAGICS = {bytes.fromhex(m) for m in ("feedfacf", "cffaedfe", "cafebabe", "bebafeca")}
+for root, _, files in os.walk(sys.argv[1]):
+    for name in files:
+        path = os.path.join(root, name)
+        if os.path.islink(path):
+            continue
+        with open(path, "rb") as f:
+            if f.read(4) in MAGICS:
+                sys.stdout.write(path + "\0")
+PYEOF
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
