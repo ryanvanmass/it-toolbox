@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>IT Toolbox</string>
+    <key>CFBundleDisplayName</key>
+    <string>IT Toolbox</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.ryanvanmass.it-toolbox</string>
+    <key>CFBundleExecutable</key>
+    <string>it-toolbox</string>
+    <key>CFBundleIconFile</key>
+    <string>it-toolbox.icns</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@SHORT_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@SHORT_VERSION@</string>
+    <key>CFBundleGetInfoString</key>
+    <string>IT Toolbox @VERSION@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>IT Toolbox opens SSH sessions in Terminal.</string>
+</dict>
+</plist>
