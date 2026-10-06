@@ -81,6 +81,16 @@ _WHEEL_DOWN_BUTTON = 5
 # position, passed straight to MainChannel.agent_test_capability().
 _VD_AGENT_CAP_MONITORS_CONFIG = 1
 
+# Host-to-guest clipboard constants, same source and same reason as
+# _VD_AGENT_CAP_MONITORS_CONFIG above (spice/vd_agent.h, not reflected by
+# the typelib): VD_AGENT_CAP_CLIPBOARD_BY_DEMAND is the capability bit for
+# the grab/request/notify flow below, VD_AGENT_CLIPBOARD_UTF8_TEXT the only
+# clipboard type this v1 supports, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD
+# the regular Ctrl+C/Ctrl+V clipboard (not X11's PRIMARY selection).
+_VD_AGENT_CAP_CLIPBOARD_BY_DEMAND = 5
+_VD_AGENT_CLIPBOARD_UTF8_TEXT = 1
+_VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD = 0
+
 _ERROR_EVENTS = {
     SpiceClientGLib.ChannelEvent.ERROR_CONNECT,
     SpiceClientGLib.ChannelEvent.ERROR_TLS,
@@ -115,6 +125,14 @@ class SpiceSession:
         # motion() calls always carry the full current button state
         # alongside the coordinates, not just "which button changed".
         self._button_mask: int = 0
+        # Host-side clipboard text, cached regardless of agent state so it
+        # can be (re-)announced the moment the agent connects -- see
+        # announce_clipboard_text(). `_clipboard_grabbed` tracks whether
+        # this client currently holds a grab on the guest's clipboard, so
+        # the host clipboard going non-text only releases a grab that's
+        # actually ours.
+        self._clipboard_text: str | None = None
+        self._clipboard_grabbed = False
 
         # Cached from the display-primary-create signal — see module
         # docstring for why this is read from the signal, not pulled via
@@ -317,6 +335,61 @@ class SpiceSession:
         self._main_channel.update_display(0, 0, 0, width, height, True)
         self._main_channel.send_monitor_config()
 
+    def announce_clipboard_text(self, text: str | None) -> None:
+        """Call whenever the host clipboard changes (None/empty = no text
+        on it). Host-to-guest only, mirroring core/rdp/cliprdr.py's
+        ClipboardChannel: this tells the guest's spice-vdagent that the
+        client owns the clipboard and offers UTF-8 text ("grab"); the
+        text itself is only sent once the guest actually pastes and asks
+        for it (_on_clipboard_selection_request). The guest's own
+        clipboard is never read. Caches the text regardless of agent state
+        and only grabs if the agent is connected and supports clipboard --
+        _on_agent_connected_changed re-announces it once that happens.
+        Must be called on the GLib main loop thread (see
+        SpiceSessionWorker.send_clipboard_text).
+        """
+        self._clipboard_text = text or None
+        if self._main_channel is None:
+            return
+        if not self._main_channel.agent_test_capability(_VD_AGENT_CAP_CLIPBOARD_BY_DEMAND):
+            return
+        if self._clipboard_text is not None:
+            self._main_channel.clipboard_selection_grab(
+                _VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, [_VD_AGENT_CLIPBOARD_UTF8_TEXT]
+            )
+            self._clipboard_grabbed = True
+        elif self._clipboard_grabbed:
+            # The host clipboard no longer holds text (e.g. an image was
+            # copied) -- drop our grab so the guest doesn't keep pasting
+            # stale text from an earlier copy.
+            self._main_channel.clipboard_selection_release(_VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD)
+            self._clipboard_grabbed = False
+
+    def _on_clipboard_selection_grab(
+        self, channel: SpiceClientGLib.MainChannel, selection: int, types: int, ntypes: int
+    ) -> bool:
+        # The guest copied something itself, taking clipboard ownership
+        # away from this client -- our earlier grab is gone. Returning
+        # False declines to track the guest's clipboard (guest-to-host is
+        # out of scope).
+        if selection == _VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD:
+            self._clipboard_grabbed = False
+        return False
+
+    def _on_clipboard_selection_request(
+        self, channel: SpiceClientGLib.MainChannel, selection: int, clipboard_type: int
+    ) -> bool:
+        # The guest is pasting and wants the data behind our grab.
+        # Returning False tells spice-glib this client can't provide it.
+        if (
+            selection != _VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD
+            or clipboard_type != _VD_AGENT_CLIPBOARD_UTF8_TEXT
+            or self._clipboard_text is None
+        ):
+            return False
+        channel.clipboard_selection_notify(selection, clipboard_type, self._clipboard_text.encode("utf-8"))
+        return True
+
     def _on_channel_new(
         self, session: SpiceClientGLib.Session, channel: SpiceClientGLib.Channel
     ) -> None:
@@ -324,6 +397,8 @@ class SpiceSession:
             self._main_channel = channel
             GObject.Object.connect(channel, "channel-event", self._on_main_channel_event)
             GObject.Object.connect(channel, "notify::agent-connected", self._on_agent_connected_changed)
+            GObject.Object.connect(channel, "main-clipboard-selection-grab", self._on_clipboard_selection_grab)
+            GObject.Object.connect(channel, "main-clipboard-selection-request", self._on_clipboard_selection_request)
         elif isinstance(channel, SpiceClientGLib.DisplayChannel):
             if channel.get_property("channel-id") != PRIMARY_DISPLAY_CHANNEL_ID:
                 return
@@ -355,7 +430,13 @@ class SpiceSession:
         # on_agent_connected's docstring) -- ignore it flipping back to
         # False (e.g. the guest's agent service stopping), since there's
         # nothing this callback needs to redo for that case.
-        if channel.get_property("agent-connected") and self.on_agent_connected is not None:
+        if not channel.get_property("agent-connected"):
+            # A restarted agent starts with no grab from this client.
+            self._clipboard_grabbed = False
+            return
+        if self._clipboard_text is not None:
+            self.announce_clipboard_text(self._clipboard_text)
+        if self.on_agent_connected is not None:
             self.on_agent_connected()
 
     def _on_session_disconnected(self, session: SpiceClientGLib.Session) -> None:
