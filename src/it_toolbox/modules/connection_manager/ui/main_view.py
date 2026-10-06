@@ -18,10 +18,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, ftp_client, settings
+from it_toolbox.core import async_utils, ftp_client, linux_backend, settings, wsl_distro
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
+from it_toolbox.core.linux_tools_events import linux_tools_events
 from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
 from it_toolbox.core.ssh_tunnel import SshTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
@@ -272,6 +273,11 @@ class ConnectionManagerView(QWidget):
         # Signing in/out happens in Settings, not here — this view only
         # reacts to it (see _on_account_changed).
         auth_events.account_changed.connect(self._on_account_changed)
+
+        # Same for the Windows-only Linux tools distro (Settings > Linux
+        # tools (WSL)): installing/removing it shows/hides the QEMU tree.
+        linux_tools_events.changed.connect(self._on_linux_tools_changed)
+        self._prepare_wsl_backend()
 
         if not gcp_auth.is_available():
             return
@@ -691,6 +697,28 @@ class ConnectionManagerView(QWidget):
             host_item.addChild(QTreeWidgetItem(["Loading…"]))
             self._qemu_root_item.addChild(host_item)
         self._apply_tree_filter()
+
+    def _on_linux_tools_changed(self) -> None:
+        self._populate_qemu_hosts()
+        self._prepare_wsl_backend()
+
+    @staticmethod
+    def _prepare_wsl_backend() -> None:
+        """Windows only (a no-op natively): boots the Linux tools distro
+        in the background so the first QEMU tree expansion doesn't pay
+        WSL's few-second cold start, and re-syncs the Windows SSH keys
+        into it so a key added since setup works for qemu+ssh:// too."""
+        backend = linux_backend.get_backend()
+        if not isinstance(backend, linux_backend.WslBackend):
+            return
+
+        def warm_up_and_sync() -> None:
+            backend.warm_up()
+            wsl_distro.sync_ssh_credentials(backend)
+
+        # Best-effort: a failure here surfaces anyway, more usefully, as
+        # the error from whichever real virsh call hits the same problem.
+        async_utils.run_in_background(warm_up_and_sync, on_error=lambda _error: None)
 
     def _find_qemu_host_item(self, host: QemuHost) -> QTreeWidgetItem | None:
         if self._qemu_root_item is None:

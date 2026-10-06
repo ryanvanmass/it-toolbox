@@ -73,8 +73,10 @@ TOOLS: tuple[LinuxTool, ...] = (
         probe=(
             "python3",
             "-c",
-            "import gi; gi.require_version('SpiceClientGLib', '2.0'); "
-            "from gi.repository import SpiceClientGLib",
+            (
+                "import gi; gi.require_version('SpiceClientGLib', '2.0'); "
+                "from gi.repository import SpiceClientGLib"
+            ),
         ),
     ),
     LinuxTool(
