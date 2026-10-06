@@ -10,8 +10,24 @@ in a new session; it follows the same handoff convention as the other
 Let the Windows build use the features that are Linux-only today by
 running the Linux half inside a WSL2 distro on the same machine, while
 the Qt UI stays a normal Windows app. The user should see the same QEMU
-tree, context menus and embedded SPICE tab they get on Linux, with a
-one-time "pick a WSL distro" setup step in Settings.
+tree, context menus and embedded SPICE tab they get on Linux, after a
+one-time "Set up Linux tools" step in Settings.
+
+The first consumer is QEMU/libvirt + SPICE, but more Linux-only tools
+are planned, so the bridge is built as reusable infrastructure rather
+than QEMU-specific glue.
+
+## Decisions (2026-10-06)
+
+1. **Dedicated, app-managed distro.** The app imports and owns its own
+   WSL distro (`it-toolbox`) with every dependency preinstalled, built
+   in CI. Users don't pick a distro or install packages.
+2. **No stopgap viewer.** SPICE ships on Windows only once it's embedded.
+   No WSLg `remote-viewer` window in between.
+3. **Reusable first, QEMU/SPICE first.** The backend, distro and helper
+   are generic, with a tool registry so future Linux tools plug in by
+   adding a manifest entry (and, if they need a live stream, a helper
+   service). QEMU/SPICE is the only consumer built in this plan.
 
 ## What's Linux-only today
 
@@ -30,94 +46,159 @@ GL.iNet, JumpCloud, Shell Launcher) already runs natively on Windows.
 not itself Linux-only, since Windows ships OpenSSH, but it only exists
 to feed the SPICE client, so it moves with SPICE (see below).
 
-Things that are *not* in scope: `session_launcher._launch_rdp_linux`
-(`xfreerdp` fallback, Windows already has its own path) and the Shell
-Launcher's WSL entries (already work, via `wsl.exe -d <distro>`).
+Not in scope: `session_launcher._launch_rdp_linux` (`xfreerdp`
+fallback, Windows already has its own path) and the Shell Launcher's
+WSL entries (already work, via `wsl.exe -d <distro>`).
 
 ## Design overview
 
-Two layers, because the two kinds of Linux-only code need very different
-bridges:
+Four pieces, all generic, with QEMU/SPICE as the first user:
 
-1. **Command bridge** for `virsh`/`virt-install`. These are one-shot CLI
-   calls that already go through a single subprocess chokepoint each, so
-   on Windows they just get prefixed with `wsl.exe -d <distro> --exec`.
-   Cheap, and it unlocks discovery, power actions, Deploy VM and
-   Configure VM with no UI changes.
-2. **SPICE helper** for the viewer. A small headless Python process runs
-   *inside* WSL, drives the existing `SpiceSession` (which has no Qt
-   import), and streams dirty-band frames out / input events in over a
-   local socket. On Windows a drop-in replacement for `SpiceSessionWorker`
-   speaks that protocol, so `SpiceWidget` itself doesn't change.
+1. **Tool registry.** A declarative list of Linux tools (binaries,
+   packages, which app features they gate). Drives the distro build, the
+   availability checks, and Settings.
+2. **`LinuxBackend`** (command bridge). One-shot CLI calls such as
+   `virsh`/`virt-install` run natively on Linux and through
+   `wsl.exe -d it-toolbox --exec` on Windows.
+3. **Managed distro.** A minimal rootfs built in CI, downloaded and
+   imported by the app on demand, versioned and replaceable.
+4. **Helper services.** A headless Python process inside WSL hosting
+   long-lived services that stream data to the Windows UI. The SPICE
+   viewer is the first service; `SpiceWidget` itself doesn't change.
 
 ```
- Windows (native Qt app)                      WSL2 distro
+ Windows (native Qt app)                      WSL2 distro "it-toolbox"
  ─────────────────────────                    ───────────────────────────
  qemu_client.run_virsh ──► LinuxBackend ──►   wsl.exe --exec virsh -c URI …
  qemu_provisioning     ──►   (WslBackend)     wsl.exe --exec virt-install …
 
- SpiceWidget                                  it_toolbox_wsl_helper (python3)
-   └─ RemoteSpiceWorker ◄── TCP 127.0.0.1 ──►   ├─ QemuTunnel (ssh -L, qemu+ssh)
-        same signals as                         └─ SpiceSession (spice-glib)
-        SpiceSessionWorker                            ▲
-                                                      └─ VM's SPICE server
+ SpiceWidget                                  python3 -m it_toolbox.wsl_helper
+   └─ RemoteSpiceWorker ◄── TCP 127.0.0.1 ──►   └─ service "spice"
+        same signals as                             ├─ QemuTunnel (ssh -L)
+        SpiceSessionWorker                          └─ SpiceSession (spice-glib)
+                                                          ▲
+                                                          └─ VM's SPICE server
 ```
 
-### 1. `LinuxBackend` abstraction (command bridge)
+### 1. Tool registry
+
+New module `core/linux_tools.py`:
+
+```python
+@dataclass(frozen=True)
+class LinuxTool:
+    id: str                    # "virsh", "virt-install", "spice"
+    probe: tuple[str, ...]     # argv that must exit 0, e.g. ("virsh", "--version")
+    packages: tuple[str, ...]  # Debian package names baked into the rootfs
+    native_hint: str           # install hint shown on native Linux (today's text)
+```
+
+Initial entries: `virsh` (`libvirt-clients`), `virt-install`
+(`virtinst`), `spice` (`python3-gi`, `gir1.2-spiceclientglib-2.0`,
+probe `python3 -c "import gi; gi.require_version('SpiceClientGLib','2.0')"`),
+`ssh` (`openssh-client`).
+
+Uses:
+- `is_tool_available(tool_id)` replaces the ad-hoc `shutil.which`
+  checks in `qemu_client.is_available()` / `qemu_provisioning.is_available()`.
+- The rootfs build (see 3) installs the union of every entry's
+  `packages`, so adding a future tool is one entry plus a rebuild.
+- Settings lists each tool's status from the same registry.
+
+### 2. `LinuxBackend` (command bridge)
 
 New module `core/linux_backend.py`:
 
 - `LinuxBackend` protocol: `run(argv, *, timeout, input=None) ->
-  CompletedProcess`, `which(cmd) -> bool`, `description` (for Settings).
+  CompletedProcess`, `probe(tool) -> bool`, `spawn(argv) -> Popen`
+  (for helper services), `to_linux_path(windows_path)`, `description`.
 - `NativeBackend`: today's behavior (`subprocess.run` / `shutil.which`).
   Used on Linux, so the Linux build is unchanged.
-- `WslBackend(distro)`: `run` becomes
-  `["wsl.exe", "-d", distro, "--exec", *argv]` with
+- `WslBackend`: `run` becomes
+  `["wsl.exe", "-d", "it-toolbox", "--exec", *argv]` with
   `creationflags=CREATE_NO_WINDOW` (no console flash from a GUI-subsystem
-  app); `which` runs `wsl.exe -d distro --exec sh -c 'command -v "$1"' sh cmd`.
-  `--exec` (not a shell string) so VM names/URIs never need quoting.
-- `get_backend()` picks: Linux → native; Windows → WSL if a distro is
-  configured in settings and reachable; otherwise `None` (feature hidden,
-  exactly as when `virsh` is missing today). macOS → `None`.
+  app). `--exec` (not a shell string) so VM names/URIs never need
+  quoting.
+- `get_backend()` picks: Linux → native; Windows → WSL if the managed
+  distro is installed and at the expected version; otherwise `None`
+  (features hidden, exactly as when `virsh` is missing today). macOS →
+  `None` for now, but nothing here rules out a future Lima/VM backend.
 
 Changes to existing code are small:
 
 - `qemu_client.run_virsh` and `qemu_provisioning._run_virt_install` call
   `get_backend().run(...)` instead of `subprocess.run`.
-- `qemu_client.is_available()` / `qemu_provisioning.is_available()` ask
-  the backend.
 - `VIRSH_TIMEOUT_SEC` (8 s) needs a first-call allowance: a stopped WSL
-  distro takes a few seconds to boot. Pre-warm the distro in a worker
-  thread at startup when the backend is WSL, and give the first call a
-  longer timeout.
+  distro takes a few seconds to boot. The backend pre-warms the distro
+  in a worker thread at startup and gives the first call a longer
+  timeout.
 
-What this gets on Windows, with no other changes: the QEMU tree, VM
-power actions, Reset, Deploy VM… (ISO picker, pools, networks,
-`--osinfo` list), Configure… (resize, add disk).
+What the command bridge alone gets on Windows: the QEMU tree, VM power
+actions, Reset, Deploy VM… (ISO picker, pools, networks, `--osinfo`
+list), Configure… (resize, add disk).
 
-### 2. SPICE helper (viewer bridge)
+### 3. Managed distro
 
-**Helper process.** `it_toolbox/wsl_helper/` — a Qt-free entry point
-(`python3 -m it_toolbox.wsl_helper spice --uri … --vm … --port …`). It
-imports only `core/spice/spice_session.py`, `core/qemu_tunnel.py` and
-`core/ssh_tunnel.py` (all Qt-free already; verify that stays true with
-a test that imports the helper with PySide6 blocked).
+**Build (CI).** `packaging/wsl/Containerfile` from `debian:trixie-slim`
+(smallest image with every package we need in the main archive):
 
-It runs under the distro's own `python3` with apt/dnf-provided
-`python3-gi` + `gir1.2-spiceclientglib-2.0` (no pip, no venv), loading
-the package straight from the Windows install via
-`PYTHONPATH=/mnt/c/Program Files/IT Toolbox/Lib/site-packages`
-(translated with `wslpath`). No copy step, so the helper can never drift
-from the installed app version.
+- `apt install` the union of the registry's `packages`, generated into
+  the build from `core/linux_tools.py` so the two can't drift (a test
+  asserts every registry package is in the image manifest).
+- Unprivileged default user `toolbox`.
+- `/etc/wsl.conf`: `[user] default=toolbox`, `[boot] systemd=false`
+  (nothing here needs it, and it boots faster),
+  `[interop] appendWindowsPath=false` (so a Windows `ssh.exe` or
+  `python.exe` on PATH can never shadow the Linux one).
+- `docker export` → `it-toolbox-wsl-<rootfs-version>.tar.gz`, plus a
+  `.sha256`, published as a release asset by a new
+  `.github/workflows/package-wsl.yml`. Rootfs versions are independent
+  of app versions (`rootfs-N`), since the image only changes when the
+  registry or base image does.
 
-The helper owns the `qemu+ssh://` tunnel too. Running the tunnel on the
-Windows side would mean the WSL helper has to reach Windows' loopback,
-which only works in WSL's mirrored networking mode; doing it inside WSL
-works in both NAT and mirrored mode.
+Expected size is roughly 100–200 MB compressed; measure in milestone 2.
 
-**Transport.** TCP on `127.0.0.1`, helper listens on an ephemeral port
-and prints `{"port": N, "token": "…"}` on stdout as its first line; the
-Windows side connects and sends the token first. WSL2's default
+**Install (app).** Downloaded on demand, not bundled in the installer
+(same pattern as Settings' "Fetch FreeRDP DLLs"), so users who never
+touch QEMU don't pay for it:
+
+1. Check WSL itself (`wsl.exe --status`). If WSL isn't installed, say
+   so and offer to run `wsl --install --no-distribution`, which needs
+   admin and usually a reboot. Ask first; never run it silently.
+2. Download the pinned rootfs (`WSL_ROOTFS_VERSION` constant in the app),
+   verify the sha256.
+3. `wsl --import it-toolbox "%LOCALAPPDATA%\IT Toolbox\wsl" <tarball> --version 2`.
+4. Run every registry probe to confirm.
+
+**Versioning.** The distro records its rootfs version in
+`/etc/it-toolbox-rootfs`. If it doesn't match what the app expects
+(app updated to one needing a new tool), Settings offers "Update Linux
+tools", which unregisters and re-imports. That's safe because the
+distro holds no user state the app can't regenerate (SSH material is
+re-synced, see 5).
+
+**Uninstall.** Inno Setup `[UninstallRun]`:
+`wsl.exe --unregister it-toolbox`, and remove the `wsl` folder.
+
+### 4. Helper services (viewer bridge)
+
+**Helper process.** `it_toolbox/wsl_helper/` — a Qt-free entry point,
+`python3 -m it_toolbox.wsl_helper <service> [args]`, with a small
+service registry so future tools add a service module rather than a new
+process type. The shared parts (handshake, framing, lifecycle) live in
+`core/wsl/transport.py` and are used by both ends.
+
+It runs under the distro's own `python3`, loading the package straight
+from the Windows install via
+`PYTHONPATH=<to_linux_path(install dir)>/Lib/site-packages`, so the
+helper can never drift from the installed app version and the rootfs
+never needs rebuilding for app-only changes. A test imports
+`it_toolbox.wsl_helper` with PySide6 blocked, so a stray Qt import
+fails CI rather than failing on a user's machine.
+
+**Transport.** TCP on `127.0.0.1`. The helper listens on an ephemeral
+port and prints `{"port": N, "token": "…"}` on stdout as its first line;
+the Windows side connects and sends the token first. WSL2's default
 `localhostForwarding` makes a WSL-side `127.0.0.1` listener reachable
 from Windows. Why not the alternatives:
 
@@ -127,9 +208,20 @@ from Windows. Why not the alternatives:
 - AF_UNIX across the boundary: only works for WSL1.
 - Shared memory: no cross-VM shared memory with WSL2.
 
-**Protocol.** Length-prefixed binary frames, one message type per signal
-`SpiceSessionWorker` already has, so the Windows side is a mechanical
-port:
+**Framing.** Length-prefixed messages: `u32 length, u8 type, payload`.
+Message type numbers are per-service; the transport doesn't care what
+they mean.
+
+**SPICE service.** `wsl_helper/spice_service.py` imports only
+`core/spice/spice_session.py`, `core/qemu_tunnel.py` and
+`core/ssh_tunnel.py` (all Qt-free already). It owns the `qemu+ssh://`
+tunnel too: running the tunnel on the Windows side would mean the WSL
+helper has to reach Windows' loopback, which only works in WSL's
+mirrored networking mode; doing it inside WSL works in both NAT and
+mirrored mode.
+
+One message type per signal `SpiceSessionWorker` already has, so the
+Windows side is a mechanical port:
 
 | Direction | Message | Mirrors |
 |---|---|---|
@@ -146,102 +238,92 @@ the socket never carries more than the worker would have sent.
 
 **Windows side.** `core/spice/remote_spice_worker.py`:
 `RemoteSpiceWorker(QObject)` with the exact signal/method surface of
-`SpiceSessionWorker`. It spawns the helper through `WslBackend`, reads
-the handshake, connects, and runs a reader thread that turns messages
-into signals. `SpiceWidget` gets its worker from a small factory
-(`make_spice_worker(...)`), and `connection_manager/ui/main_view.py`'s
-`SpiceWidget = None` import guard is relaxed. Two concrete changes:
-`widgets/spice_widget.py` imports `SpiceSessionWorker` (and so `gi`) at
-module level and constructs it with `(host, port, password)` at line
-~101, so the import moves into the factory; and on Windows `main_view`
-must not open its own `QemuTunnel` first, since the helper owns the
-tunnel, so the factory takes the host URI + SPICE port and decides
-where the tunnel lives.
+`SpiceSessionWorker`. It spawns the helper through
+`LinuxBackend.spawn`, reads the handshake, connects, and runs a reader
+thread that turns messages into signals. `SpiceWidget` gets its worker
+from a small factory (`make_spice_worker(...)`), and
+`connection_manager/ui/main_view.py`'s `SpiceWidget = None` import guard
+is relaxed. Two concrete changes: `widgets/spice_widget.py` imports
+`SpiceSessionWorker` (and so `gi`) at module level and constructs it
+with `(host, port, password)` at line ~101, so the import moves into
+the factory; and on Windows `main_view` must not open its own
+`QemuTunnel` first, since the helper owns the tunnel, so the factory
+takes the host URI + SPICE port and decides where the tunnel lives.
 
 **Lifecycle.** Helper exits on `STOP`, on socket close, or when its
 stdin closes (so a crashed app never leaves orphan helpers). The app's
 existing `aboutToQuit` teardown calls `stop()` as it does for the local
 worker.
 
-### 3. Setup and Settings
+### 5. SSH credentials inside the distro
+
+`virsh -c qemu+ssh://…` and the helper's tunnel run inside the distro,
+so they use the distro's `~/.ssh`, not the Windows user's. Since the app
+owns the distro, it syncs this itself rather than asking the user: on
+import and before each QEMU connection, copy `%USERPROFILE%\.ssh\id_*`
+and `known_hosts` into `/home/toolbox/.ssh` with `0600` perms. (Pointing
+at `/mnt/c/...` directly doesn't work, since DrvFs presents the keys as
+`0777` and ssh refuses them.) Without `known_hosts`, the first `virsh`
+call would stall on a host-key prompt it can't answer.
+
+Keys held only in the Windows OpenSSH agent (no key file) aren't
+covered by this. Bridging the agent (e.g. via `npiperelay`) is a later
+add-on if it turns out to matter.
+
+### 6. Settings
 
 Replace the "Not applicable on this platform." branch of
-`_build_qemu_section` on Windows with a "QEMU / libvirt (via WSL)"
-section:
+`_build_qemu_section` on Windows with a generic **"Linux tools (WSL)"**
+section, since it will serve more than QEMU:
 
-1. Distro picker, fed by `shell_discovery._discover_wsl_distros()`
-   (already handles `wsl -l -q`'s UTF-16 output). Saved as
-   `qemu_wsl_distro` in settings.
-2. Dependency check, run inside the chosen distro: `virsh`,
-   `virt-install`, `python3`, `python3 -c "import gi;
-   gi.require_version('SpiceClientGLib', '2.0')"`, `ssh`. Each shows
-   found / missing.
-3. For anything missing, show the exact install command for the
-   distro's package manager (detected from `/etc/os-release`), with a
-   copy button, same tone as today's Linux hints:
-   - Debian/Ubuntu: `sudo apt install libvirt-clients virtinst python3-gi gir1.2-spiceclientglib-2.0 openssh-client`
-   - Fedora: `sudo dnf install libvirt-client virt-install python3-gobject spice-gtk`
-   An "Open terminal in this distro" button reuses Shell Launcher's
-   `wsl.exe -d <distro>` session so the user can paste it.
+- State: WSL missing / tools not installed / installed (rootfs-N) /
+  update available.
+- One button that does the right next step: "Install WSL…", "Set up
+  Linux tools" (download + import, with a progress bar), or "Update
+  Linux tools".
+- Per-tool status from the registry (virsh, virt-install, SPICE, ssh).
+- "Remove Linux tools" (unregister) for users who want the disk back.
 
-The app never runs `sudo`/root installs itself; that matches the
-existing "it's a system package, not something this app can download"
-stance.
+The existing Linux-native QEMU section keeps its install hints, now
+read from the registry's `native_hint`.
 
-### 4. SSH credentials inside WSL
+### 7. Local `qemu:///system` inside the distro
 
-`virsh -c qemu+ssh://…` and the helper's tunnel use WSL's `~/.ssh`, not
-the Windows user's. Default: document it and add a Settings action
-"Copy my Windows SSH key into WSL" that copies `%USERPROFILE%\.ssh\id_*`
-into the distro's `~/.ssh` with `0600` perms (DrvFs mounts keys as
-`0777`, which ssh refuses, so pointing at `/mnt/c/...` directly doesn't
-work without the `metadata` mount option). Also copy `known_hosts`
-entries for configured QEMU hosts so the first `virsh` call doesn't stall
-on a host-key prompt it can't answer.
-
-### 5. Local `qemu:///system` inside WSL
-
-Works if the user runs libvirt inside WSL2 itself (nested KVM is
-available on WSL2 with a recent kernel), but that's a power-user setup.
-Treat `qemu+ssh://` to a real hypervisor as the main path and
-`qemu:///system` in WSL as "supported if you set it up"; no
-special-casing needed since `virsh` handles both.
+Not a target. The managed distro is a client environment; `qemu+ssh://`
+to a real hypervisor is the supported path. A user running libvirtd on
+the Windows machine itself is out of scope.
 
 ## Milestones
 
 Each one is shippable on its own; Linux behavior stays unchanged
 throughout.
 
-1. **`LinuxBackend` + command bridge.** Native + WSL backends, route
-   `run_virsh`/`_run_virt_install` through it, unit tests with a fake
-   `wsl.exe`. Linux tests must pass untouched.
-2. **Settings section on Windows.** Distro picker, dependency check,
-   install hints, SSH key copy. After this, the QEMU tree, power
-   actions, Deploy VM and Configure VM work on Windows.
-3. **Helper + protocol.** `it_toolbox.wsl_helper`, wire format, tests
-   that run the helper against a fake `SpiceSession` over a real socket
-   (Linux CI can run both ends).
-4. **`RemoteSpiceWorker` + widget factory.** Embedded SPICE on Windows.
+1. **Tool registry + `LinuxBackend`.** Native + WSL backends, route
+   `run_virsh`/`_run_virt_install` and the `is_available()` checks
+   through them, unit tests with a fake `wsl.exe`. Linux tests must pass
+   untouched.
+2. **Rootfs build in CI.** `packaging/wsl/Containerfile`,
+   `package-wsl.yml`, release asset + sha256, test that registry
+   packages match the image.
+3. **Distro manager + Settings section + SSH sync.** Download, verify,
+   import, version check, update, remove. After this, the QEMU tree,
+   power actions, Deploy VM and Configure VM work on Windows.
+4. **Helper framework + SPICE service.** `core/wsl/transport.py`,
+   `it_toolbox.wsl_helper`, tests that run the helper against a fake
+   `SpiceSession` over a real socket (Linux CI can run both ends).
+5. **`RemoteSpiceWorker` + widget factory.** Embedded SPICE on Windows.
    Verify on a real Windows machine against a real `qemu+ssh://` host,
    same bar as the other status docs (real VM, `grab()` diff, input
    round-trip).
-5. **Packaging + docs.** Installer ships nothing new for WSL (the helper
-   is already in the wheel); add a section to
-   `docs/windows-troubleshooting.md`, update README's feature/platform
-   table.
+6. **Packaging + docs.** Uninstaller unregisters the distro; add a
+   section to `docs/windows-troubleshooting.md`; update README's
+   feature/platform table; a short "adding a Linux tool" guide (registry
+   entry, rebuild rootfs, optional helper service).
 
-## Open questions
+## Remaining open questions
 
-- **Dedicated distro vs. the user's own.** This plan uses an existing
-  distro the user picks. Alternative: ship a minimal rootfs built in CI
-  and `wsl --import` it as `it-toolbox`, with every dependency
-  preinstalled (zero setup, but a ~100–200 MB download and another
-  release artifact). Recommendation: start with the user's distro; add
-  the managed distro later only if setup friction shows up in practice.
-- **WSLg as a fallback.** WSLg could show a Linux `remote-viewer`
-  window with no helper at all. It isn't embedded, so it doesn't meet
-  the original goal, but it would be a cheap stopgap between milestones
-  2 and 4 if wanted.
-- **Generalising the bridge.** Nothing else is Linux-only today, but
-  the `LinuxBackend` seam is where any future Linux-only CLI tool
-  (e.g. ZFS, cockpit-style system tooling) would plug in.
+- **Rootfs hosting.** GitHub release assets on `ryanvanmass/it-toolbox`
+  are the default. If the image gets big or updates often, the Forgejo
+  package registry is an alternative.
+- **Agent-only SSH keys.** Only matters if keys live solely in the
+  Windows agent; deferred until someone hits it.
