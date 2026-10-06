@@ -969,6 +969,15 @@ def test_freerdp_section_shows_not_found_status_on_windows(qtbot, monkeypatch):
     assert "not found" in view._freerdp_status_label.text()
 
 
+def test_freerdp_section_points_at_homebrew_on_macos(qtbot, monkeypatch):
+    monkeypatch.setattr(settings_main_view, "freerdp_client", None)
+
+    view = _make_view(qtbot, monkeypatch, platform_system="Darwin")
+
+    assert "brew install freerdp" in view._freerdp_status_label.text()
+    assert not hasattr(view, "_freerdp_fetch_button")
+
+
 def test_fetch_freerdp_shows_error_when_script_missing(qtbot, monkeypatch):
     monkeypatch.setattr(settings_main_view, "freerdp_client", None)
     monkeypatch.setattr(

@@ -44,6 +44,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # The app's own window icon (app.py) -- also the single source packaging/
-# {linux,windows}'s build scripts copy from for the desktop entry/installer
-# icon, so it has to actually ship in the wheel, not just exist in the repo.
-"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg"]
+# {linux,windows,macos}'s build scripts copy from for the desktop entry/
+# installer/app-bundle icon, so it has to actually ship in the wheel, not
+# just exist in the repo. The .icns is rendered from the .svg; macOS's
+# Dock/Finder only take an .icns for a bundle's CFBundleIconFile.
+"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "icons/*.icns"]

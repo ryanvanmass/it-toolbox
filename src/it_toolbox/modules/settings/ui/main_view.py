@@ -1040,6 +1040,20 @@ class SettingsView(QWidget):
         box = QGroupBox("FreeRDP (Windows)")
         layout = QVBoxLayout(box)
 
+        if platform.system() == "Darwin":
+            # macOS gets FreeRDP from Homebrew, not a fetched-DLL folder --
+            # there's nothing to fetch in-app, only a status to report.
+            box.setTitle("FreeRDP (macOS)")
+            self._freerdp_status_label = QLabel(
+                "FreeRDP libraries loaded — embedded RDP is available."
+                if freerdp_client is not None
+                else "FreeRDP libraries not found — install them with 'brew install freerdp', "
+                "then relaunch IT Toolbox to use embedded RDP sessions."
+            )
+            self._freerdp_status_label.setWordWrap(True)
+            layout.addWidget(self._freerdp_status_label)
+            return box
+
         if platform.system() != "Windows":
             self._freerdp_status_label = QLabel("Not applicable on this platform.")
             layout.addWidget(self._freerdp_status_label)
