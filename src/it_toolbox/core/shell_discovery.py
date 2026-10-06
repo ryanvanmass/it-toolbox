@@ -11,6 +11,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from it_toolbox.core.subprocess_utils import no_window_kwargs
+
 _POSIX_SHELLS_PATH = Path("/etc/shells")
 
 # Supplements /etc/shells for shells installed but not registered there
@@ -124,7 +126,10 @@ def _discover_wsl_distros() -> list[Shell]:
 
     try:
         result = subprocess.run(
-            [wsl, "-l", "-q"], capture_output=True, timeout=_WSL_TIMEOUT_SEC
+            [wsl, "-l", "-q"],
+            capture_output=True,
+            timeout=_WSL_TIMEOUT_SEC,
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return []

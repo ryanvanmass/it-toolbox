@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
+from it_toolbox.core.subprocess_utils import no_window_kwargs
 from it_toolbox.modules.connection_manager.models import QemuHost, QemuVm
 
 VIRSH_CMD = "virsh"
@@ -50,6 +51,7 @@ def run_virsh(host: QemuHost, *args: str) -> str:
             capture_output=True,
             text=True,
             timeout=VIRSH_TIMEOUT_SEC,
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise QemuApiError("virsh not found — install libvirt-clients") from e
