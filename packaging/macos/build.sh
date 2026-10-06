@@ -154,7 +154,10 @@ while queue:
     if name not in frameworks:
         sys.exit(f"Qt framework {name} is linked but not in the bundle")
     needed.add(name)
-    queue += linked_frameworks(os.path.join(lib, f"{name}.framework", name))
+    # Wheels can't carry symlinks, so the binary isn't necessarily at
+    # QtX.framework/QtX -- check every Mach-O inside the framework.
+    for path in macho_files(os.path.join(lib, f"{name}.framework")):
+        queue += linked_frameworks(path)
 for name in frameworks - needed:
     rm(os.path.join(lib, f"{name}.framework"))
 print("Kept Qt frameworks:", " ".join(sorted(needed)))
