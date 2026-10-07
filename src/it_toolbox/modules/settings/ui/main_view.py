@@ -197,6 +197,7 @@ class SettingsView(QWidget):
                 "General",
                 [
                     self._build_updates_section(),
+                    self._build_modules_section(),
                     self._build_double_click_action_section(),
                     self._build_backup_section(),
                 ],
@@ -1356,6 +1357,44 @@ class SettingsView(QWidget):
     def _on_terminal_font_size_changed(self, index: int) -> None:
         _, size = TERMINAL_FONT_SIZE_PRESETS[index]
         settings.save_terminal_font_size(size)
+
+    # -- Modules --------------------------------------------------------------
+
+    def _build_modules_section(self) -> QGroupBox:
+        # Imported here, not at the top: registry imports SettingsModule,
+        # which imports this file -- a top-level import would be circular.
+        from it_toolbox.modules.registry import OPTIONAL_MODULES
+
+        box = QGroupBox("Modules")
+        layout = QVBoxLayout(box)
+        layout.addWidget(QLabel("Choose which tools appear in the sidebar."))
+
+        disabled = settings.load_disabled_modules()
+        self._module_checkboxes: dict[str, QCheckBox] = {}
+        for module_class in OPTIONAL_MODULES:
+            checkbox = QCheckBox(module_class.display_name)
+            checkbox.setChecked(module_class.id not in disabled)
+            checkbox.checkStateChanged.connect(self._on_module_toggled)
+            self._module_checkboxes[module_class.id] = checkbox
+            layout.addWidget(checkbox)
+
+        # Modules are only built once, at startup (see registry.load_modules),
+        # so a change here can't add/remove one live -- hidden until there's
+        # actually something pending.
+        self._modules_restart_label = QLabel("Restart IT Toolbox to apply.")
+        self._modules_restart_label.hide()
+        layout.addWidget(self._modules_restart_label)
+        return box
+
+    def _on_module_toggled(self) -> None:
+        settings.save_disabled_modules(
+            {
+                module_id
+                for module_id, checkbox in self._module_checkboxes.items()
+                if not checkbox.isChecked()
+            }
+        )
+        self._modules_restart_label.show()
 
     # -- Double-click action --------------------------------------------------
 

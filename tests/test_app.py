@@ -25,6 +25,8 @@ def _disable_external_tools(monkeypatch):
         "it_toolbox.modules.identity_management.ui.main_view.settings.load_jumpcloud_api_key",
         lambda: None,
     )
+    # Every module enabled, regardless of this machine's real saved setting.
+    monkeypatch.setattr("it_toolbox.modules.registry.settings.load_disabled_modules", set)
 
 
 def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
@@ -39,6 +41,44 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     assert window._module_list.item(2).text() == "Cloud Storage"
     assert window._module_list.item(3).text() == "Identity Management"
     assert window._module_list.item(4).text() == "Settings"
+
+
+def test_main_window_leaves_out_disabled_modules(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
+    monkeypatch.setattr(
+        "it_toolbox.modules.registry.settings.load_disabled_modules",
+        lambda: {"connection_manager", "identity_management"},
+    )
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert [window._module_list.item(i).text() for i in range(window._module_list.count())] == [
+        "Shell Launcher",
+        "Cloud Storage",
+        "Settings",
+    ]
+    assert window._stack.count() == 3
+
+
+def test_settings_module_cannot_be_disabled(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
+    monkeypatch.setattr(
+        "it_toolbox.modules.registry.settings.load_disabled_modules",
+        lambda: {
+            "connection_manager",
+            "shell_launcher",
+            "cloud_storage",
+            "identity_management",
+            "settings",
+        },
+    )
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._module_list.count() == 1
+    assert window._module_list.item(0).text() == "Settings"
 
 
 def test_main_window_has_a_real_window_icon(qtbot, monkeypatch):
