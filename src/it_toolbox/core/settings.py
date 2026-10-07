@@ -93,6 +93,30 @@ def save_manual_connections(connections: list[dict]) -> None:
     manual_connections_path().write_text(json.dumps(connections))
 
 
+def automations_path() -> Path:
+    return data_dir() / "automations.json"
+
+
+def load_automations() -> list[dict]:
+    """Saved session automations (scripts typed into an RDP/SSH tab via
+    its tab right-click "Run Automation" menu), as raw {"name": ...,
+    "content": ...} dicts -- kept free of any dependency on
+    widgets/manage_automations_dialog.Automation, same split as
+    load_manual_connections.
+    """
+    path = automations_path()
+    if not path.is_file():
+        return []
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_automations(automations: list[dict]) -> None:
+    automations_path().write_text(json.dumps(automations))
+
+
 def qemu_vm_ip_overrides_path() -> Path:
     return data_dir() / "qemu_vm_ip_overrides.json"
 
@@ -707,3 +731,58 @@ def save_include_prerelease_updates(enabled: bool) -> None:
         path.write_text("1")
     else:
         path.unlink(missing_ok=True)
+
+
+def disabled_modules_path() -> Path:
+    return data_dir() / "disabled_modules.json"
+
+
+def load_disabled_modules() -> set[str]:
+    """ToolModule ids the user has switched off in Settings > Modules,
+    so they're left out of the sidebar entirely (see
+    modules/registry.load_modules). Empty -- every module enabled -- when
+    never configured, or on a missing/corrupt file.
+    """
+    path = disabled_modules_path()
+    if not path.is_file():
+        return set()
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return set()
+    if not isinstance(raw, list):
+        return set()
+    return {module_id for module_id in raw if isinstance(module_id, str)}
+
+
+def save_disabled_modules(module_ids: set[str]) -> None:
+    path = disabled_modules_path()
+    if module_ids:
+        path.write_text(json.dumps(sorted(module_ids)))
+    else:
+        path.unlink(missing_ok=True)
+
+
+RECENT_MBOX_FILES_LIMIT = 10
+
+
+def recent_mbox_files_path() -> Path:
+    return data_dir() / "recent_mbox_files.json"
+
+
+def load_recent_mbox_files() -> list[str]:
+    """Mbox files the Mbox Browser has opened, most recent first."""
+    path = recent_mbox_files_path()
+    if not path.is_file():
+        return []
+    try:
+        files = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(files, list):
+        return []
+    return [f for f in files if isinstance(f, str)][:RECENT_MBOX_FILES_LIMIT]
+
+
+def save_recent_mbox_files(files: list[str]) -> None:
+    recent_mbox_files_path().write_text(json.dumps(files[:RECENT_MBOX_FILES_LIMIT]))

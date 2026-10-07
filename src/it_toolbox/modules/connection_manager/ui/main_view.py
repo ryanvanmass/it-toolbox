@@ -2,7 +2,8 @@ import base64
 import platform
 
 import shiboken6
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -1055,8 +1056,12 @@ class ConnectionManagerView(QWidget):
             and item.data(0, CATEGORY_ROLE) is None
             and item.data(0, INSTANCE_ROLE) is None
         ):
+            project_id = item.data(0, PROJECT_ID_ROLE)
             menu = QMenu(self)
             menu.addAction("Refresh").triggered.connect(lambda: self._refresh_project(item))
+            menu.addAction("Open in GCP Console").triggered.connect(
+                lambda: QDesktopServices.openUrl(QUrl(gcp_client.console_url(project_id)))
+            )
             menu.addAction("Create VM…").triggered.connect(lambda: self._on_create_gcp_vm_clicked(item))
             menu.exec(self._tree.viewport().mapToGlobal(pos))
             return
