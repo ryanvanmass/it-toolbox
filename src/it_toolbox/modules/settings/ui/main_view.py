@@ -68,6 +68,7 @@ from it_toolbox.modules.connection_manager import (
     qemu_provisioning,
 )
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
+from it_toolbox.widgets.manage_automations_dialog import Automation, ManageAutomationsDialog
 from it_toolbox.widgets.rclone_location_picker import (
     clear_rclone_path,
     prompt_for_rclone_path,
@@ -221,6 +222,7 @@ class SettingsView(QWidget):
                 ],
             ),
             ("Terminal", [self._build_terminal_font_size_section()]),
+            ("Automations", [self._build_automations_section()]),
         ]
 
         # A QTreeWidget (not QListWidget), used flat with no children --
@@ -1275,6 +1277,51 @@ class SettingsView(QWidget):
     def _on_rdp_keyboard_layout_changed(self, index: int) -> None:
         _, layout_id = RDP_KEYBOARD_LAYOUT_PRESETS[index]
         settings.save_rdp_keyboard_layout(layout_id)
+
+    # -- Automations ----------------------------------------------------------
+
+    def _build_automations_section(self) -> QGroupBox:
+        box = QGroupBox("Automations")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Saved scripts you can type into an open RDP or SSH session: right-click "
+            "the session's tab and choose Run Automation. Each line is typed as "
+            "keystrokes into whatever has focus in that session, so open the shell "
+            "or window it should go to first. Nothing is read back from the session."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._automations_count_label = QLabel()
+        layout.addWidget(self._automations_count_label)
+        self._refresh_automations_count()
+
+        manage_button = QPushButton("Manage Automations…")
+        manage_button.clicked.connect(self._on_manage_automations_clicked)
+        button_row = QHBoxLayout()
+        button_row.addWidget(manage_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+        return box
+
+    def _refresh_automations_count(self) -> None:
+        count = len(settings.load_automations())
+        self._automations_count_label.setText(
+            f"{count} saved automation{'' if count == 1 else 's'}."
+        )
+
+    # Split out from _on_manage_automations_clicked so tests can drive the
+    # dialog without ever calling its exec() (a real, blocking modal).
+    def _make_manage_automations_dialog(self) -> ManageAutomationsDialog:
+        automations = [Automation.from_dict(a) for a in settings.load_automations()]
+        return ManageAutomationsDialog(automations, parent=self)
+
+    def _on_manage_automations_clicked(self) -> None:
+        dialog = self._make_manage_automations_dialog()
+        dialog.exec()
+        settings.save_automations([a.to_dict() for a in dialog.automations()])
+        self._refresh_automations_count()
 
     # -- Terminal font size ---------------------------------------------------
 

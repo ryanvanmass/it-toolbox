@@ -47,6 +47,7 @@ def _make_view(
     jumpcloud_key_configured=False,
     gcp_ssh_key_override=None,
     gcp_ssh_public_key=None,
+    automations=None,
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
     # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
@@ -74,6 +75,7 @@ def _make_view(
     monkeypatch.setattr(settings, "load_gcp_ssh_key_path", lambda: gcp_ssh_key_override)
     monkeypatch.setattr(settings, "resolve_gcp_ssh_public_key", lambda: gcp_ssh_public_key)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
+    monkeypatch.setattr(settings, "load_automations", lambda: list(automations or []))
 
     def _get_gcloud_version():
         if isinstance(gcloud_version, Exception):
@@ -1229,3 +1231,41 @@ def test_linux_tools_remove_asks_then_removes(qtbot, monkeypatch):
 
     qtbot.waitUntil(lambda: view._linux_tools_action_button.text() == "Set Up Linux Tools")
     assert removed == [1]
+
+
+def test_automations_section_shows_saved_count(qtbot, monkeypatch):
+    view = _make_view(
+        qtbot, monkeypatch, automations=[{"name": "a", "content": "x"}, {"name": "b", "content": "y"}]
+    )
+
+    assert view._automations_count_label.text() == "2 saved automations."
+
+
+def test_manage_automations_saves_the_dialog_result(qtbot, monkeypatch):
+    from it_toolbox.widgets.manage_automations_dialog import Automation
+
+    view = _make_view(qtbot, monkeypatch, automations=[{"name": "old", "content": "ls"}])
+    saved = []
+    monkeypatch.setattr(settings, "save_automations", lambda a: saved.append(a))
+
+    class _FakeDialog:
+        def exec(self):
+            return 0
+
+        def automations(self):
+            return [Automation("new", "whoami\n")]
+
+    monkeypatch.setattr(view, "_make_manage_automations_dialog", lambda: _FakeDialog())
+
+    view._on_manage_automations_clicked()
+
+    assert saved == [[{"name": "new", "content": "whoami\n"}]]
+
+
+def test_manage_automations_dialog_is_seeded_from_saved_automations(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, automations=[{"name": "old", "content": "ls"}])
+
+    dialog = view._make_manage_automations_dialog()
+    qtbot.addWidget(dialog)
+
+    assert [(a.name, a.content) for a in dialog.automations()] == [("old", "ls")]

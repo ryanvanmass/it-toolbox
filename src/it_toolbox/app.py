@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -15,8 +16,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from it_toolbox.core import settings
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.registry import load_modules
+from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 try:
     # RdpWidget loads the FreeRDP native libraries at import time and
@@ -187,11 +190,40 @@ class MainWindow(QMainWindow):
         if index == -1:
             return None
         widget = self._session_tabs.widget(index)
-        if RdpWidget is None or not isinstance(widget, RdpWidget):
+        is_rdp = RdpWidget is not None and isinstance(widget, RdpWidget)
+        if not is_rdp and not isinstance(widget, TerminalWidget):
             return None
         menu = QMenu(self)
-        menu.addAction("Refresh Resolution").triggered.connect(widget.refresh_resolution)
-        return menu
+        if is_rdp:
+            menu.addAction("Refresh Resolution").triggered.connect(widget.refresh_resolution)
+        automations = settings.load_automations()
+        if automations:
+            submenu = menu.addMenu("Run Automation")
+            tab_title = self._session_tabs.tabText(index)
+            for automation in automations:
+                submenu.addAction(automation["name"]).triggered.connect(
+                    lambda checked=False, a=automation: self._run_automation(
+                        widget, tab_title, a["name"], a["content"]
+                    )
+                )
+        return menu if menu.actions() else None
+
+    def _run_automation(self, widget, tab_title: str, name: str, content: str) -> None:
+        """Types a saved automation into a session tab after a confirmation
+        -- it's a real, unreviewed action against a live session (possibly
+        a root shell or an admin desktop), and there's no undo once it's
+        been typed. Nothing comes back from the remote side either, so
+        this is fire-and-forget past the prompt.
+        """
+        reply = QMessageBox.question(
+            self,
+            "Run Automation",
+            f'Type "{name}" into {tab_title}? Each line is entered as if typed at the '
+            "keyboard, into whatever currently has focus in that session.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        widget.send_text(content)
 
     def _on_session_tab_context_menu(self, pos) -> None:
         tab_bar = self._session_tabs.tabBar()
