@@ -707,3 +707,33 @@ def save_include_prerelease_updates(enabled: bool) -> None:
         path.write_text("1")
     else:
         path.unlink(missing_ok=True)
+
+
+def disabled_modules_path() -> Path:
+    return data_dir() / "disabled_modules.json"
+
+
+def load_disabled_modules() -> set[str]:
+    """ToolModule ids the user has switched off in Settings > Modules,
+    so they're left out of the sidebar entirely (see
+    modules/registry.load_modules). Empty -- every module enabled -- when
+    never configured, or on a missing/corrupt file.
+    """
+    path = disabled_modules_path()
+    if not path.is_file():
+        return set()
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return set()
+    if not isinstance(raw, list):
+        return set()
+    return {module_id for module_id in raw if isinstance(module_id, str)}
+
+
+def save_disabled_modules(module_ids: set[str]) -> None:
+    path = disabled_modules_path()
+    if module_ids:
+        path.write_text(json.dumps(sorted(module_ids)))
+    else:
+        path.unlink(missing_ok=True)
