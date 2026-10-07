@@ -227,3 +227,130 @@ def test_removing_a_remote_deletes_it_and_refreshes(qtbot, monkeypatch):
 
     qtbot.waitUntil(lambda: deleted == ["myLocal"], timeout=1000)
     qtbot.waitUntil(lambda: root.childCount() == 0, timeout=1000)
+
+
+class _FakeMountManager:
+    def __init__(self):
+        self.mounts = {}
+        self.unmounted = []
+
+    def mount_point(self, name):
+        return self.mounts.get(name)
+
+    def mount(self, name):
+        self.mounts[name] = f"/home/me/CloudMounts/{name}"
+        return self.mounts[name]
+
+    def has_pending_uploads(self, name):
+        return False
+
+    def unmount(self, name):
+        self.unmounted.append(name)
+        self.mounts.pop(name, None)
+
+    def unmount_all(self):
+        for name in list(self.mounts):
+            self.unmount(name)
+
+
+def _remote_item(qtbot, view):
+    root = view._tree.topLevelItem(0)
+    qtbot.waitUntil(lambda: root.childCount() == 1, timeout=1000)
+    category = root.child(0)
+    qtbot.waitUntil(lambda: category.childCount() == 1, timeout=1000)
+    return category.child(0)
+
+
+def _patch_mounts(monkeypatch, problem=None):
+    manager = _FakeMountManager()
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.rclone_mount.manager", manager
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.rclone_mount.mount_support_problem",
+        lambda: problem,
+    )
+    return manager
+
+
+def test_mounting_a_remote_marks_it_mounted(qtbot, monkeypatch):
+    remotes = [RemoteConfig(name="gdrive", type="drive")]
+    manager = _patch_mounts(monkeypatch)
+    view = _make_view(qtbot, monkeypatch, remotes=remotes)
+    item = _remote_item(qtbot, view)
+
+    view._mount_remote(remotes[0])
+
+    qtbot.waitUntil(lambda: item.text(0) == "gdrive (mounted)", timeout=1000)
+    assert item.toolTip(0) == "Mounted at /home/me/CloudMounts/gdrive"
+    assert item.data(0, REMOTE_ROLE) == remotes[0]
+
+    view._unmount_remote(remotes[0])
+
+    qtbot.waitUntil(lambda: item.text(0) == "gdrive", timeout=1000)
+    assert manager.unmounted == ["gdrive"]
+
+
+def test_mount_without_fuse_explains_instead_of_failing(qtbot, monkeypatch):
+    remotes = [RemoteConfig(name="gdrive", type="drive")]
+    manager = _patch_mounts(monkeypatch, problem="Mounting needs WinFsp")
+    view = _make_view(qtbot, monkeypatch, remotes=remotes)
+    _remote_item(qtbot, view)
+    warnings = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.QMessageBox.warning",
+        lambda parent, title, text: warnings.append((title, text)),
+    )
+
+    view._mount_remote(remotes[0])
+
+    assert warnings == [("Can't mount remote", "Mounting needs WinFsp")]
+    assert manager.mounts == {}
+
+
+def test_mount_failure_shows_rclone_error(qtbot, monkeypatch):
+    remotes = [RemoteConfig(name="gdrive", type="drive")]
+    manager = _patch_mounts(monkeypatch)
+
+    def failing_mount(name):
+        raise RuntimeError("couldn't connect")
+
+    manager.mount = failing_mount
+    view = _make_view(qtbot, monkeypatch, remotes=remotes)
+    item = _remote_item(qtbot, view)
+    warnings = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.QMessageBox.warning",
+        lambda parent, title, text: warnings.append((title, text)),
+    )
+
+    view._mount_remote(remotes[0])
+
+    qtbot.waitUntil(
+        lambda: warnings == [("Failed to mount remote", "couldn't connect")], timeout=1000
+    )
+    assert item.text(0) == "gdrive"
+
+
+def test_removing_a_mounted_remote_unmounts_it_first(qtbot, monkeypatch):
+    remotes = [RemoteConfig(name="gdrive", type="drive")]
+    manager = _patch_mounts(monkeypatch)
+    manager.mounts["gdrive"] = "/home/me/CloudMounts/gdrive"
+    view = _make_view(qtbot, monkeypatch, remotes=remotes)
+    item = _remote_item(qtbot, view)
+    assert item.text(0) == "gdrive (mounted)"
+
+    deleted = []
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.rclone_client.delete_remote",
+        lambda name: deleted.append(name),
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.cloud_storage.ui.main_view.QMessageBox.question",
+        lambda *a, **k: QMessageBox.StandardButton.Yes,
+    )
+
+    view._remove_remote(remotes[0])
+
+    qtbot.waitUntil(lambda: deleted == ["gdrive"], timeout=1000)
+    assert manager.unmounted == ["gdrive"]
