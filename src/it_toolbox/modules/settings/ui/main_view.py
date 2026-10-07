@@ -68,6 +68,7 @@ from it_toolbox.modules.connection_manager import (
     qemu_provisioning,
 )
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
+from it_toolbox.widgets.manage_automations_dialog import Automation, ManageAutomationsDialog
 from it_toolbox.widgets.rclone_location_picker import (
     clear_rclone_path,
     prompt_for_rclone_path,
@@ -196,6 +197,7 @@ class SettingsView(QWidget):
                 "General",
                 [
                     self._build_updates_section(),
+                    self._build_modules_section(),
                     self._build_double_click_action_section(),
                     self._build_backup_section(),
                 ],
@@ -221,6 +223,7 @@ class SettingsView(QWidget):
                 ],
             ),
             ("Terminal", [self._build_terminal_font_size_section()]),
+            ("Automations", [self._build_automations_section()]),
         ]
 
         # A QTreeWidget (not QListWidget), used flat with no children --
@@ -1295,6 +1298,51 @@ class SettingsView(QWidget):
         _, layout_id = RDP_KEYBOARD_LAYOUT_PRESETS[index]
         settings.save_rdp_keyboard_layout(layout_id)
 
+    # -- Automations ----------------------------------------------------------
+
+    def _build_automations_section(self) -> QGroupBox:
+        box = QGroupBox("Automations")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Saved scripts you can type into an open RDP or SSH session: right-click "
+            "the session's tab and choose Run Automation. Each line is typed as "
+            "keystrokes into whatever has focus in that session, so open the shell "
+            "or window it should go to first. Nothing is read back from the session."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._automations_count_label = QLabel()
+        layout.addWidget(self._automations_count_label)
+        self._refresh_automations_count()
+
+        manage_button = QPushButton("Manage Automations…")
+        manage_button.clicked.connect(self._on_manage_automations_clicked)
+        button_row = QHBoxLayout()
+        button_row.addWidget(manage_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+        return box
+
+    def _refresh_automations_count(self) -> None:
+        count = len(settings.load_automations())
+        self._automations_count_label.setText(
+            f"{count} saved automation{'' if count == 1 else 's'}."
+        )
+
+    # Split out from _on_manage_automations_clicked so tests can drive the
+    # dialog without ever calling its exec() (a real, blocking modal).
+    def _make_manage_automations_dialog(self) -> ManageAutomationsDialog:
+        automations = [Automation.from_dict(a) for a in settings.load_automations()]
+        return ManageAutomationsDialog(automations, parent=self)
+
+    def _on_manage_automations_clicked(self) -> None:
+        dialog = self._make_manage_automations_dialog()
+        dialog.exec()
+        settings.save_automations([a.to_dict() for a in dialog.automations()])
+        self._refresh_automations_count()
+
     # -- Terminal font size ---------------------------------------------------
 
     def _build_terminal_font_size_section(self) -> QGroupBox:
@@ -1328,6 +1376,44 @@ class SettingsView(QWidget):
     def _on_terminal_font_size_changed(self, index: int) -> None:
         _, size = TERMINAL_FONT_SIZE_PRESETS[index]
         settings.save_terminal_font_size(size)
+
+    # -- Modules --------------------------------------------------------------
+
+    def _build_modules_section(self) -> QGroupBox:
+        # Imported here, not at the top: registry imports SettingsModule,
+        # which imports this file -- a top-level import would be circular.
+        from it_toolbox.modules.registry import OPTIONAL_MODULES
+
+        box = QGroupBox("Modules")
+        layout = QVBoxLayout(box)
+        layout.addWidget(QLabel("Choose which tools appear in the sidebar."))
+
+        disabled = settings.load_disabled_modules()
+        self._module_checkboxes: dict[str, QCheckBox] = {}
+        for module_class in OPTIONAL_MODULES:
+            checkbox = QCheckBox(module_class.display_name)
+            checkbox.setChecked(module_class.id not in disabled)
+            checkbox.checkStateChanged.connect(self._on_module_toggled)
+            self._module_checkboxes[module_class.id] = checkbox
+            layout.addWidget(checkbox)
+
+        # Modules are only built once, at startup (see registry.load_modules),
+        # so a change here can't add/remove one live -- hidden until there's
+        # actually something pending.
+        self._modules_restart_label = QLabel("Restart IT Toolbox to apply.")
+        self._modules_restart_label.hide()
+        layout.addWidget(self._modules_restart_label)
+        return box
+
+    def _on_module_toggled(self) -> None:
+        settings.save_disabled_modules(
+            {
+                module_id
+                for module_id, checkbox in self._module_checkboxes.items()
+                if not checkbox.isChecked()
+            }
+        )
+        self._modules_restart_label.show()
 
     # -- Double-click action --------------------------------------------------
 

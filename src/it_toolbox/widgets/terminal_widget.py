@@ -218,6 +218,16 @@ class TerminalWidget(QPlainTextEdit):
         if text:
             self._pty.write(text.encode())
 
+    def send_text(self, text: str) -> None:
+        """Types text into the session as if entered at the keyboard --
+        used by the session tab's "Run Automation" menu. Line breaks are
+        sent as Enter's own byte (CR, see _SPECIAL_KEYS) rather than LF,
+        so each line is submitted the same way a typed one would be.
+        """
+        normalized = text.replace("\r\n", "\n").replace("\n", "\r")
+        if normalized:
+            self._pty.write(normalized.encode())
+
     def _paste_clipboard(self) -> None:
         text = QApplication.clipboard().text()
         if text:

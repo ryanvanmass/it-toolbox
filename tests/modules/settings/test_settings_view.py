@@ -48,6 +48,8 @@ def _make_view(
     jumpcloud_key_configured=False,
     gcp_ssh_key_override=None,
     gcp_ssh_public_key=None,
+    automations=None,
+    disabled_modules=frozenset(),
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
     # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
@@ -63,6 +65,7 @@ def _make_view(
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
     monkeypatch.setattr(settings, "load_rdp_keyboard_layout", lambda: rdp_keyboard_layout)
     monkeypatch.setattr(settings, "load_terminal_font_size", lambda: terminal_font_size)
+    monkeypatch.setattr(settings, "load_disabled_modules", lambda: disabled_modules)
     monkeypatch.setattr(
         settings, "load_default_double_click_action", lambda: default_double_click_action
     )
@@ -75,6 +78,7 @@ def _make_view(
     monkeypatch.setattr(settings, "load_gcp_ssh_key_path", lambda: gcp_ssh_key_override)
     monkeypatch.setattr(settings, "resolve_gcp_ssh_public_key", lambda: gcp_ssh_public_key)
     monkeypatch.setattr(gcp_auth, "is_available", lambda: gcloud_available)
+    monkeypatch.setattr(settings, "load_automations", lambda: list(automations or []))
 
     def _get_gcloud_version():
         if isinstance(gcloud_version, Exception):
@@ -182,6 +186,40 @@ def test_toggling_include_prerelease_checkbox_saves_it(qtbot, monkeypatch):
     view._include_prerelease_checkbox.setChecked(True)
 
     assert saved == [True]
+
+
+def test_modules_section_lists_every_module_but_settings_checked_by_default(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    assert list(view._module_checkboxes) == [
+        "connection_manager",
+        "shell_launcher",
+        "cloud_storage",
+        "general_tools",
+        "identity_management",
+    ]
+    assert all(checkbox.isChecked() for checkbox in view._module_checkboxes.values())
+    assert view._modules_restart_label.isHidden()
+
+
+def test_modules_section_unchecks_saved_disabled_modules(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, disabled_modules={"identity_management"})
+
+    assert not view._module_checkboxes["identity_management"].isChecked()
+    assert view._module_checkboxes["connection_manager"].isChecked()
+
+
+def test_toggling_a_module_saves_it_and_asks_for_restart(qtbot, monkeypatch):
+    saved = []
+    monkeypatch.setattr(settings, "save_disabled_modules", lambda ids: saved.append(ids))
+    view = _make_view(qtbot, monkeypatch)
+
+    view._module_checkboxes["cloud_storage"].setChecked(False)
+    view._module_checkboxes["shell_launcher"].setChecked(False)
+    view._module_checkboxes["cloud_storage"].setChecked(True)
+
+    assert saved == [{"cloud_storage"}, {"cloud_storage", "shell_launcher"}, {"shell_launcher"}]
+    assert not view._modules_restart_label.isHidden()
 
 
 def test_check_updates_passes_include_prerelease_flag(qtbot, monkeypatch):
@@ -1294,3 +1332,41 @@ def test_linux_tools_remove_asks_then_removes(qtbot, monkeypatch):
 
     qtbot.waitUntil(lambda: view._linux_tools_action_button.text() == "Set Up Linux Tools")
     assert removed == [1]
+
+
+def test_automations_section_shows_saved_count(qtbot, monkeypatch):
+    view = _make_view(
+        qtbot, monkeypatch, automations=[{"name": "a", "content": "x"}, {"name": "b", "content": "y"}]
+    )
+
+    assert view._automations_count_label.text() == "2 saved automations."
+
+
+def test_manage_automations_saves_the_dialog_result(qtbot, monkeypatch):
+    from it_toolbox.widgets.manage_automations_dialog import Automation
+
+    view = _make_view(qtbot, monkeypatch, automations=[{"name": "old", "content": "ls"}])
+    saved = []
+    monkeypatch.setattr(settings, "save_automations", lambda a: saved.append(a))
+
+    class _FakeDialog:
+        def exec(self):
+            return 0
+
+        def automations(self):
+            return [Automation("new", "whoami\n", "Bash")]
+
+    monkeypatch.setattr(view, "_make_manage_automations_dialog", lambda: _FakeDialog())
+
+    view._on_manage_automations_clicked()
+
+    assert saved == [[{"name": "new", "content": "whoami\n", "shell": "Bash"}]]
+
+
+def test_manage_automations_dialog_is_seeded_from_saved_automations(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, automations=[{"name": "old", "content": "ls"}])
+
+    dialog = view._make_manage_automations_dialog()
+    qtbot.addWidget(dialog)
+
+    assert [(a.name, a.content) for a in dialog.automations()] == [("old", "ls")]
