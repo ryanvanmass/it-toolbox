@@ -7,6 +7,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QInputDialog,
     QLineEdit,
     QMainWindow,
@@ -171,6 +172,20 @@ def _instance_supports_password_reset(instance: Instance) -> bool:
     it doesn't apply.
     """
     return instance.os_hint != "linux"
+
+
+def _gcp_ssh_private_key_path() -> str | None:
+    """The private half of the key configured for GCP's "Upload Public
+    Key…" action, so SFTP authenticates with the same key that action
+    granted. None (fall back to paramiko's agent/default-key search) when
+    nothing is configured or only a .pub file with no private key sibling.
+    """
+    key_path = settings.load_gcp_ssh_key_path()
+    if key_path is None:
+        return None
+    if key_path.suffix == ".pub":
+        key_path = key_path.with_suffix("")
+    return str(key_path) if key_path.is_file() else None
 
 
 def _instance_supports_ssh_key_upload(instance: Instance) -> bool:
@@ -1072,6 +1087,7 @@ class ConnectionManagerView(QWidget):
         rdp_action = menu.addAction("Connect via RDP")
         ssh_action = menu.addAction("Connect via SSH")
         sftp_action = menu.addAction("Connect via SFTP")
+        upload_files_action = menu.addAction("Upload Files…")
         menu.addSeparator()
         turn_on_action = menu.addAction("Turn On")
         turn_off_action = menu.addAction("Turn Off")
@@ -1093,6 +1109,10 @@ class ConnectionManagerView(QWidget):
             self._start_session_from_instance(instance, "ssh")
         elif chosen is sftp_action:
             self._start_session_from_instance(instance, "sftp")
+        elif chosen is upload_files_action:
+            upload_paths = self._pick_files_to_upload(instance.name)
+            if upload_paths:
+                self._start_session_from_instance(instance, "sftp", upload_paths=upload_paths)
         elif chosen is turn_on_action:
             self._run_instance_power_action(instance, "start")
         elif chosen is turn_off_action:
@@ -1138,6 +1158,7 @@ class ConnectionManagerView(QWidget):
         # stay available regardless.
         connect_action = menu.addAction("Connect via SPICE") if _spice_mode() is not None else None
         sftp_action = menu.addAction("Connect via SFTP")
+        upload_files_action = menu.addAction("Upload Files…")
         menu.addSeparator()
         start_action = menu.addAction("Start")
         pause_action = menu.addAction("Pause")
@@ -1158,6 +1179,10 @@ class ConnectionManagerView(QWidget):
             self._connect_qemu(host, vm)
         elif chosen is sftp_action:
             self._start_qemu_sftp_session(host, vm)
+        elif chosen is upload_files_action:
+            upload_paths = self._pick_files_to_upload(vm.name)
+            if upload_paths:
+                self._start_qemu_sftp_session(host, vm, upload_paths=upload_paths)
         elif chosen is start_action:
             self._run_qemu_power_action(host, vm, "start")
         elif chosen is pause_action:
@@ -1198,19 +1223,23 @@ class ConnectionManagerView(QWidget):
             if host_item is not None:
                 self._load_qemu_vms(host_item, host)
 
-    def _start_qemu_sftp_session(self, host: QemuHost, vm: QemuVm) -> None:
+    def _start_qemu_sftp_session(
+        self, host: QemuHost, vm: QemuVm, upload_paths: list[str] | None = None
+    ) -> None:
         override = self._qemu_vm_ip_overrides.get((host.name, vm.name))
         if override:
-            self._prompt_qemu_sftp_credentials(vm, override)
+            self._open_qemu_sftp(vm, override, upload_paths)
             return
 
         async_utils.run_in_background(
             lambda: qemu_client.get_vm_ip_address(host, vm.name),
-            on_result=lambda ip: self._on_qemu_vm_ip_resolved(host, vm, ip),
+            on_result=lambda ip: self._on_qemu_vm_ip_resolved(host, vm, ip, upload_paths),
             on_error=self._on_session_error,
         )
 
-    def _on_qemu_vm_ip_resolved(self, host: QemuHost, vm: QemuVm, ip: str | None) -> None:
+    def _on_qemu_vm_ip_resolved(
+        self, host: QemuHost, vm: QemuVm, ip: str | None, upload_paths: list[str] | None = None
+    ) -> None:
         if ip is None:
             # virsh domifaddr found nothing on any of its three sources
             # (see qemu_client.get_vm_ip_address) -- ask once and remember
@@ -1228,32 +1257,42 @@ class ConnectionManagerView(QWidget):
             ip = ip.strip()
             self._qemu_vm_ip_overrides[(host.name, vm.name)] = ip
             settings.save_qemu_vm_ip_overrides(self._qemu_vm_ip_overrides)
-        self._prompt_qemu_sftp_credentials(vm, ip)
+        self._open_qemu_sftp(vm, ip, upload_paths)
 
-    def _prompt_qemu_sftp_credentials(self, vm: QemuVm, ip: str) -> None:
-        default_username = settings.load_default_username() or ""
-        # No ManualConnection record exists for a QEMU VM to persist a
-        # password onto (same reasoning as the GCP-instance SFTP path) --
-        # the credentials dialog's own "remember" checkbox is hidden.
-        dialog = FtpCredentialsDialog("sftp", vm.name, default_username=default_username, show_remember=False, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        username = dialog.username() or default_username
+    def _open_qemu_sftp(self, vm: QemuVm, ip: str, upload_paths: list[str] | None = None) -> None:
+        # With a default username configured, connect straight away using
+        # the same SSH identity `ssh` itself would (agent or default key)
+        # and only ask for credentials if the guest rejects it -- see
+        # _sftp_auth_retry. Without one, ask upfront: there's nothing to
+        # try yet.
+        username = settings.load_default_username()
+        password = key_path = key_passphrase = None
         if not username:
-            QMessageBox.warning(self, "Username required", "A username is required to connect.")
-            return
+            # No ManualConnection record exists for a QEMU VM to persist a
+            # password onto (same reasoning as the GCP-instance SFTP path)
+            # -- the credentials dialog's own "remember" checkbox is hidden.
+            dialog = FtpCredentialsDialog("sftp", vm.name, show_remember=False, parent=self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            username = dialog.username()
+            if not username:
+                QMessageBox.warning(self, "Username required", "A username is required to connect.")
+                return
+            password = dialog.password() or None
+            key_path = dialog.key_path()
+            key_passphrase = dialog.key_passphrase()
 
         session = ftp_client.SftpSession(
             ip,
             SFTP_PORT,
             username,
-            password=dialog.password() or None,
-            key_path=dialog.key_path(),
-            key_passphrase=dialog.key_passphrase(),
+            password=password,
+            key_path=key_path,
+            key_passphrase=key_passphrase,
         )
         session_id = self._next_session_id
         self._next_session_id += 1
-        self._embed_ftp(session_id, vm.name, session)
+        self._embed_ftp(session_id, vm.name, session, upload_paths=upload_paths)
 
         label = f"{vm.name} (SFTP) — {ip}:{SFTP_PORT}"
         self._active_sessions_dialog.add_session(session_id, label)
@@ -1386,7 +1425,9 @@ class ConnectionManagerView(QWidget):
         index = self._tabs.addTab(browser, bucket.name)
         self._tabs.setCurrentIndex(index)
 
-    def _start_session_from_instance(self, instance: Instance, kind: str) -> None:
+    def _start_session_from_instance(
+        self, instance: Instance, kind: str, upload_paths: list[str] | None = None
+    ) -> None:
         if kind == "rdp" and RdpWidget is None:
             QMessageBox.warning(
                 self,
@@ -1405,7 +1446,7 @@ class ConnectionManagerView(QWidget):
             username = self._instance_ssh_username_overrides.get(key)
         if username is None:
             username = settings.load_default_username()
-        if username is None:
+        if username is None and kind != "sftp":  # sftp asks in its own dialog below
             username, ok = QInputDialog.getText(
                 self, "Username", f"Username for {instance.name} (leave blank to be prompted):"
             )
@@ -1432,20 +1473,27 @@ class ConnectionManagerView(QWidget):
                 )
                 if not ok:
                     return
-        elif kind == "sftp":
+        elif kind == "sftp" and username is None:
             # Same "never persisted for a GCP instance" reasoning as RDP's
             # password above -- there's no ManualConnection here to
             # remember it on, so the credentials dialog's own "remember"
-            # checkbox is hidden.
-            dialog = FtpCredentialsDialog(
-                "sftp", instance.name, default_username=username or "", show_remember=False, parent=self
-            )
+            # checkbox is hidden. Only asked upfront when there's no
+            # username to try; otherwise this connects with the same SSH
+            # identity "Connect via SSH" uses (the key from "Upload Public
+            # Key…", the agent, or a default key) and only falls back to
+            # this dialog if that's rejected -- see _sftp_auth_retry.
+            dialog = FtpCredentialsDialog("sftp", instance.name, show_remember=False, parent=self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            username = dialog.username() or username
+            username = dialog.username() or None
             password = dialog.password() or None
             key_path = dialog.key_path()
             key_passphrase = dialog.key_passphrase()
+            if username is None:
+                QMessageBox.warning(self, "Username required", "A username is required to connect.")
+                return
+        elif kind == "sftp":
+            key_path = _gcp_ssh_private_key_path()
 
         self._connect(
             display_name=instance.name,
@@ -1458,7 +1506,34 @@ class ConnectionManagerView(QWidget):
             password=password,
             key_path=key_path,
             key_passphrase=key_passphrase,
+            upload_paths=upload_paths,
         )
+
+    def _pick_files_to_upload(self, display_name: str) -> list[str]:
+        paths, _ = QFileDialog.getOpenFileNames(self, f"Upload Files to {display_name}")
+        return paths
+
+    def _sftp_auth_retry(self, display_name: str):
+        """FtpBrowserWidget's on_auth_failed hook for VM SFTP sessions:
+        the VM's existing SSH identity was rejected, so ask for a
+        password/key (prefilled with the username just tried) and retry.
+        """
+
+        def retry(session: ftp_client.SftpSession) -> bool:
+            dialog = FtpCredentialsDialog(
+                "sftp", display_name, default_username=session.username, show_remember=False, parent=self
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+            session.set_credentials(
+                dialog.username() or session.username,
+                password=dialog.password() or None,
+                key_path=dialog.key_path(),
+                key_passphrase=dialog.key_passphrase(),
+            )
+            return True
+
+        return retry
 
     def _run_instance_power_action(self, instance: Instance, action: str) -> None:
         if action == "stop":
@@ -1729,6 +1804,7 @@ class ConnectionManagerView(QWidget):
         password: str | None = None,
         key_path: str | None = None,
         key_passphrase: str | None = None,
+        upload_paths: list[str] | None = None,
     ) -> None:
         target = IapTunnelTarget(
             project=project_id,
@@ -1742,7 +1818,7 @@ class ConnectionManagerView(QWidget):
         async_utils.run_in_background(
             lambda: self._start_tunnel(target),
             on_result=lambda tunnel: self._on_tunnel_ready(
-                tunnel, display_name, kind, username, password, key_path, key_passphrase
+                tunnel, display_name, kind, username, password, key_path, key_passphrase, upload_paths
             ),
             on_error=self._on_session_error,
         )
@@ -1764,6 +1840,7 @@ class ConnectionManagerView(QWidget):
         password: str | None = None,
         key_path: str | None = None,
         key_passphrase: str | None = None,
+        upload_paths: list[str] | None = None,
     ) -> None:
         session_id = self._next_session_id
         self._next_session_id += 1
@@ -1781,7 +1858,7 @@ class ConnectionManagerView(QWidget):
                 key_passphrase=key_passphrase,
                 skip_host_key_check=True,
             )
-            self._embed_ftp(session_id, display_name, session)
+            self._embed_ftp(session_id, display_name, session, upload_paths=upload_paths)
         else:
             self._embed_rdp(session_id, display_name, tunnel.port, username, password)
 
@@ -1855,8 +1932,17 @@ class ConnectionManagerView(QWidget):
         session_id: int,
         display_name: str,
         session: ftp_client.SftpSession | ftp_client.FtpSession,
+        upload_paths: list[str] | None = None,
     ) -> None:
-        browser = FtpBrowserWidget(session, display_name)
+        # Any SFTP session gets a "wrong credentials, try again" prompt
+        # instead of a dead tab -- essential for the VM paths, which try
+        # the existing SSH identity first without asking (see
+        # _sftp_auth_retry); a Manual connection just gets a retry for a
+        # mistyped password.
+        on_auth_failed = self._sftp_auth_retry(display_name) if session.kind == "sftp" else None
+        browser = FtpBrowserWidget(
+            session, display_name, initial_uploads=upload_paths, on_auth_failed=on_auth_failed
+        )
         self._session_tab_widgets[session_id] = browser
         self._owned_tab_widgets.add(browser)
         index = self._tabs.addTab(browser, display_name)

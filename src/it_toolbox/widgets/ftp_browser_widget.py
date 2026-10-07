@@ -58,6 +58,7 @@ already serializes.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -213,12 +214,28 @@ class _TransferJob:
 
 
 class FtpBrowserWidget(QWidget):
+    """`initial_uploads` are local paths queued for upload into the
+    remote home directory as soon as the connection is up (Connection
+    Manager's "Upload Files…" VM action). `on_auth_failed`, if given, is
+    called with the session after an AuthenticationFailedError; it may
+    swap in new credentials via session.set_credentials() and return True
+    to retry, or False to give up -- lets a caller try the VM's existing
+    SSH identity first and only ask for a password/key when that fails.
+    """
+
     def __init__(
-        self, session: ftp_client.SftpSession | ftp_client.FtpSession, display_name: str, parent: QWidget | None = None
+        self,
+        session: ftp_client.SftpSession | ftp_client.FtpSession,
+        display_name: str,
+        parent: QWidget | None = None,
+        initial_uploads: list[str] | None = None,
+        on_auth_failed: Callable[[ftp_client.SftpSession], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self._session = session
         self._display_name = display_name
+        self._initial_uploads = list(initial_uploads or [])
+        self._on_auth_failed = on_auth_failed
         self._local_path = str(Path.home())
         self._remote_path = "/"
 
@@ -335,7 +352,21 @@ class FtpBrowserWidget(QWidget):
         if isinstance(error, ftp_client.UnknownHostKeyError):
             self._prompt_trust_host_key(error)
             return
+        if isinstance(error, ftp_client.AuthenticationFailedError) and self._on_auth_failed is not None:
+            self._retry_with_new_credentials()
+            return
         self._on_error(error)
+
+    def _retry_with_new_credentials(self) -> None:
+        try:
+            self._status_label.setText(f"Authentication failed for {self._display_name}")
+        except RuntimeError:
+            return  # tab was closed before the connection attempt finished
+        if not self._on_auth_failed(self._session):
+            self._status_label.setText("Connection cancelled.")
+            return
+        self._status_label.setText(f"Connecting to {self._display_name}…")
+        self._connect_remote()
 
     def _prompt_trust_host_key(self, error: ftp_client.UnknownHostKeyError) -> None:
         try:
@@ -378,6 +409,12 @@ class FtpBrowserWidget(QWidget):
                 self._on_error(error)
             self._session_ready = True
             self._process_transfer_queue()
+
+        if self._initial_uploads:
+            # Only queued -- _process_transfer_queue holds them until
+            # mark_ready_and_finish below, after the first listing.
+            uploads, self._initial_uploads = self._initial_uploads, []
+            self._upload_paths(uploads)
 
         self._remote_pane.set_path(self._remote_path)
         path = self._remote_path

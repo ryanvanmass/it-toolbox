@@ -41,6 +41,16 @@ class FtpClientError(Exception):
     single QMessageBox regardless of which backend raised it."""
 
 
+class AuthenticationFailedError(FtpClientError):
+    """Raised by SftpSession.connect() when the server rejected every
+    credential tried (or none were available at all -- no password, no
+    key, no agent). Split out from the generic FtpClientError so a caller
+    that connected with the VM's existing SSH identity first (agent or
+    default key, see main_view.py's GCP/QEMU SFTP paths) can fall back
+    to asking for a password/key and retry, rather than just failing.
+    """
+
+
 def _sha256_fingerprint(key: paramiko.PKey) -> str:
     digest = hashlib.sha256(key.asbytes()).digest()
     return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
@@ -181,7 +191,10 @@ class SftpSession:
         except UnknownHostKeyError:
             raise  # not a generic failure -- let the caller offer to trust it and retry
         except paramiko.AuthenticationException as exc:
-            raise FtpClientError(
+            # Includes PasswordRequiredException (an encrypted key with no
+            # passphrase given) -- also something new credentials can fix.
+            client.close()
+            raise AuthenticationFailedError(
                 f"Authentication failed for {self._username}@{self._host}."
             ) from exc
         except paramiko.BadHostKeyException as exc:
@@ -191,12 +204,38 @@ class SftpSession:
                 "expect that, remove its old entry from ~/.ssh/known_hosts and try again."
             ) from exc
         except paramiko.SSHException as exc:
+            client.close()
+            if "No authentication methods available" in str(exc):
+                # paramiko's way of saying no password was given and no
+                # agent/default key exists -- same remedy as a rejection.
+                raise AuthenticationFailedError(
+                    f"No credentials available for {self._username}@{self._host}."
+                ) from exc
             raise FtpClientError(f"Couldn't connect to {self._host}:{self._port} — {exc}") from exc
         except OSError as exc:
             raise FtpClientError(f"Couldn't connect to {self._host}:{self._port} — {exc}") from exc
 
         self._client = client
         self._sftp = client.open_sftp()
+
+    @property
+    def username(self) -> str:
+        return self._username
+
+    def set_credentials(
+        self,
+        username: str,
+        password: str | None = None,
+        key_path: str | None = None,
+        key_passphrase: str | None = None,
+    ) -> None:
+        """Replaces the credentials the next connect() uses -- for retrying
+        after an AuthenticationFailedError with ones the user just typed.
+        """
+        self._username = username
+        self._password = password or None
+        self._key_path = key_path or None
+        self._key_passphrase = key_passphrase or None
 
     def trust_host_key(self, hostname: str, key: paramiko.PKey) -> None:
         """Persists `key` as trusted for `hostname` by appending it to the

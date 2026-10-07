@@ -2327,10 +2327,12 @@ class _FakeFtpBrowserWidget(QWidget):
     relies on: close_session(), and captures the session it was given so
     tests can inspect the credentials/host/port main_view resolved."""
 
-    def __init__(self, session, display_name):
+    def __init__(self, session, display_name, initial_uploads=None, on_auth_failed=None):
         super().__init__()
         self.session = session
         self.display_name = display_name
+        self.initial_uploads = initial_uploads
+        self.on_auth_failed = on_auth_failed
 
     def close_session(self):
         pass
@@ -2528,7 +2530,14 @@ def test_gcp_sftp_connect_via_tunnel_embeds_browser(qtbot, monkeypatch):
 
 def test_start_session_from_instance_sftp_shows_credentials_dialog_without_remember(qtbot, monkeypatch):
     main_view_module = _patch_ftp(monkeypatch)
-    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: None)
+
+    def _make_dialog(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._username = "typed-user"
+        return dialog
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _make_dialog)
     view = _make_view(qtbot, monkeypatch)
     instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
 
@@ -2540,6 +2549,89 @@ def test_start_session_from_instance_sftp_shows_credentials_dialog_without_remem
     dialog = _FakeFtpCredentialsDialog.last_instance
     assert dialog.show_remember is False
     assert connect_calls[0]["kind"] == "sftp"
+    assert connect_calls[0]["username"] == "typed-user"
+
+
+def test_start_session_from_instance_sftp_with_known_username_skips_the_dialog(qtbot, monkeypatch, tmp_path):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    private_key = tmp_path / "gcp_key"
+    private_key.write_text("private")
+    (tmp_path / "gcp_key.pub").write_text("ssh-ed25519 AAAA")
+    monkeypatch.setattr(main_view_module.settings, "load_gcp_ssh_key_path", lambda: tmp_path / "gcp_key.pub")
+    view = _make_view(qtbot, monkeypatch)
+    instance = Instance(name="vm-1", zone="us-central1-a", project_id="p1", status="RUNNING")
+
+    connect_calls = []
+    monkeypatch.setattr(view, "_connect", lambda **kwargs: connect_calls.append(kwargs))
+
+    view._start_session_from_instance(instance, "sftp", upload_paths=["/tmp/a.txt"])
+
+    assert _FakeFtpCredentialsDialog.last_instance is None
+    assert connect_calls[0]["username"] == "root"
+    assert connect_calls[0]["password"] is None
+    # The private half of the "Upload Public Key…" key, not the .pub itself.
+    assert connect_calls[0]["key_path"] == str(private_key)
+    assert connect_calls[0]["upload_paths"] == ["/tmp/a.txt"]
+
+
+def test_gcp_sftp_tunnel_passes_upload_paths_and_auth_retry_to_browser(qtbot, monkeypatch):
+    _patch_ftp(monkeypatch)
+    view = _make_view(qtbot, monkeypatch)
+
+    view._on_tunnel_ready(_FakeTunnel(), "test-vm", "sftp", "alice", upload_paths=["/tmp/a.txt", "/tmp/b.txt"])
+
+    widget = view._tabs.widget(0)
+    assert widget.initial_uploads == ["/tmp/a.txt", "/tmp/b.txt"]
+    assert widget.on_auth_failed is not None
+
+
+def test_sftp_auth_retry_swaps_in_typed_credentials(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+
+    def _make_dialog(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._password = "typed-secret"
+        return dialog
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _make_dialog)
+    view = _make_view(qtbot, monkeypatch)
+    session = main_view_module.ftp_client.SftpSession("10.0.0.5", 22, "root")
+
+    assert view._sftp_auth_retry("myvm")(session) is True
+
+    dialog = _FakeFtpCredentialsDialog.last_instance
+    assert dialog.default_username == "root"
+    assert dialog.show_remember is False
+    assert session.username == "root"
+    assert session._password == "typed-secret"
+
+
+def test_sftp_auth_retry_cancelled_returns_false(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+
+    def _cancel(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._accepted = False
+        return dialog
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _cancel)
+    view = _make_view(qtbot, monkeypatch)
+    session = main_view_module.ftp_client.SftpSession("10.0.0.5", 22, "root", password="old")
+
+    assert view._sftp_auth_retry("myvm")(session) is False
+    assert session._password == "old"
+
+
+def test_gcp_ssh_private_key_path_ignores_a_pub_file_with_no_private_key(qtbot, monkeypatch, tmp_path):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    (tmp_path / "only.pub").write_text("ssh-ed25519 AAAA")
+    monkeypatch.setattr(main_view_module.settings, "load_gcp_ssh_key_path", lambda: tmp_path / "only.pub")
+    assert main_view_module._gcp_ssh_private_key_path() is None
+
+    monkeypatch.setattr(main_view_module.settings, "load_gcp_ssh_key_path", lambda: None)
+    assert main_view_module._gcp_ssh_private_key_path() is None
 
 
 def test_qemu_sftp_connect_discovers_ip_and_embeds_browser(qtbot, monkeypatch):
@@ -2589,6 +2681,64 @@ def test_qemu_sftp_connect_prompts_for_ip_when_discovery_fails_and_remembers_it(
     assert widget.session._host == "10.0.0.9"
     assert saved["overrides"][("lab", "myvm")] == "10.0.0.9"
     assert view._qemu_vm_ip_overrides[("lab", "myvm")] == "10.0.0.9"
+
+
+def test_qemu_sftp_with_default_username_connects_without_a_dialog(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: "root")
+    view = _make_view(qtbot, monkeypatch)
+    view._qemu_vm_ip_overrides[("lab", "myvm")] = "10.0.0.5"
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm, upload_paths=["/tmp/a.txt"])
+
+    assert _FakeFtpCredentialsDialog.last_instance is None
+    widget = view._tabs.widget(0)
+    assert widget.session.username == "root"
+    assert widget.session._password is None
+    assert widget.initial_uploads == ["/tmp/a.txt"]
+    assert widget.on_auth_failed is not None
+
+
+def test_qemu_sftp_without_default_username_asks_upfront(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: None)
+
+    def _make_dialog(kind, display_name, default_username="", show_remember=True, parent=None):
+        dialog = _FakeFtpCredentialsDialog(kind, display_name, default_username, show_remember, parent)
+        dialog._username = "alice"
+        dialog._password = "pw"
+        return dialog
+
+    monkeypatch.setattr(main_view_module, "FtpCredentialsDialog", _make_dialog)
+    view = _make_view(qtbot, monkeypatch)
+    view._qemu_vm_ip_overrides[("lab", "myvm")] = "10.0.0.5"
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._start_qemu_sftp_session(host, vm)
+
+    assert _FakeFtpCredentialsDialog.last_instance.show_remember is False
+    session = view._tabs.widget(0).session
+    assert session.username == "alice"
+    assert session._password == "pw"
+
+
+def test_qemu_sftp_without_default_username_and_blank_dialog_starts_nothing(qtbot, monkeypatch):
+    main_view_module = _patch_ftp(monkeypatch)
+    monkeypatch.setattr(main_view_module.settings, "load_default_username", lambda: None)
+    warnings = []
+    monkeypatch.setattr(main_view_module.QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a)))
+    view = _make_view(qtbot, monkeypatch)
+    view._qemu_vm_ip_overrides[("lab", "myvm")] = "10.0.0.5"
+
+    view._start_qemu_sftp_session(
+        QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system"), QemuVm(id="1", name="myvm", state="running")
+    )
+
+    assert view._tabs.count() == 0
+    assert warnings
 
 
 def test_qemu_sftp_connect_uses_stored_ip_override_without_discovery(qtbot, monkeypatch):

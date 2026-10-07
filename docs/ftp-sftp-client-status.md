@@ -156,6 +156,27 @@ an *actively running* transfer the same way — this is a pre-existing
 gap (it already existed for a single plain-file transfer) that a full
 fix would need to route through the same queue.
 
+## Upload Files on VMs, and reusing the SSH identity (#101)
+
+GCP instances and QEMU VMs also get an "Upload Files…" action: it picks
+local files (`QFileDialog.getOpenFileNames`) and opens the same SFTP
+browser with them passed as `FtpBrowserWidget(initial_uploads=...)`,
+which queues them into the remote home directory once `home_dir()` is
+known (still held back by `_session_ready` like any other job).
+
+Both VM SFTP paths ("Connect via SFTP" and "Upload Files…") no longer
+show the credentials dialog upfront when a username is already known
+(GCP: per-instance override or default username; QEMU: default
+username). They connect with the same identity `ssh` would use: the
+private half of the GCP "Upload Public Key…" key when configured, else
+paramiko's agent/default-key search. If the server rejects that,
+`SftpSession.connect()` raises `AuthenticationFailedError` (also used
+for an encrypted key with no passphrase, or no credentials at all), and
+the browser's `on_auth_failed` hook (`main_view._sftp_auth_retry`)
+shows the credentials dialog prefilled with the username, swaps them in
+via `SftpSession.set_credentials()`, and reconnects. Manual SFTP
+connections get the same retry for a mistyped password.
+
 ## What's done and verified
 
 Every new/changed unit is covered:
