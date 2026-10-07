@@ -57,3 +57,60 @@ def _drain_background_tasks(monkeypatch):
     QThreadPool.globalInstance().waitForDone(5000)
     for _ in range(3):  # queued cross-thread results arrive one loop pass later
         QCoreApplication.processEvents()
+
+
+# -- Shared sample data ------------------------------------------------------
+
+
+def _sample_messages():
+    from email.message import EmailMessage
+
+    def plain(subject, sender, body, date):
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = sender
+        message["To"] = "ops@example.com"
+        if date:
+            message["Date"] = date
+        message.set_content(body)
+        return message
+
+    invoice = plain("Invoice", "billing@example.com", "See attached.", "Sun, 05 Oct 2026 08:00:00 +0000")
+    invoice.add_attachment(
+        b"%PDF-1.4 fake", maintype="application", subtype="pdf", filename="invoice.pdf"
+    )
+    html_only = EmailMessage()
+    html_only["Subject"] = "=?utf-8?q?Caf=C3=A9_news?="
+    html_only["From"] = "news@example.com"
+    html_only["Date"] = "Tue, 07 Oct 2026 10:00:00 +0200"
+    html_only.set_content(
+        "<html><style>p{color:red}</style><body><p>Hello &amp; welcome</p></body></html>",
+        subtype="html",
+    )
+    return [
+        plain("Server down", "alice@example.com", "The backup server is unreachable.",
+              "Mon, 01 Jan 2024 09:00:00 +0000"),
+        invoice,
+        html_only,
+        plain("Disk alert", "bob@example.com", "the raid array is degraded",
+              "Mon, 06 Oct 2026 09:30:00 +0000"),
+        plain("No date", "carol@example.com", "Undated message", None),
+    ]
+
+
+@pytest.fixture
+def sample_mbox(tmp_path):
+    """Factory writing a small mbox archive (see _sample_messages for its
+    five messages, in file order) and returning its path."""
+    import mailbox
+
+    def make(name="archive.mbox"):
+        path = tmp_path / name
+        box = mailbox.mbox(str(path))
+        for message in _sample_messages():
+            box.add(message)
+        box.flush()
+        box.close()
+        return path
+
+    return make

@@ -4,6 +4,7 @@ from it_toolbox.modules import ToolModule
 from it_toolbox.modules.cloud_storage.module import CloudStorageModule
 from it_toolbox.modules.connection_manager.module import ConnectionManagerModule
 from it_toolbox.modules.identity_management.module import IdentityManagementModule
+from it_toolbox.modules.mbox_browser.module import MboxBrowserModule
 from it_toolbox.modules.settings.module import SettingsModule
 from it_toolbox.modules.shell_launcher.module import ShellLauncherModule
 
@@ -23,6 +24,7 @@ def load_modules(tabs: QTabWidget) -> list[ToolModule]:
         ConnectionManagerModule(tabs),
         ShellLauncherModule(tabs),
         CloudStorageModule(tabs),
+        MboxBrowserModule(tabs),
         IdentityManagementModule(),
         SettingsModule(),
     ]

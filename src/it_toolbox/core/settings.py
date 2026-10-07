@@ -707,3 +707,28 @@ def save_include_prerelease_updates(enabled: bool) -> None:
         path.write_text("1")
     else:
         path.unlink(missing_ok=True)
+
+
+RECENT_MBOX_FILES_LIMIT = 10
+
+
+def recent_mbox_files_path() -> Path:
+    return data_dir() / "recent_mbox_files.json"
+
+
+def load_recent_mbox_files() -> list[str]:
+    """Mbox files the Mbox Browser has opened, most recent first."""
+    path = recent_mbox_files_path()
+    if not path.is_file():
+        return []
+    try:
+        files = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(files, list):
+        return []
+    return [f for f in files if isinstance(f, str)][:RECENT_MBOX_FILES_LIMIT]
+
+
+def save_recent_mbox_files(files: list[str]) -> None:
+    recent_mbox_files_path().write_text(json.dumps(files[:RECENT_MBOX_FILES_LIMIT]))
