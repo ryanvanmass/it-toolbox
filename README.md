@@ -8,7 +8,9 @@ connection manager for RDP, SSH, and Cloud Storage.
 
 - **GCP project & instance browsing** — sign in with your Google account,
   pick which projects to show, and browse their Compute Engine instances
-  in a sidebar tree.
+  in a sidebar tree. Right-click a project (or its VMs folder) →
+  Create VM… to create a new instance: zone, machine type, a public or
+  project image, boot disk, and subnet.
 - **RDP**, tunneled over IAP:
   - An embedded RDP client built on `libfreerdp3` via `ctypes` — renders
     the remote desktop directly in the app, with mouse/keyboard input and

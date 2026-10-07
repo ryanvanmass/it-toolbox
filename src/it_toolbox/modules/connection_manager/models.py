@@ -41,6 +41,52 @@ class Instance:
 
 
 @dataclass(frozen=True)
+class GcpMachineType:
+    name: str  # e.g. "e2-medium"
+    guest_cpus: int
+    memory_mb: int
+
+
+@dataclass(frozen=True)
+class GcpSubnetwork:
+    name: str
+    network: str  # short network name, e.g. "default"
+    region: str  # short region name, e.g. "us-central1"
+    ip_cidr_range: str = ""
+
+
+@dataclass(frozen=True)
+class GcpImageChoice:
+    """One boot image CreateGcpVmDialog offers. `source_image` is what
+    instances.insert takes as initializeParams.sourceImage -- usually an
+    image family path ("projects/debian-cloud/global/images/family/
+    debian-12"), which always resolves to that family's newest image, so
+    the list never goes stale the way pinned image names would.
+    """
+
+    label: str
+    source_image: str
+    min_disk_gb: int = 10
+    os_hint: str | None = None  # "windows", "linux", or None if unknown
+
+
+@dataclass(frozen=True)
+class GcpInstanceSpec:
+    """Everything gcp_client.create_instance needs for a new Compute
+    Engine VM -- one boot disk, one NIC."""
+
+    project_id: str
+    name: str
+    zone: str  # short zone name, e.g. "us-central1-a"
+    machine_type: str  # short name, e.g. "e2-medium"
+    source_image: str
+    disk_size_gb: int
+    disk_type: str  # "pd-balanced", "pd-ssd", or "pd-standard"
+    subnetwork: GcpSubnetwork
+    external_ip: bool = True
+
+
+@dataclass(frozen=True)
 class GcsBucket:
     name: str
     project_id: str

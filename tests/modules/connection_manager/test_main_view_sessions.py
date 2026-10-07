@@ -3479,3 +3479,56 @@ def test_search_filters_glinet_hosts_and_survives_repopulating(qtbot, monkeypatc
     assert root.isHidden() is False
     assert root.child(0).isHidden() is False
     assert root.child(1).isHidden() is True
+
+
+class _FakeCreateGcpVmDialog:
+    """Stands in for CreateGcpVmDialog: records how it was opened and
+    "accepts" without any network calls."""
+
+    DialogCode = QDialog.DialogCode
+    opened = []
+
+    def __init__(self, project_id, default_zone=None, parent=None):
+        self.opened.append((project_id, default_zone))
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted
+
+
+@pytest.mark.parametrize("on_category", [False, True])
+def test_create_vm_opens_with_the_projects_usual_zone_and_refreshes(qtbot, monkeypatch, on_category):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    instances = [
+        Instance(name="a", zone="us-east1-b", project_id="p1", status="RUNNING"),
+        Instance(name="b", zone="us-east1-b", project_id="p1", status="RUNNING"),
+        Instance(name="c", zone="europe-west1-c", project_id="p1", status="RUNNING"),
+    ]
+    view = _make_view(qtbot, monkeypatch, instances=instances)
+    view._all_projects = [GcpProject(project_id="p1", display_name="Project One")]
+    view._apply_project_selection({"p1"})
+    project_item = view._tree.topLevelItem(0).child(0)
+    vms_item = project_item.child(0)
+    qtbot.waitUntil(lambda: vms_item.childCount() == 3, timeout=2000)
+
+    _FakeCreateGcpVmDialog.opened = []
+    monkeypatch.setattr(main_view_module, "CreateGcpVmDialog", _FakeCreateGcpVmDialog)
+    refreshed = []
+    monkeypatch.setattr(view, "_refresh_project", lambda item: refreshed.append(item))
+    clicked = vms_item if on_category else project_item
+    monkeypatch.setattr(view._tree, "itemAt", lambda pos: clicked)
+
+    class _AutoPickMenu(QMenu):
+        def exec(self, *args):
+            picked = next(a for a in self.actions() if a.text() == "Create VM…")
+            picked.trigger()
+            return picked
+
+    monkeypatch.setattr(main_view_module, "QMenu", _AutoPickMenu)
+
+    view._on_tree_context_menu(QPoint(0, 0))
+
+    assert _FakeCreateGcpVmDialog.opened == [("p1", "us-east1-b")]
+    assert refreshed == [project_item]
