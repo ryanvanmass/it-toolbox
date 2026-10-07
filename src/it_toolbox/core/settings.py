@@ -93,6 +93,30 @@ def save_manual_connections(connections: list[dict]) -> None:
     manual_connections_path().write_text(json.dumps(connections))
 
 
+def automations_path() -> Path:
+    return data_dir() / "automations.json"
+
+
+def load_automations() -> list[dict]:
+    """Saved session automations (scripts typed into an RDP/SSH tab via
+    its tab right-click "Run Automation" menu), as raw {"name": ...,
+    "content": ...} dicts -- kept free of any dependency on
+    widgets/manage_automations_dialog.Automation, same split as
+    load_manual_connections.
+    """
+    path = automations_path()
+    if not path.is_file():
+        return []
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_automations(automations: list[dict]) -> None:
+    automations_path().write_text(json.dumps(automations))
+
+
 def qemu_vm_ip_overrides_path() -> Path:
     return data_dir() / "qemu_vm_ip_overrides.json"
 

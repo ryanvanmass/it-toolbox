@@ -26,6 +26,33 @@ from it_toolbox.core.rdp.scancodes import SCANCODES
 
 logger = logging.getLogger(__name__)
 
+# Characters typed with Shift held on a US keyboard -- their Qt.Key
+# constants map (in SCANCODES) to the same physical key as the unshifted
+# character, so send_text has to press Shift itself.
+_US_SHIFTED_SYMBOLS = frozenset('~!@#$%^&*()_+{}|:"<>?')
+
+
+def _scancode_for_char(char: str) -> tuple[tuple[int, bool] | None, bool]:
+    """(scancode, needs_shift) for typing char on a US keyboard, or
+    (None, False) when there's no such key. Qt.Key values for printable
+    ASCII are the character's own code (uppercase for letters).
+    """
+    if char == "\n":
+        return SCANCODES[Qt.Key.Key_Return], False
+    if char == "\t":
+        return SCANCODES[Qt.Key.Key_Tab], False
+    if not char.isascii() or not char.isprintable():
+        return None, False
+    try:
+        key = Qt.Key(ord(char.upper()))
+    except ValueError:
+        return None, False
+    scancode = SCANCODES.get(key)
+    if scancode is None:
+        return None, False
+    return scancode, char.isupper() or char in _US_SHIFTED_SYMBOLS
+
+
 _BUTTON_NAMES = {
     Qt.MouseButton.LeftButton: "left",
     Qt.MouseButton.RightButton: "right",
@@ -197,6 +224,34 @@ class RdpWidget(QWidget):
         sends, unlike the debounced resizeEvent path.
         """
         self._send_resize_request()
+
+    def send_text(self, text: str) -> None:
+        """Types text into the remote session as a sequence of key
+        presses -- used by the session tab's "Run Automation" menu.
+
+        Goes through scancodes (with Shift pressed around shifted
+        characters, assuming the declared English (US) layout) wherever
+        SCANCODES has the key, not send_key_unicode, for the same reason
+        _forward_key_event does: Windows consoles (PowerShell/cmd, the
+        likeliest place to run a script) don't reliably accept RDP's
+        Unicode keyboard input. Unicode is only the fallback for
+        characters with no key on a US keyboard. Line breaks become Enter.
+        """
+        shift_code, shift_extended = SCANCODES[Qt.Key.Key_Shift]
+        for char in text.replace("\r\n", "\n").replace("\r", "\n"):
+            scancode, shifted = _scancode_for_char(char)
+            if scancode is None:
+                if char.isprintable():
+                    self._worker.send_key_unicode(ord(char), True)
+                    self._worker.send_key_unicode(ord(char), False)
+                continue
+            code, extended = scancode
+            if shifted:
+                self._worker.send_key_scancode(shift_code, shift_extended, True)
+            self._worker.send_key_scancode(code, extended, True)
+            self._worker.send_key_scancode(code, extended, False)
+            if shifted:
+                self._worker.send_key_scancode(shift_code, shift_extended, False)
 
     def close_session(self) -> None:
         """Matches the close_session() convention main_view uses to tear
