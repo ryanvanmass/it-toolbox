@@ -9,19 +9,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from it_toolbox.modules.general_tools.ui.eml_tool import EmlTool
 from it_toolbox.modules.general_tools.ui.mbox_tool import MboxTool
 
 
 class GeneralToolsView(QWidget):
     """Home for small standalone utilities that don't belong to a
-    connection family (currently just the Mbox Browser). Each tool is a
+    connection family (the Mbox Browser and EML Viewer). Each tool is a
     top-level node in the sidebar tree with its own entries beneath it,
     and opens its tabs in the shared session-tab pane.
 
     A tool is an object with `name`, `item` (its sidebar node),
     `activate(item)`, `add_category_actions(menu)`,
     `add_item_actions(menu, item)`, `try_close_tab(widget)` and
-    `close_all_sessions()` — see MboxTool.
+    `close_all_sessions()` — see RecentFilesTool.
     """
 
     def __init__(self, parent: QWidget | None = None, tabs: QTabWidget | None = None) -> None:
@@ -40,7 +41,8 @@ class GeneralToolsView(QWidget):
             )
 
         self.mbox = MboxTool(self, self._tabs)
-        self._tools = [self.mbox]
+        self.eml = EmlTool(self, self._tabs)
+        self._tools = [self.mbox, self.eml]
 
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Tools"])
@@ -70,6 +72,8 @@ class GeneralToolsView(QWidget):
         """Shown when right-clicking this module's entry in the app sidebar."""
         menu = QMenu(parent)
         for tool in self._tools:
+            if not menu.isEmpty():
+                menu.addSeparator()
             tool.add_category_actions(menu)
         return menu
 

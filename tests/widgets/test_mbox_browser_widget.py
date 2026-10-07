@@ -1,16 +1,7 @@
 from it_toolbox.widgets import mbox_browser_widget
-import os
-import time
-
-from PySide6.QtWidgets import QMessageBox
-
-from it_toolbox.widgets.mbox_browser_widget import (
-    ATTACHMENT_ROLE,
-    SUMMARY_ROLE,
-    MboxBrowserWidget,
-    _safe_filename,
-    write_attachment_for_opening,
-)
+from it_toolbox.widgets import message_view
+from it_toolbox.widgets.mbox_browser_widget import SUMMARY_ROLE, MboxBrowserWidget
+from it_toolbox.widgets.message_view import ATTACHMENT_ROLE
 
 
 def _make_widget(qtbot, path):
@@ -78,11 +69,11 @@ def test_selecting_a_message_shows_preview_and_attachments(qtbot, sample_mbox, t
     )
 
     widget._list.setCurrentItem(item)
-    qtbot.waitUntil(lambda: widget._attachments.count() == 1, timeout=5000)
+    qtbot.waitUntil(lambda: widget._preview._attachments.count() == 1, timeout=5000)
 
-    assert "Subject: Invoice" in widget._headers_label.text()
-    assert widget._body_view.toPlainText().strip() == "See attached."
-    assert "invoice.pdf" in widget._attachments.item(0).text()
+    assert "Subject: Invoice" in widget._preview._headers_label.text()
+    assert widget._preview._body_view.toPlainText().strip() == "See attached."
+    assert "invoice.pdf" in widget._preview._attachments.item(0).text()
 
 
 def test_saving_an_attachment(qtbot, sample_mbox, tmp_path, monkeypatch):
@@ -93,15 +84,15 @@ def test_saving_an_attachment(qtbot, sample_mbox, tmp_path, monkeypatch):
         if widget._list.topLevelItem(i).text(2) == "Invoice"
     )
     widget._list.setCurrentItem(item)
-    qtbot.waitUntil(lambda: widget._attachments.count() == 1, timeout=5000)
+    qtbot.waitUntil(lambda: widget._preview._attachments.count() == 1, timeout=5000)
     destination = tmp_path / "saved.pdf"
     monkeypatch.setattr(
-        mbox_browser_widget.QFileDialog,
+        message_view.QFileDialog,
         "getSaveFileName",
         lambda *args, **kwargs: (str(destination), ""),
     )
 
-    widget._save_attachment(widget._attachments.item(0).data(ATTACHMENT_ROLE))
+    widget._preview._save_attachment(widget._preview._attachments.item(0).data(ATTACHMENT_ROLE))
     qtbot.waitUntil(destination.exists, timeout=5000)
 
     assert destination.read_bytes() == b"%PDF-1.4 fake"
@@ -152,77 +143,3 @@ def test_closing_during_load_cancels_the_index(qtbot, sample_mbox):
     with qtbot.assertNotEmitted(widget.loaded, wait=500):
         pass
     assert widget._reader is None
-
-
-def _select_invoice(qtbot, widget):
-    item = next(
-        widget._list.topLevelItem(i)
-        for i in range(5)
-        if widget._list.topLevelItem(i).text(2) == "Invoice"
-    )
-    widget._list.setCurrentItem(item)
-    qtbot.waitUntil(lambda: widget._attachments.count() == 1, timeout=5000)
-
-
-def test_double_clicking_an_attachment_opens_a_temp_copy(
-    qtbot, sample_mbox, tmp_path, monkeypatch
-):
-    monkeypatch.setattr(mbox_browser_widget, "OPENED_ATTACHMENTS_DIR", tmp_path / "opened")
-    opened = []
-    monkeypatch.setattr(
-        mbox_browser_widget.QDesktopServices, "openUrl", lambda url: opened.append(url) or True
-    )
-    widget, _ = _make_widget(qtbot, sample_mbox())
-    _select_invoice(qtbot, widget)
-
-    widget._on_attachment_activated(widget._attachments.item(0))
-    qtbot.waitUntil(lambda: bool(opened), timeout=5000)
-
-    path = opened[0].toLocalFile()
-    assert path.endswith("invoice.pdf")
-    assert path.startswith(str(tmp_path / "opened"))
-    assert open(path, "rb").read() == b"%PDF-1.4 fake"
-
-
-def test_executable_attachment_asks_before_opening(qtbot, sample_mbox, monkeypatch):
-    from it_toolbox.core.mbox_reader import Attachment
-
-    asked = []
-    monkeypatch.setattr(
-        mbox_browser_widget.QMessageBox,
-        "question",
-        lambda *args: asked.append(args) or QMessageBox.StandardButton.Cancel,
-    )
-    widget, _ = _make_widget(qtbot, sample_mbox())
-    started = []
-    monkeypatch.setattr(
-        mbox_browser_widget.async_utils, "run_in_background", lambda *a, **k: started.append(a)
-    )
-    widget._current_key = 0
-
-    widget._open_attachment(Attachment(0, "invoice.PDF.exe", "application/octet-stream", 3))
-
-    assert "will run it" in asked[0][2].replace("\n", " ")
-    assert started == []
-
-
-def test_write_attachment_for_opening_sweeps_old_folders(tmp_path, monkeypatch):
-    monkeypatch.setattr(mbox_browser_widget, "OPENED_ATTACHMENTS_DIR", tmp_path)
-    old = tmp_path / "old"
-    old.mkdir()
-    day_ago = time.time() - 2 * 24 * 60 * 60
-    os.utime(old, (day_ago, day_ago))
-
-    first = write_attachment_for_opening("report.pdf", b"a")
-    second = write_attachment_for_opening("report.pdf", b"b")
-
-    assert not old.exists()
-    assert first != second
-    assert (first.read_bytes(), second.read_bytes()) == (b"a", b"b")
-
-
-def test_safe_filename():
-    assert _safe_filename("../../etc/passwd") == "passwd"
-    assert _safe_filename("C:\\Users\\x\\evil.txt") == "evil.txt"
-    assert _safe_filename('a<b>:"c|?*.txt') == "abc.txt"
-    assert _safe_filename("..") == "attachment"
