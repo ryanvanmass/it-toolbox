@@ -107,3 +107,37 @@ def test_unreadable_file_reports_error(qtbot, tmp_path, monkeypatch):
     assert count == -1
     assert warnings and warnings[0][1] == "Couldn't open mbox file"
     assert not widget._search_edit.isEnabled()
+
+
+def test_progress_panel_hides_once_loaded(qtbot, sample_mbox):
+    widget, _ = _make_widget(qtbot, sample_mbox())
+
+    assert widget._progress_panel.isHidden()
+    assert not widget._progress_timer.isActive()
+
+
+def test_progress_panel_shows_scan_then_message_counts(qtbot, tmp_path):
+    widget = MboxBrowserWidget(tmp_path / "missing.mbox")
+    qtbot.addWidget(widget)
+    widget._closed = True  # keep the (failing) background load quiet
+
+    widget._load_progress = ("scanning", 512, 2048)
+    widget._update_load_progress()
+    assert widget._progress_label.text() == "Scanning missing.mbox…"
+    assert (widget._progress_bar.maximum(), widget._progress_bar.value()) == (100, 25)
+
+    widget._load_progress = ("reading", 1200, 50000)
+    widget._update_load_progress()
+    assert widget._progress_label.text() == "Reading messages: 1,200 of 50,000"
+    assert (widget._progress_bar.maximum(), widget._progress_bar.value()) == (50000, 1200)
+
+
+def test_closing_during_load_cancels_the_index(qtbot, sample_mbox):
+    widget = MboxBrowserWidget(sample_mbox())
+    qtbot.addWidget(widget)
+
+    widget.close_session()
+
+    with qtbot.assertNotEmitted(widget.loaded, wait=500):
+        pass
+    assert widget._reader is None

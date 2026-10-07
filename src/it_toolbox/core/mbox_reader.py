@@ -1,17 +1,23 @@
 """Read-only access to mbox mail archives (Google Takeout, Thunderbird,
 Apple Mail exports, ...) for the Mbox Browser module.
 
-Everything here is plain stdlib (`mailbox` + `email`) and blocking, so
-callers run it through async_utils.run_in_background. A MboxReader keeps
-the mailbox open (its table of contents is built once, by index()) and
-serializes access with a lock, because the browser can have a message
-load and a body search in flight on worker threads at the same time and
-`mailbox.mbox` shares one file handle between them.
+Everything here is plain stdlib and blocking, so callers run it through
+async_utils.run_in_background. A MboxReader keeps the file open (its
+table of contents is built once, by index()) and serializes access with a
+lock, because the browser can have a message load and a body search in
+flight on worker threads at the same time, sharing one file handle.
+
+The table of contents is built here rather than by stdlib `mailbox.mbox`
+so the scan can report progress and be cancelled: on a multi-gigabyte
+archive it's the slowest part of opening a file. It follows the same
+rule as `mailbox.mbox`: every line starting with "From " begins a new
+message, and a blank line just before it belongs to neither.
 """
 
 import html
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from email import policy
@@ -19,7 +25,6 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
-from mailbox import mbox
 from pathlib import Path
 
 
@@ -66,6 +71,14 @@ class MessageDetail:
 _SHOWN_HEADERS = ("From", "To", "Cc", "Date", "Subject")
 
 _TAG_RE = re.compile(r"<[^>]+>")
+# Attachment check for the message list. Parsing every message's MIME
+# tree just for this made indexing ~10x slower on attachment-heavy
+# archives, so index() looks for the disposition headers in the raw bytes
+# instead; load() still walks the real parts.
+_ATTACHMENT_HEADER_RE = re.compile(
+    rb"^content-disposition:[ \t]*(attachment|inline;[ \t]*(\r?\n[ \t]+)?filename)",
+    re.IGNORECASE | re.MULTILINE,
+)
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 
 
@@ -123,31 +136,98 @@ def _part_text(part: EmailMessage) -> str:
     return content if isinstance(content, str) else ""
 
 
+#: index() progress callback: (phase, done, total). Phase is SCANNING
+#: (done/total in bytes) and then READING (done/total in messages).
+ProgressCallback = Callable[[str, int, int], None]
+SCANNING = "scanning"
+READING = "reading"
+
+_PROGRESS_EVERY_BYTES = 1 << 20
+
+
+class IndexCancelled(Exception):
+    """index() was stopped by its `cancelled` callback."""
+
+
 class MboxReader:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         if not self.path.is_file():
             raise FileNotFoundError(f"No such mbox file: {self.path}")
-        self._mbox = mbox(str(self.path), create=False)
+        self._file = open(self.path, "rb")  # noqa: SIM115 - closed by close()
         self._lock = threading.Lock()
         self._parser = BytesParser(policy=policy.default)
+        # The list only needs a few headers, decoded by decode_header_value()
+        # anyway: compat32 skips policy.default's (much slower) structured
+        # header parsing.
+        self._header_parser = BytesParser(policy=policy.compat32)
+        self._toc: list[tuple[int, int]] = []
 
     def close(self) -> None:
         with self._lock:
-            self._mbox.close()
+            self._file.close()
+
+    def raw_bytes(self, key: int) -> bytes:
+        """The message as stored (minus its "From " separator line), for
+        parsing and for "Save as .eml"."""
+        start, stop = self._toc[key]
+        with self._lock:
+            self._file.seek(start)
+            self._file.readline()
+            data = self._file.read(stop - self._file.tell())
+        return data.replace(b"\r\n", b"\n")
 
     def _message(self, key: int) -> EmailMessage:
-        with self._lock:
-            raw = self._mbox.get_bytes(key)
-        return self._parser.parsebytes(raw)
+        return self._parser.parsebytes(self.raw_bytes(key))
 
-    def index(self) -> list[MessageSummary]:
-        """Headers of every message, in file order."""
+    def _scan(self, progress: ProgressCallback, cancelled: Callable[[], bool]) -> None:
+        total = self.path.stat().st_size
+        starts: list[int] = []
+        stops: list[int] = []
+        blank_before = 0  # length of the blank line just read, if any
+        position = next_report = 0
         with self._lock:
-            keys = list(self._mbox.keys())
+            self._file.seek(0)
+            for line in self._file:
+                if line.startswith(b"From "):
+                    if len(stops) < len(starts):
+                        stops.append(position - blank_before)
+                    starts.append(position)
+                    blank_before = 0
+                elif line in (b"\n", b"\r\n"):
+                    blank_before = len(line)
+                else:
+                    blank_before = 0
+                position += len(line)
+                if position >= next_report:
+                    if cancelled():
+                        raise IndexCancelled
+                    progress(SCANNING, position, total)
+                    next_report = position + _PROGRESS_EVERY_BYTES
+        if len(stops) < len(starts):
+            stops.append(position - blank_before)
+        self._toc = list(zip(starts, stops))
+        progress(SCANNING, total, total)
+
+    def index(
+        self,
+        progress: ProgressCallback = lambda phase, done, total: None,
+        cancelled: Callable[[], bool] = lambda: False,
+    ) -> list[MessageSummary]:
+        """Headers of every message, in file order. Raises IndexCancelled
+        if `cancelled()` turns true part-way."""
+        self._scan(progress, cancelled)
+        total = len(self._toc)
         summaries = []
-        for key in keys:
-            message = self._message(key)
+        for key in range(total):
+            if cancelled():
+                raise IndexCancelled
+            progress(READING, key, total)
+            raw = self.raw_bytes(key)
+            header_end = raw.find(b"\n\n")
+            message = self._header_parser.parsebytes(
+                raw if header_end == -1 else raw[: header_end + 1], headersonly=True
+            )
             summaries.append(
                 MessageSummary(
                     key=key,
@@ -159,9 +239,10 @@ class MboxReader:
                         if message.get(name)
                     ),
                     date=_parse_date(decode_header_value(message.get("Date"))),
-                    has_attachments=any(_is_attachment(p) for p in message.walk()),
+                    has_attachments=_ATTACHMENT_HEADER_RE.search(raw) is not None,
                 )
             )
+        progress(READING, total, total)
         return summaries
 
     def load(self, key: int) -> MessageDetail:
@@ -195,11 +276,6 @@ class MboxReader:
     def attachment_bytes(self, key: int, index: int) -> bytes:
         parts = [p for p in self._message(key).walk() if _is_attachment(p)]
         return parts[index].get_payload(decode=True) or b""
-
-    def raw_bytes(self, key: int) -> bytes:
-        """The message as stored, for "Save as .eml"."""
-        with self._lock:
-            return self._mbox.get_bytes(key)
 
     def body_text(self, key: int) -> str:
         """All text/plain and text/html content of a message, flattened

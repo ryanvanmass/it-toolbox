@@ -101,3 +101,47 @@ def test_decode_header_value_tolerates_garbage():
 
 def test_html_to_text():
     assert html_to_text("<script>x()</script><b>Hi</b>&nbsp;there") == "Hi there"
+
+
+def test_scan_splits_messages_like_stdlib_mailbox(mbox_path):
+    import mailbox
+
+    reader = MboxReader(mbox_path)
+    summaries = reader.index()
+    box = mailbox.mbox(str(mbox_path), create=False)
+
+    assert len(summaries) == len(box)
+    for key, stdlib_key in zip((s.key for s in summaries), box.keys(), strict=True):
+        assert reader.raw_bytes(key) == box.get_bytes(stdlib_key)
+
+
+def test_crlf_files_are_read(tmp_path, mbox_path):
+    crlf = tmp_path / "crlf.mbox"
+    crlf.write_bytes(mbox_path.read_bytes().replace(b"\n", b"\r\n"))
+
+    summaries = MboxReader(crlf).index()
+
+    assert [s.subject for s in summaries][:2] == ["Server down", "Invoice"]
+    assert summaries[1].has_attachments
+
+
+def test_index_reports_scanning_then_reading_progress(mbox_path):
+    from it_toolbox.core.mbox_reader import READING, SCANNING
+
+    events = []
+    MboxReader(mbox_path).index(progress=lambda *event: events.append(event))
+
+    size = mbox_path.stat().st_size
+    assert events[0][0] == SCANNING
+    assert (SCANNING, size, size) in events
+    reading = [e for e in events if e[0] == READING]
+    assert reading[0] == (READING, 0, 5)
+    assert reading[-1] == (READING, 5, 5)
+    assert events.index((SCANNING, size, size)) < events.index(reading[0])
+
+
+def test_index_can_be_cancelled(mbox_path):
+    from it_toolbox.core.mbox_reader import IndexCancelled
+
+    with pytest.raises(IndexCancelled):
+        MboxReader(mbox_path).index(cancelled=lambda: True)

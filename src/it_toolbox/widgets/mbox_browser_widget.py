@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QProgressBar,
     QMenu,
     QMessageBox,
     QSplitter,
@@ -34,7 +35,13 @@ from PySide6.QtWidgets import (
 )
 
 from it_toolbox.core import async_utils
-from it_toolbox.core.mbox_reader import MboxReader, MessageDetail, MessageSummary
+from it_toolbox.core.mbox_reader import (
+    SCANNING,
+    IndexCancelled,
+    MboxReader,
+    MessageDetail,
+    MessageSummary,
+)
 from it_toolbox.widgets import status_bar
 
 SUMMARY_ROLE = Qt.ItemDataRole.UserRole
@@ -43,6 +50,7 @@ ATTACHMENT_ROLE = Qt.ItemDataRole.UserRole
 COLUMN_DATE, COLUMN_FROM, COLUMN_SUBJECT, COLUMN_ATTACHMENT = range(4)
 
 BODY_SEARCH_DELAY_MS = 400
+LOAD_PROGRESS_INTERVAL_MS = 100
 
 
 def _format_size(size: int) -> str:
@@ -101,6 +109,24 @@ class MboxBrowserWidget(QWidget):
         self._body_search_timer.setInterval(BODY_SEARCH_DELAY_MS)
         self._body_search_timer.timeout.connect(self._start_body_search)
 
+        # Shown only while the file is being indexed. The worker thread
+        # just stores its latest (phase, done, total) in self._load_progress
+        # and a main-thread timer copies it onto the bar, so a big archive
+        # doesn't flood the event loop with one update per message.
+        self._load_progress: tuple[str, int, int] | None = None
+        self._progress_label = QLabel(f"Opening {self.path.name}…")
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 0)  # busy until the first update
+        self._progress_bar.setTextVisible(False)
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(LOAD_PROGRESS_INTERVAL_MS)
+        self._progress_timer.timeout.connect(self._update_load_progress)
+        self._progress_panel = QWidget()
+        progress_layout = QVBoxLayout(self._progress_panel)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.addWidget(self._progress_label)
+        progress_layout.addWidget(self._progress_bar)
+
         search_row = QHBoxLayout()
         search_row.addWidget(self._search_edit, 1)
         search_row.addWidget(self._bodies_check)
@@ -154,6 +180,7 @@ class MboxBrowserWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(search_row)
+        layout.addWidget(self._progress_panel)
         layout.addWidget(splitter, 1)
 
         self._set_searchable(False)
@@ -169,19 +196,42 @@ class MboxBrowserWidget(QWidget):
         task = status_bar.begin(self, f"Reading {self.path.name}…")
         path = self.path
 
+        def report(phase: str, done: int, total: int) -> None:
+            self._load_progress = (phase, done, total)
+
         def open_and_index():
             reader = MboxReader(path)
             try:
-                return reader, reader.index()
+                return reader, reader.index(progress=report, cancelled=lambda: self._closed)
             except Exception:
                 reader.close()
                 raise
 
+        self._progress_timer.start()
         async_utils.run_in_background(
             open_and_index,
             on_result=lambda result: self._on_loaded(result, task),
             on_error=lambda error: self._on_load_error(error, task),
         )
+
+    def _update_load_progress(self) -> None:
+        if self._load_progress is None:
+            return
+        phase, done, total = self._load_progress
+        if phase == SCANNING:
+            self._progress_label.setText(f"Scanning {self.path.name}…")
+            # QProgressBar's range is a C int, too small for byte counts.
+            percent = done * 100 // total if total else 100
+            self._progress_bar.setRange(0, 100)
+            self._progress_bar.setValue(percent)
+        else:
+            self._progress_label.setText(f"Reading messages: {done:,} of {total:,}")
+            self._progress_bar.setRange(0, max(total, 1))
+            self._progress_bar.setValue(done)
+
+    def _finish_load_progress(self) -> None:
+        self._progress_timer.stop()
+        self._progress_panel.hide()
 
     def _alive(self) -> bool:
         # The tab can be closed (or the whole window torn down) while a
@@ -194,6 +244,7 @@ class MboxBrowserWidget(QWidget):
             result[0].close()
             task.finish()
             return
+        self._finish_load_progress()
         self._reader, self._summaries = result
         task.finish(f"Loaded {len(self._summaries)} messages from {self.path.name}")
         self._list.setSortingEnabled(False)
@@ -219,15 +270,18 @@ class MboxBrowserWidget(QWidget):
         self.loaded.emit(len(self._summaries))
 
     def _on_load_error(self, error: Exception, task: status_bar.StatusTask) -> None:
-        task.finish(f"Couldn't read {self.path.name}")
-        if not self._alive():
+        if isinstance(error, IndexCancelled) or not self._alive():
+            task.finish()
             return
+        task.finish(f"Couldn't read {self.path.name}")
+        self._finish_load_progress()
         self._count_label.setText("Couldn't read file")
         self.loaded.emit(-1)
         QMessageBox.warning(self, "Couldn't open mbox file", f"{self.path}\n\n{error}")
 
     def close_session(self) -> None:
-        self._closed = True
+        self._closed = True  # also stops an index still in progress
+        self._progress_timer.stop()
         self._search_generation += 1  # stop any body search in flight
         if self._reader is not None:
             self._reader.close()
