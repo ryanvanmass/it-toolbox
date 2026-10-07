@@ -32,12 +32,11 @@ worth knowing before touching this file:
 
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 
-from it_toolbox.core.subprocess_utils import no_window_kwargs
+from it_toolbox.core import linux_backend
 from it_toolbox.modules.connection_manager.models import (
     QemuHost,
     StoragePool,
@@ -73,18 +72,15 @@ def is_available() -> bool:
     virsh, already covered by qemu_client.is_available() -- this is
     the separate, additional check the "Deploy VM…" UI gates on.
     """
-    return shutil.which(VIRT_INSTALL_CMD) is not None
+    return linux_backend.is_tool_available("virt-install")
 
 
 def _run_virt_install(*args: str) -> str:
+    backend = linux_backend.get_backend()
+    if backend is None:
+        raise QemuApiError("virt-install isn't available — set up Linux tools in Settings")
     try:
-        result = subprocess.run(
-            [VIRT_INSTALL_CMD, *args],
-            capture_output=True,
-            text=True,
-            timeout=VIRT_INSTALL_TIMEOUT_SEC,
-            **no_window_kwargs(),
-        )
+        result = backend.run([VIRT_INSTALL_CMD, *args], timeout=VIRT_INSTALL_TIMEOUT_SEC)
     except FileNotFoundError as e:
         raise QemuApiError("virt-install not found — install the virt-install/virtinst package") from e
     except subprocess.TimeoutExpired as e:
@@ -453,7 +449,11 @@ def _redefine(host: QemuHost, root: ET.Element) -> None:
         f.write(ET.tostring(root, encoding="unicode"))
         temp_path = f.name
     try:
-        run_virsh(host, "define", temp_path)
+        # virsh may be running inside the WSL distro (see core/linux_backend),
+        # where this Windows temp path has to be reached via /mnt/<drive>/.
+        backend = linux_backend.get_backend()
+        define_path = backend.to_linux_path(temp_path) if backend is not None else temp_path
+        run_virsh(host, "define", define_path)
     finally:
         os.unlink(temp_path)
 

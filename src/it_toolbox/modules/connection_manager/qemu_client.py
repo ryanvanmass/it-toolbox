@@ -8,14 +8,16 @@ SPICE pixel/input stream itself (see core/spice/). Ported from
 github.com/ryanvanmass/virt-connect's virsh_client.py, adapted to this
 project's dataclass models and QemuApiError convention rather than
 copy-pasted as-is.
+
+Runs through core/linux_backend, so on Windows the same calls go to the
+app-managed WSL distro (see docs/wsl-interconnect-plan.md).
 """
 
 import re
-import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
-from it_toolbox.core.subprocess_utils import no_window_kwargs
+from it_toolbox.core import linux_backend
 from it_toolbox.modules.connection_manager.models import QemuHost, QemuVm
 
 VIRSH_CMD = "virsh"
@@ -23,7 +25,7 @@ VIRSH_TIMEOUT_SEC = 8
 
 
 def is_available() -> bool:
-    return shutil.which(VIRSH_CMD) is not None
+    return linux_backend.is_tool_available("virsh")
 
 _LIST_LINE_RE = re.compile(r"^\s*(\S+)\s+(\S+)\s+(.+?)\s*$")
 
@@ -45,14 +47,11 @@ class QemuApiError(Exception):
 
 
 def run_virsh(host: QemuHost, *args: str) -> str:
+    backend = linux_backend.get_backend()
+    if backend is None:
+        raise QemuApiError("virsh isn't available — set up Linux tools in Settings")
     try:
-        result = subprocess.run(
-            [VIRSH_CMD, "-c", host.uri, *args],
-            capture_output=True,
-            text=True,
-            timeout=VIRSH_TIMEOUT_SEC,
-            **no_window_kwargs(),
-        )
+        result = backend.run([VIRSH_CMD, "-c", host.uri, *args], timeout=VIRSH_TIMEOUT_SEC)
     except FileNotFoundError as e:
         raise QemuApiError("virsh not found — install libvirt-clients") from e
     except subprocess.TimeoutExpired as e:

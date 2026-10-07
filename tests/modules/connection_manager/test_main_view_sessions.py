@@ -1654,9 +1654,9 @@ class _FakeSpiceWidget(QWidget):
 
     finished = Signal()
 
-    def __init__(self, host, port, password=""):
+    def __init__(self, host, port, password="", worker=None):
         super().__init__()
-        self.host, self.port, self.password = host, port, password
+        self.host, self.port, self.password, self.worker = host, port, password, worker
 
     def close_session(self):
         pass
@@ -1765,13 +1765,14 @@ def test_prepare_qemu_spice_connection_starts_tunnel_for_ssh_uri(qtbot, monkeypa
 
 
 def test_connect_qemu_warns_instead_of_crashing_when_spice_unavailable(qtbot, monkeypatch):
-    # Regression test: SpiceWidget is None on platforms without PyGObject/
+    # Regression test: SpiceSessionWorker is None on platforms without PyGObject/
     # spice-glib (see the try/except import at the top of main_view.py).
     # _connect_qemu must degrade to a clear warning, not an AttributeError
-    # from trying to construct a SpiceWidget that doesn't exist.
+    # from trying to construct a SPICE session that can't exist.
     import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
 
-    monkeypatch.setattr(main_view_module, "SpiceWidget", None)
+    monkeypatch.setattr(main_view_module, "SpiceSessionWorker", None)
+    monkeypatch.setattr(main_view_module.linux_backend, "is_wsl", lambda: False)
     warnings = []
     monkeypatch.setattr(
         main_view_module.QMessageBox, "warning", staticmethod(lambda *a: warnings.append(a))
@@ -1785,6 +1786,49 @@ def test_connect_qemu_warns_instead_of_crashing_when_spice_unavailable(qtbot, mo
     assert len(warnings) == 1
     assert view._tabs.count() == 0
     assert view._active_sessions == {}
+
+
+class _FakeRemoteSpiceWorker:
+    def __init__(self, uri, spice_port, password=""):
+        self.uri, self.spice_port = uri, spice_port
+
+
+def test_spice_mode_prefers_wsl_when_linux_tools_backend_is_wsl(monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module.linux_backend, "is_wsl", lambda: True)
+    monkeypatch.setattr(main_view_module, "SpiceSessionWorker", None)
+    assert main_view_module._spice_mode() == "wsl"
+
+    monkeypatch.setattr(main_view_module.linux_backend, "is_wsl", lambda: False)
+    assert main_view_module._spice_mode() is None
+
+
+def test_qemu_connect_via_wsl_embeds_remote_worker_without_local_tunnel(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "SpiceWidget", _FakeSpiceWidget)
+    monkeypatch.setattr(main_view_module, "RemoteSpiceWorker", _FakeRemoteSpiceWorker)
+    monkeypatch.setattr(main_view_module, "_spice_mode", lambda: "wsl")
+    monkeypatch.setattr(main_view_module.qemu_client, "get_vm_spice_port", lambda host, name: 5901)
+    monkeypatch.setattr(
+        main_view_module, "QemuTunnel", lambda *a: pytest.fail("Windows side must not open the tunnel")
+    )
+    view = _make_view(qtbot, monkeypatch)
+    host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
+    vm = QemuVm(id="1", name="myvm", state="running")
+
+    view._connect_qemu(host, vm)
+
+    qtbot.waitUntil(lambda: view._tabs.count() == 1)
+    widget = view._tabs.widget(0)
+    assert isinstance(widget.worker, _FakeRemoteSpiceWorker)
+    assert (widget.worker.uri, widget.worker.spice_port) == (host.uri, 5901)
+    # Nothing to stop on the Windows side -- closing the widget stops the helper.
+    assert view._active_sessions == {}
+
+    widget.finished.emit()
+    assert view._tabs.count() == 0
 
 
 def test_gcp_rdp_connect_warns_instead_of_crashing_when_freerdp_unavailable(qtbot, monkeypatch):

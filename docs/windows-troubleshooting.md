@@ -194,6 +194,30 @@ assuming it, and substitute `~` for `-` specifically for the `.deb`/`.rpm`
 version field. If you see either class of failure again, that's the
 file to check first.
 
+## Linux tools (WSL): QEMU/libvirt and SPICE on Windows
+
+Settings > Integrations > Linux tools (WSL) manages a WSL distro named
+`it-toolbox` (see `docs/wsl-interconnect-plan.md`). Things to know when
+it misbehaves:
+
+- **"Check Tools"** runs each tool's probe inside the distro. If one
+  fails, "Remove Linux Tools" then "Set Up Linux Tools" re-imports a
+  clean copy; the distro holds nothing that isn't regenerated.
+- **Poke at it by hand**: `wsl -d it-toolbox` opens a shell in it (also
+  listed in Shell Launcher). `virsh -c qemu+ssh://user@host/system list
+  --all` there should match what the QEMU tree shows.
+- **qemu+ssh:// auth fails** but works from Windows: the distro has its
+  own `~/.ssh`. The app copies `%USERPROFILE%\.ssh\id_*` and
+  `known_hosts` in at setup, at app startup, and on "Copy SSH Keys into
+  WSL". Keys that only live in the Windows ssh-agent aren't copied.
+- **SPICE tab says the helper didn't start / couldn't connect**: the
+  viewer runs in a helper process inside the distro that listens on
+  127.0.0.1 and relies on WSL2's localhost forwarding
+  (`localhostForwarding`, on by default; mirrored networking mode also
+  works). Check `%USERPROFILE%\.wslconfig` hasn't turned it off.
+- **First QEMU action after boot is slow**: the distro boots on first
+  use (a few seconds); the app starts it in the background at launch.
+
 ## Capturing debug logs
 
 ```powershell

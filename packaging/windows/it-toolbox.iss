@@ -92,3 +92,31 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 ; function's docstring for why. A plain interactive install still shows
 ; this as the usual "Launch IT Toolbox" finish-page checkbox.
 Filename: "{app}\pythonw.exe"; Parameters: "-m it_toolbox"; Description: "Launch IT Toolbox"; Flags: nowait postinstall
+
+[UninstallRun]
+; Removes the app-managed "it-toolbox" WSL distro (Settings > Linux tools
+; (WSL), see core/wsl_distro.py) along with the app. Only when it's
+; actually registered: on a machine without WSL, wsl.exe is a stub whose
+; side effect is starting Windows' "install WSL" flow. Distros are
+; per-user, so this reaches the user running the uninstaller -- the
+; usual case, since the uninstaller elevates the same account.
+Filename: "{sys}\wsl.exe"; Parameters: "--unregister it-toolbox"; Flags: runhidden; RunOnceId: "UnregisterWslDistro"; Check: ItToolboxWslDistroRegistered
+
+[Code]
+function ItToolboxWslDistroRegistered(): Boolean;
+var
+  Keys: TArrayOfString;
+  I: Integer;
+  Name: String;
+begin
+  Result := False;
+  if not RegGetSubkeyNames(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Lxss', Keys) then
+    exit;
+  for I := 0 to GetArrayLength(Keys) - 1 do
+    if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Lxss\' + Keys[I], 'DistributionName', Name) then
+      if Name = 'it-toolbox' then
+      begin
+        Result := True;
+        exit;
+      end;
+end;
