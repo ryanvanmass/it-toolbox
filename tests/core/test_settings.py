@@ -464,6 +464,28 @@ def test_save_and_load_include_prerelease_updates(monkeypatch, tmp_path):
     assert settings.load_include_prerelease_updates() is False
 
 
+def test_disabled_modules_empty_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_disabled_modules() == set()
+
+
+def test_save_and_load_disabled_modules(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_disabled_modules({"shell_launcher", "cloud_storage"})
+    assert settings.load_disabled_modules() == {"shell_launcher", "cloud_storage"}
+    settings.save_disabled_modules(set())
+    assert settings.load_disabled_modules() == set()
+    assert not settings.disabled_modules_path().exists()
+
+
+def test_disabled_modules_ignores_corrupt_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.disabled_modules_path().write_text("{not json")
+    assert settings.load_disabled_modules() == set()
+    settings.disabled_modules_path().write_text('{"shell_launcher": true}')
+    assert settings.load_disabled_modules() == set()
+
+
 # -- Per-GCP-instance RDP credentials ------------------------------------------
 
 _VM = ("proj", "us-central1-a", "vm-1")
@@ -580,3 +602,28 @@ def test_encrypt_instance_rdp_password_without_any_ssh_key_raises(monkeypatch, t
 
     with pytest.raises(settings.SecretDecryptionError, match="No SSH key found"):
         settings.encrypt_instance_rdp_password("Sup3r-s3cret!")
+
+
+def test_automations_default_to_empty(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+
+    assert settings.load_automations() == []
+
+
+def test_automations_round_trip(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    automations = [
+        {"name": "Update apt", "content": "sudo apt update\nsudo apt upgrade -y\n"},
+        {"name": "Who", "content": "whoami"},
+    ]
+
+    settings.save_automations(automations)
+
+    assert settings.load_automations() == automations
+
+
+def test_corrupt_automations_file_falls_back_to_empty(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.automations_path().write_text("{not json")
+
+    assert settings.load_automations() == []

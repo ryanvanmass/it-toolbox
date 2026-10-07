@@ -264,3 +264,25 @@ def test_resizing_the_widget_sends_the_new_size_to_the_pty(qtbot, monkeypatch):
     assert resize_calls
     assert resize_calls[-1] == (term._cols, term._rows)
     term.close_session()
+
+
+def test_send_text_writes_lines_with_enter_bytes(qtbot, monkeypatch):
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+    writes = []
+    monkeypatch.setattr(term._pty, "write", lambda data: writes.append(data))
+
+    term.send_text("echo one\r\necho two\n")
+
+    assert writes == [b"echo one\recho two\r"]
+    term.close_session()
+
+
+def test_send_text_runs_the_script_in_the_shell(qtbot):
+    term = TerminalWidget(["/bin/sh"], cols=80, rows=24)
+    qtbot.addWidget(term)
+
+    term.send_text("echo from_automation_$((40+2))\n")
+
+    qtbot.waitUntil(lambda: "from_automation_42" in term.toPlainText(), timeout=3000)
+    term.close_session()
