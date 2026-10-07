@@ -120,3 +120,16 @@ def test_resolve_role_titles_fills_titles_and_falls_back_on_error(monkeypatch):
     resolved = gcp_client.resolve_role_titles(_FakeCredentials(), bindings)
 
     assert [b.role_title for b in resolved] == ["Compute Admin", "Compute Admin", ""]
+
+
+def test_console_url_defaults_to_the_project_dashboard():
+    from it_toolbox.modules.connection_manager import gcp_client
+
+    assert (
+        gcp_client.console_url("my-proj-123")
+        == "https://console.cloud.google.com/home/dashboard?project=my-proj-123"
+    )
+    assert (
+        gcp_client.console_url("p1", "iam-admin/iam")
+        == "https://console.cloud.google.com/iam-admin/iam?project=p1"
+    )

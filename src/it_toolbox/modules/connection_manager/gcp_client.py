@@ -41,6 +41,7 @@ RESOURCE_MANAGER_BASE = "https://cloudresourcemanager.googleapis.com/v3"
 COMPUTE_BASE = "https://compute.googleapis.com/compute/v1"
 IAM_BASE = "https://iam.googleapis.com/v1"
 STORAGE_BASE = "https://storage.googleapis.com/storage/v1"
+CONSOLE_BASE = "https://console.cloud.google.com"
 
 # Windows password reset (see reset_windows_password): the metadata key the
 # guest agent watches, the serial port it answers on, how long a request
@@ -54,6 +55,11 @@ WINDOWS_PASSWORD_POLL_INTERVAL_SEC = 3
 
 class GcpApiError(Exception):
     pass
+
+
+def console_url(project_id: str, path: str = "home/dashboard") -> str:
+    """The GCP Console URL for `path` (e.g. "iam-admin/iam") scoped to `project_id`."""
+    return f"{CONSOLE_BASE}/{path}?project={quote(project_id, safe='')}"
 
 
 def _get(url: str, token: str, params: dict | None = None, extra_headers: dict | None = None) -> dict:
