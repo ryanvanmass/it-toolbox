@@ -215,6 +215,59 @@ def test_sftp_session_wraps_authentication_failure(monkeypatch):
         session.connect()
 
 
+def test_sftp_session_authentication_failure_is_retryable_and_closes_the_client(monkeypatch):
+    class _FailingClient(_FakeSshClient):
+        def connect(self, host, **kwargs):
+            raise paramiko.PasswordRequiredException("encrypted key")
+
+    monkeypatch.setattr(paramiko, "SSHClient", _FailingClient)
+    session = ftp_client.SftpSession("example.com", 22, "alice")
+
+    with pytest.raises(ftp_client.AuthenticationFailedError):
+        session.connect()
+    assert _FakeSshClient.instances[0].closed is True
+
+
+def test_sftp_session_no_credentials_at_all_is_an_authentication_failure(monkeypatch):
+    class _FailingClient(_FakeSshClient):
+        def connect(self, host, **kwargs):
+            raise paramiko.SSHException("No authentication methods available")
+
+    monkeypatch.setattr(paramiko, "SSHClient", _FailingClient)
+    session = ftp_client.SftpSession("example.com", 22, "alice")
+
+    with pytest.raises(ftp_client.AuthenticationFailedError):
+        session.connect()
+
+
+def test_sftp_session_other_ssh_errors_are_not_authentication_failures(monkeypatch):
+    class _FailingClient(_FakeSshClient):
+        def connect(self, host, **kwargs):
+            raise paramiko.SSHException("Error reading SSH protocol banner")
+
+    monkeypatch.setattr(paramiko, "SSHClient", _FailingClient)
+    session = ftp_client.SftpSession("example.com", 22, "alice")
+
+    with pytest.raises(ftp_client.FtpClientError) as excinfo:
+        session.connect()
+    assert not isinstance(excinfo.value, ftp_client.AuthenticationFailedError)
+
+
+def test_sftp_session_set_credentials_is_used_by_the_next_connect(monkeypatch):
+    monkeypatch.setattr(paramiko, "SSHClient", _FakeSshClient)
+    session = ftp_client.SftpSession("example.com", 22, "root")
+
+    session.set_credentials("alice", password="secret", key_path="/k", key_passphrase="pp")
+    session.connect()
+
+    connected_with = _FakeSshClient.instances[0].connected_with
+    assert session.username == "alice"
+    assert connected_with["username"] == "alice"
+    assert connected_with["password"] == "secret"
+    assert connected_with["key_filename"] == "/k"
+    assert connected_with["passphrase"] == "pp"
+
+
 def test_sftp_session_list_dir_maps_attrs_to_file_entries(monkeypatch):
     monkeypatch.setattr(paramiko, "SSHClient", _FakeSshClient)
     session = ftp_client.SftpSession("example.com", 22, "alice", skip_host_key_check=True)

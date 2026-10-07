@@ -168,6 +168,45 @@ def test_unknown_host_key_declined_leaves_session_disconnected(qtbot, monkeypatc
     assert session.connected is False
 
 
+def test_initial_uploads_land_in_the_remote_home_directory(qtbot, tmp_path):
+    local_file = tmp_path / "report.pdf"
+    local_file.write_bytes(b"pdf")
+    session = _FakeSession({"/home/alice": []})
+    browser = FtpBrowserWidget(session, "my-box", initial_uploads=[str(local_file)])
+    qtbot.addWidget(browser)
+
+    qtbot.waitUntil(lambda: session.uploaded == [(str(local_file), "/home/alice/report.pdf")], timeout=2000)
+    qtbot.waitUntil(lambda: browser._queue_table.item(0, 3).text() == "Done", timeout=2000)
+
+
+def test_auth_failure_asks_for_new_credentials_and_retries(qtbot):
+    error = ftp_client.AuthenticationFailedError("Authentication failed for root@10.0.0.5.")
+    session = _FakeSession({"/home/alice": []}, fail_connect_with=error)
+    calls = []
+
+    def on_auth_failed(failed_session):
+        calls.append(failed_session)
+        failed_session._fail_connect_with = None  # as if new credentials now work
+        return True
+
+    browser = FtpBrowserWidget(session, "my-box", on_auth_failed=on_auth_failed)
+    qtbot.addWidget(browser)
+
+    qtbot.waitUntil(lambda: session.connected, timeout=2000)
+    assert calls == [session]
+
+
+def test_auth_failure_cancelled_leaves_session_disconnected(qtbot):
+    error = ftp_client.AuthenticationFailedError("Authentication failed for root@10.0.0.5.")
+    session = _FakeSession({"/home/alice": []}, fail_connect_with=error)
+
+    browser = FtpBrowserWidget(session, "my-box", on_auth_failed=lambda s: False)
+    qtbot.addWidget(browser)
+
+    qtbot.waitUntil(lambda: "cancelled" in browser._status_label.text(), timeout=2000)
+    assert session.connected is False
+
+
 def test_double_clicking_a_remote_folder_navigates_into_it(qtbot):
     entries = {
         "/home/alice": [ftp_client.FileEntry(name="docs", is_dir=True)],
