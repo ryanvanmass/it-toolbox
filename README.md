@@ -38,7 +38,8 @@ connection manager for RDP, SSH, and Cloud Storage.
   - **Mbox Browser** — opens `.mbox` mail archives (Google Takeout,
     Thunderbird, Apple Mail exports) read-only in a tab: a sortable message list, search across
     subject/sender/recipients/date (optionally message bodies too), a
-    message preview, and saving attachments or single messages as `.eml`.
+    message preview, opening attachments in their default app
+    (double-click), and saving attachments or single messages as `.eml`.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools
