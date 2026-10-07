@@ -763,16 +763,10 @@ def save_disabled_modules(module_ids: set[str]) -> None:
         path.unlink(missing_ok=True)
 
 
-RECENT_MBOX_FILES_LIMIT = 10
+RECENT_FILES_LIMIT = 10
 
 
-def recent_mbox_files_path() -> Path:
-    return data_dir() / "recent_mbox_files.json"
-
-
-def load_recent_mbox_files() -> list[str]:
-    """Mbox files the Mbox Browser has opened, most recent first."""
-    path = recent_mbox_files_path()
+def _load_recent_files(path: Path) -> list[str]:
     if not path.is_file():
         return []
     try:
@@ -781,8 +775,34 @@ def load_recent_mbox_files() -> list[str]:
         return []
     if not isinstance(files, list):
         return []
-    return [f for f in files if isinstance(f, str)][:RECENT_MBOX_FILES_LIMIT]
+    return [f for f in files if isinstance(f, str)][:RECENT_FILES_LIMIT]
+
+
+def _save_recent_files(path: Path, files: list[str]) -> None:
+    path.write_text(json.dumps(files[:RECENT_FILES_LIMIT]))
+
+
+def recent_mbox_files_path() -> Path:
+    return data_dir() / "recent_mbox_files.json"
+
+
+def load_recent_mbox_files() -> list[str]:
+    """Mbox files the Mbox Browser has opened, most recent first."""
+    return _load_recent_files(recent_mbox_files_path())
 
 
 def save_recent_mbox_files(files: list[str]) -> None:
-    recent_mbox_files_path().write_text(json.dumps(files[:RECENT_MBOX_FILES_LIMIT]))
+    _save_recent_files(recent_mbox_files_path(), files)
+
+
+def recent_eml_files_path() -> Path:
+    return data_dir() / "recent_eml_files.json"
+
+
+def load_recent_eml_files() -> list[str]:
+    """.eml files the EML Viewer has opened, most recent first."""
+    return _load_recent_files(recent_eml_files_path())
+
+
+def save_recent_eml_files(files: list[str]) -> None:
+    _save_recent_files(recent_eml_files_path(), files)
