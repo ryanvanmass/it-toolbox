@@ -328,6 +328,64 @@ def test_entry_menu_offers_download_for_files(qtbot, monkeypatch):
     assert download_action is not None
 
 
+def _visible_names(browser) -> list[str]:
+    return [
+        browser._table.item(row, 0).data(ENTRY_ROLE).name
+        for row in range(browser._table.rowCount())
+        if not browser._table.isRowHidden(row)
+    ]
+
+
+def test_search_filters_current_folder_case_insensitively(qtbot, monkeypatch):
+    entries = {
+        "": [
+            RcloneEntry(name="Photos", path="Photos", is_dir=True),
+            RcloneEntry(name="readme.txt", path="readme.txt", is_dir=False),
+            RcloneEntry(name="holiday-photo.jpg", path="holiday-photo.jpg", is_dir=False),
+        ]
+    }
+    browser = _make_browser(qtbot, monkeypatch, entries)
+    qtbot.waitUntil(lambda: browser._table.rowCount() == 3, timeout=2000)
+
+    browser._search_edit.setText("PHOTO")
+    assert _visible_names(browser) == ["Photos", "holiday-photo.jpg"]
+
+    browser._search_edit.setText("")
+    assert len(_visible_names(browser)) == 3
+
+
+def test_search_is_reapplied_after_refresh(qtbot, monkeypatch):
+    entries = {
+        "": [
+            RcloneEntry(name="a.txt", path="a.txt", is_dir=False),
+            RcloneEntry(name="b.txt", path="b.txt", is_dir=False),
+        ]
+    }
+    browser = _make_browser(qtbot, monkeypatch, entries)
+    qtbot.waitUntil(lambda: browser._table.rowCount() == 2, timeout=2000)
+    browser._search_edit.setText("b")
+
+    browser._reload()
+    qtbot.waitUntil(lambda: browser._table.rowCount() == 2, timeout=2000)
+
+    assert _visible_names(browser) == ["b.txt"]
+
+
+def test_search_clears_when_changing_folder(qtbot, monkeypatch):
+    entries = {
+        "": [RcloneEntry(name="photos", path="photos", is_dir=True)],
+        "photos": [RcloneEntry(name="a.jpg", path="a.jpg", is_dir=False)],
+    }
+    browser = _make_browser(qtbot, monkeypatch, entries)
+    qtbot.waitUntil(lambda: browser._table.rowCount() == 1, timeout=2000)
+    browser._search_edit.setText("pho")
+
+    browser._on_item_double_clicked(browser._table.item(0, 0))
+
+    assert browser._search_edit.text() == ""
+    qtbot.waitUntil(lambda: _visible_names(browser) == ["a.jpg"], timeout=2000)
+
+
 def test_upload_reports_progress_in_the_main_window_status_bar(qtbot, monkeypatch):
     import threading
 

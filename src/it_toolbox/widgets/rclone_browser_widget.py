@@ -9,17 +9,24 @@ single "rename" primitive beyond move, and that's not needed yet.
 The path bar is a clickable breadcrumb (Windows Explorer-style): one
 button per path segment, each jumping straight to that ancestor
 directory, with only the current (last) segment inert.
+
+The search field filters the current folder's listing by name as you
+type (case-insensitive substring match). It only hides rows already
+listed, so it costs no extra rclone calls, and it clears whenever the
+browser moves to another folder.
 """
 
 import os
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -70,10 +77,19 @@ class RcloneBrowserWidget(QWidget):
         )
         self._refresh_button = QPushButton("Refresh")
         self._refresh_button.clicked.connect(self._reload)
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search this folder")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setMaximumWidth(220)
+        self._search_edit.textChanged.connect(self._apply_filter)
+        search_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        search_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        search_shortcut.activated.connect(self._focus_search)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._up_button)
         top_bar.addLayout(self._breadcrumb_layout, 1)
+        top_bar.addWidget(self._search_edit)
         top_bar.addWidget(self._upload_button)
         top_bar.addWidget(self._refresh_button)
 
@@ -133,12 +149,29 @@ class RcloneBrowserWidget(QWidget):
         self._breadcrumb_layout.addStretch(1)
 
     def _navigate_to(self, path: str) -> None:
+        self._change_directory(path)
+
+    def _change_directory(self, path: str) -> None:
+        # A search only applies to the folder it was typed in.
+        self._search_edit.clear()
         self._path = path
         self._reload()
 
     def _on_listing_loaded(self, entries: list[RcloneEntry], task: status_bar.StatusTask) -> None:
         task.finish()
         self._populate_table(entries)
+
+    def _focus_search(self) -> None:
+        self._search_edit.setFocus()
+        self._search_edit.selectAll()
+
+    def _apply_filter(self) -> None:
+        needle = self._search_edit.text().strip().casefold()
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            entry: RcloneEntry | None = item.data(ENTRY_ROLE) if item is not None else None
+            matches = entry is None or not needle or needle in entry.name.casefold()
+            self._table.setRowHidden(row, not matches)
 
     def _populate_table(self, entries: list[RcloneEntry]) -> None:
         # The tab (and this widget) can be closed while a listing was still
@@ -154,18 +187,17 @@ class RcloneBrowserWidget(QWidget):
             size_text = "" if entry.is_dir else format_size(entry.size)
             self._table.setItem(row, 1, QTableWidgetItem(size_text))
             self._table.setItem(row, 2, QTableWidgetItem(entry.modified))
+        self._apply_filter()
 
     def _on_item_double_clicked(self, item: QTableWidgetItem) -> None:
         entry: RcloneEntry = self._table.item(item.row(), 0).data(ENTRY_ROLE)
         if entry.is_dir:
-            self._path = _join(self._path, entry.path)
-            self._reload()
+            self._change_directory(_join(self._path, entry.path))
         else:
             self._download(entry)
 
     def _go_up(self) -> None:
-        self._path = self._path.rsplit("/", 1)[0] if "/" in self._path else ""
-        self._reload()
+        self._change_directory(self._path.rsplit("/", 1)[0] if "/" in self._path else "")
 
     def _download(self, entry: RcloneEntry) -> None:
         full_path = _join(self._path, entry.path)
