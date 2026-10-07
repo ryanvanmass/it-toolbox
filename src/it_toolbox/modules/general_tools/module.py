@@ -1,20 +1,20 @@
 from PySide6.QtWidgets import QMenu, QTabWidget, QWidget
 
 from it_toolbox.modules import ToolModule
-from it_toolbox.modules.mbox_browser.ui.main_view import MboxBrowserView
+from it_toolbox.modules.general_tools.ui.main_view import GeneralToolsView
 
 
-class MboxBrowserModule(ToolModule):
-    id = "mbox_browser"
-    display_name = "Mbox Browser"
+class GeneralToolsModule(ToolModule):
+    id = "general_tools"
+    display_name = "General Tools"
 
     def __init__(self, tabs: QTabWidget) -> None:
         self._tabs = tabs
-        self._widget: MboxBrowserView | None = None
+        self._widget: GeneralToolsView | None = None
 
     def create_widget(self) -> QWidget:
         if self._widget is None:
-            self._widget = MboxBrowserView(tabs=self._tabs)
+            self._widget = GeneralToolsView(tabs=self._tabs)
         return self._widget
 
     def create_sidebar_widget(self) -> QWidget | None:

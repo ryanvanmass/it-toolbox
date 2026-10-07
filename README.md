@@ -33,11 +33,12 @@ connection manager for RDP, SSH, and Cloud Storage.
   Mount Locally): under `~/CloudMounts/` on Linux/macOS, or on a free
   drive letter on Windows. See `docs/cloud-storage-status.md` for its
   current verification status.
-- **Mbox Browser** — a separate module (no account needed) that opens
-  `.mbox` mail archives (Google Takeout, Thunderbird, Apple Mail
-  exports) read-only in a tab: a sortable message list, search across
-  subject/sender/recipients/date (optionally message bodies too), a
-  message preview, and saving attachments or single messages as `.eml`.
+- **General Tools** — a module (no account needed) for standalone
+  utilities, each listed as its own entry in the sidebar:
+  - **Mbox Browser** — opens `.mbox` mail archives (Google Takeout,
+    Thunderbird, Apple Mail exports) read-only in a tab: a sortable message list, search across
+    subject/sender/recipients/date (optionally message bodies too), a
+    message preview, and saving attachments or single messages as `.eml`.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools
@@ -120,7 +121,7 @@ Project layout:
   without any UI.
 - `widgets/` — the Qt-aware layer built on top of `core/`.
 - `modules/` — top-level app features (Connection Manager, Shell
-  Launcher, Cloud Storage, Mbox Browser, Identity Management,
+  Launcher, Cloud Storage, General Tools, Identity Management,
   Settings), each
   registered with the app shell in `modules/registry.py`.
 
