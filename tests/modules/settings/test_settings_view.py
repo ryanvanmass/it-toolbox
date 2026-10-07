@@ -1,8 +1,16 @@
 import subprocess
 
-from it_toolbox.core import rclone_client, settings, update_checker
+from it_toolbox.core import (
+    linux_backend,
+    linux_tools,
+    rclone_client,
+    settings,
+    update_checker,
+    wsl_distro,
+)
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
+from it_toolbox.core.linux_tools_events import linux_tools_events
 from it_toolbox.modules.connection_manager import (
     glinet_client,
     qemu_client,
@@ -792,7 +800,7 @@ def test_dismissing_jumpcloud_key_dialog_leaves_status_unchanged(qtbot, monkeypa
 
 
 def test_qemu_section_not_applicable_off_linux(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch, platform_system="Windows")
+    view = _make_view(qtbot, monkeypatch, platform_system="Darwin")
 
     assert "Not applicable" in view._qemu_status_label.text()
 
@@ -1051,3 +1059,173 @@ def test_backup_section_reports_invalid_backup(qtbot, monkeypatch, tmp_path):
     )
     view._backup_restore_button.click()
     assert "Couldn't read backup" in view._backup_status_label.text()
+
+
+# -- Linux tools (WSL) ---------------------------------------------------------
+
+
+def _wsl_status(state, version=None):
+    return lambda: wsl_distro.DistroStatus(state, version)
+
+
+def _make_windows_view(qtbot, monkeypatch, state, version=None, qemu_available=False):
+    monkeypatch.setattr(wsl_distro, "status", _wsl_status(state, version))
+    return _make_view(qtbot, monkeypatch, platform_system="Windows", qemu_available=qemu_available)
+
+
+def test_linux_tools_section_not_applicable_on_linux(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, platform_system="Linux")
+
+    assert "Not applicable" in view._linux_tools_status_label.text()
+
+
+def test_qemu_section_on_windows_points_at_linux_tools(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.NOT_INSTALLED)
+
+    assert "Linux tools (WSL)" in view._qemu_status_label.text()
+
+
+def test_qemu_section_on_windows_reports_available(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.READY, 1, qemu_available=True)
+
+    assert "available" in view._qemu_status_label.text()
+
+
+def test_linux_tools_no_wsl_offers_wsl_install(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.NO_WSL)
+
+    assert "WSL isn't installed" in view._linux_tools_status_label.text()
+    assert view._linux_tools_action_button.text() == "Install WSL…"
+    assert view._linux_tools_remove_button.isHidden()
+
+
+def test_linux_tools_install_wsl_asks_first(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.NO_WSL)
+    started = []
+    monkeypatch.setattr(wsl_distro, "start_wsl_install", lambda: started.append(1))
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox, "question",
+        staticmethod(lambda *a: settings_main_view.QMessageBox.StandardButton.No),
+    )
+
+    view._linux_tools_action_button.click()
+    assert started == []
+
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox, "question",
+        staticmethod(lambda *a: settings_main_view.QMessageBox.StandardButton.Yes),
+    )
+    view._linux_tools_action_button.click()
+    assert started == [1]
+    assert "installer is running" in view._linux_tools_status_label.text()
+
+
+def test_linux_tools_not_installed_offers_setup(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.NOT_INSTALLED)
+
+    assert view._linux_tools_action_button.text() == "Set Up Linux Tools"
+    assert view._linux_tools_check_button.isHidden()
+    assert view._linux_tools_remove_button.isHidden()
+
+
+def test_linux_tools_outdated_offers_update(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.OUTDATED, 0)
+
+    assert view._linux_tools_action_button.text() == "Update Linux Tools"
+    assert "need an update" in view._linux_tools_status_label.text()
+    assert not view._linux_tools_remove_button.isHidden()
+
+
+def test_linux_tools_ready_shows_maintenance_buttons(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.READY, 1)
+
+    assert view._linux_tools_action_button.isHidden()
+    assert not view._linux_tools_check_button.isHidden()
+    assert not view._linux_tools_sync_ssh_button.isHidden()
+    assert not view._linux_tools_remove_button.isHidden()
+
+
+class _FakeWslBackend(linux_backend.WslBackend):
+    def probe_tool(self, tool):
+        return tool.id != "spice"
+
+
+def test_linux_tools_setup_installs_syncs_and_notifies(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.NOT_INSTALLED)
+    installed = []
+
+    def fake_install(on_progress=None):
+        on_progress(50, 100)
+        installed.append(1)
+        monkeypatch.setattr(wsl_distro, "status", _wsl_status(wsl_distro.DistroState.READY, 1))
+
+    monkeypatch.setattr(wsl_distro, "install", fake_install)
+    monkeypatch.setattr(linux_backend, "get_backend", lambda: _FakeWslBackend())
+    monkeypatch.setattr(wsl_distro, "sync_ssh_credentials", lambda backend: 2)
+    changed = []
+    linux_tools_events.changed.connect(lambda: changed.append(1))
+
+    view._linux_tools_action_button.click()
+
+    qtbot.waitUntil(lambda: "Copied 2 SSH" in view._linux_tools_detail_label.text())
+    assert installed == [1]
+    assert changed
+    assert "are installed" in view._linux_tools_status_label.text()
+    assert view._linux_tools_progress_bar.isHidden()
+
+
+def test_linux_tools_setup_failure_is_reported(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.NOT_INSTALLED)
+
+    def fake_install(on_progress=None):
+        raise wsl_distro.WslDistroError("checksum mismatch")
+
+    monkeypatch.setattr(wsl_distro, "install", fake_install)
+
+    view._linux_tools_action_button.click()
+
+    qtbot.waitUntil(lambda: "checksum mismatch" in view._linux_tools_detail_label.text())
+    assert view._linux_tools_action_button.isEnabled()
+
+
+def test_linux_tools_check_lists_each_tool(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.READY, 1)
+    monkeypatch.setattr(linux_backend, "get_backend", lambda: _FakeWslBackend())
+    monkeypatch.setattr(settings_main_view, "_helper_selftest", lambda backend: True)
+
+    view._linux_tools_check_button.click()
+
+    qtbot.waitUntil(lambda: "✗ " + linux_tools.get("spice").display_name in view._linux_tools_detail_label.text())
+    assert "✓ " + linux_tools.get("virsh").display_name in view._linux_tools_detail_label.text()
+    assert "✓ App ↔ WSL helper connection" in view._linux_tools_detail_label.text()
+    assert "Something's missing" in view._linux_tools_detail_label.text()
+
+
+def test_helper_selftest_runs_the_real_helper(monkeypatch):
+    import sys
+
+    class _ThisPython(linux_backend.NativeBackend):
+        def popen_argv(self, argv):
+            return [sys.executable if a == "python3" else a for a in argv]
+
+    assert settings_main_view._helper_selftest(_ThisPython()) is True
+
+
+def test_linux_tools_remove_asks_then_removes(qtbot, monkeypatch):
+    view = _make_windows_view(qtbot, monkeypatch, wsl_distro.DistroState.READY, 1)
+    removed = []
+
+    def fake_remove():
+        removed.append(1)
+        monkeypatch.setattr(wsl_distro, "status", _wsl_status(wsl_distro.DistroState.NOT_INSTALLED))
+
+    monkeypatch.setattr(wsl_distro, "remove", fake_remove)
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox, "question",
+        staticmethod(lambda *a: settings_main_view.QMessageBox.StandardButton.Yes),
+    )
+
+    view._linux_tools_remove_button.click()
+
+    qtbot.waitUntil(lambda: view._linux_tools_action_button.text() == "Set Up Linux Tools")
+    assert removed == [1]

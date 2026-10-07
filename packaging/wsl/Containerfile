@@ -1,0 +1,18 @@
+# Rootfs for the app-managed "it-toolbox" WSL distro -- see
+# docs/wsl-interconnect-plan.md and core/wsl_distro.py. Built by build.sh,
+# which passes PACKAGES from core/linux_tools.all_packages() so the image
+# and the app's tool registry can't drift apart.
+FROM docker.io/library/debian:trixie-slim
+
+ARG PACKAGES
+ARG ROOTFS_VERSION
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${PACKAGES} \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash toolbox
+
+COPY wsl.conf /etc/wsl.conf
+RUN echo "${ROOTFS_VERSION}" > /etc/it-toolbox-rootfs

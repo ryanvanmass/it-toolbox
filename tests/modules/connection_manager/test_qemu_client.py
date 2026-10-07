@@ -2,6 +2,7 @@ import subprocess
 
 import pytest
 
+from it_toolbox.core import linux_backend
 from it_toolbox.modules.connection_manager import qemu_client
 from it_toolbox.modules.connection_manager.models import QemuHost
 
@@ -186,12 +187,12 @@ def test_power_action_rejects_unknown_action():
 
 
 def test_is_available_true_when_virsh_on_path(monkeypatch):
-    monkeypatch.setattr(qemu_client.shutil, "which", lambda name: "/usr/bin/virsh")
+    monkeypatch.setattr(linux_backend.shutil, "which", lambda name: "/usr/bin/virsh")
     assert qemu_client.is_available() is True
 
 
 def test_is_available_false_when_virsh_missing(monkeypatch):
-    monkeypatch.setattr(qemu_client.shutil, "which", lambda name: None)
+    monkeypatch.setattr(linux_backend.shutil, "which", lambda name: None)
     assert qemu_client.is_available() is False
 
 
