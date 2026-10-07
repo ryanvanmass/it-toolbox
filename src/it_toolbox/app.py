@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import settings
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.registry import load_modules
+from it_toolbox.widgets.manage_automations_dialog import SHELL_ANY, Automation, display_name
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
 try:
@@ -38,6 +39,11 @@ except (ImportError, OSError):
 # so this still picks per-platform rather than standardizing on one.
 _ICON_NAME = "it-toolbox.ico" if sys.platform == "win32" else "it-toolbox.svg"
 _ICON_PATH = Path(__file__).resolve().parent / "resources" / "icons" / _ICON_NAME
+
+# Which declared automation shells fit each kind of session tab -- see
+# _build_session_tab_menu.
+_RDP_SHELLS = frozenset({SHELL_ANY, "PowerShell", "cmd"})
+_TERMINAL_SHELLS = frozenset({SHELL_ANY, "Bash"})
 
 
 class _CurrentPageStackedWidget(QStackedWidget):
@@ -196,16 +202,26 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if is_rdp:
             menu.addAction("Refresh Resolution").triggered.connect(widget.refresh_resolution)
-        automations = settings.load_automations()
+        automations = [Automation.from_dict(a) for a in settings.load_automations()]
         if automations:
             submenu = menu.addMenu("Run Automation")
             tab_title = self._session_tabs.tabText(index)
-            for automation in automations:
-                submenu.addAction(automation["name"]).triggered.connect(
-                    lambda checked=False, a=automation: self._run_automation(
-                        widget, tab_title, a["name"], a["content"]
+            # Automations declared for this kind of tab's usual shell come
+            # first; the rest stay available below a separator (an SSH
+            # host can run PowerShell, an RDP host can be Linux).
+            fitting_shells = _RDP_SHELLS if is_rdp else _TERMINAL_SHELLS
+            fitting = [a for a in automations if a.shell in fitting_shells]
+            others = [a for a in automations if a.shell not in fitting_shells]
+            for group in (fitting, others):
+                if group and submenu.actions():
+                    submenu.addSeparator()
+                for automation in group:
+                    label = display_name(automation.name, automation.shell)
+                    submenu.addAction(label).triggered.connect(
+                        lambda checked=False, label=label, content=automation.content: (
+                            self._run_automation(widget, tab_title, label, content)
+                        )
                     )
-                )
         return menu if menu.actions() else None
 
     def _run_automation(self, widget, tab_title: str, name: str, content: str) -> None:

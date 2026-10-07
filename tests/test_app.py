@@ -404,3 +404,50 @@ def test_terminal_tab_menu_offers_automations_only_when_some_exist(qtbot, monkey
     monkeypatch.setattr(app_module.settings, "load_automations", lambda: _AUTOMATIONS)
     menu = window._build_session_tab_menu(index)
     assert [action.text() for action in menu.actions()] == ["Run Automation"]
+
+
+_SHELL_AUTOMATIONS = [
+    {"name": "Update", "content": "apt update\n", "shell": "Bash"},
+    {"name": "Services", "content": "Get-Service\n", "shell": "PowerShell"},
+    {"name": "Who", "content": "whoami\n"},
+]
+
+
+def test_rdp_tab_menu_lists_windows_shell_automations_first(qtbot, monkeypatch):
+    window, _, index = _window_with_rdp_tab(qtbot, monkeypatch, _SHELL_AUTOMATIONS)
+
+    submenu = window._build_session_tab_menu(index).actions()[1].menu()
+
+    assert [a.text() if not a.isSeparator() else "---" for a in submenu.actions()] == [
+        "Services (PowerShell)",
+        "Who",
+        "---",
+        "Update (Bash)",
+    ]
+
+
+def test_terminal_tab_menu_lists_bash_automations_first(qtbot, monkeypatch):
+    import it_toolbox.app as app_module
+
+    class _FakeTerminal(QWidget):
+        def send_text(self, text):
+            pass
+
+    _disable_external_tools(monkeypatch)
+    monkeypatch.setattr(app_module, "TerminalWidget", _FakeTerminal)
+    monkeypatch.setattr(app_module.settings, "load_automations", lambda: _SHELL_AUTOMATIONS)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    terminal = _FakeTerminal()
+    qtbot.addWidget(terminal)
+    index = window._session_tabs.addTab(terminal, "ssh host")
+
+    submenu = window._build_session_tab_menu(index).actions()[0].menu()
+
+    assert [a.text() if not a.isSeparator() else "---" for a in submenu.actions()] == [
+        "Update (Bash)",
+        "Who",
+        "---",
+        "Services (PowerShell)",
+    ]

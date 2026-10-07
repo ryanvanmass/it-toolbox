@@ -1253,13 +1253,13 @@ def test_manage_automations_saves_the_dialog_result(qtbot, monkeypatch):
             return 0
 
         def automations(self):
-            return [Automation("new", "whoami\n")]
+            return [Automation("new", "whoami\n", "Bash")]
 
     monkeypatch.setattr(view, "_make_manage_automations_dialog", lambda: _FakeDialog())
 
     view._on_manage_automations_clicked()
 
-    assert saved == [[{"name": "new", "content": "whoami\n"}]]
+    assert saved == [[{"name": "new", "content": "whoami\n", "shell": "Bash"}]]
 
 
 def test_manage_automations_dialog_is_seeded_from_saved_automations(qtbot, monkeypatch):

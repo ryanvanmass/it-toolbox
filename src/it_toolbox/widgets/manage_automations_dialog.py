@@ -2,8 +2,12 @@
 the session tab right-click "Run Automation" menu types into an RDP or
 SSH tab as keystrokes/stdin (see app.MainWindow._build_session_tab_menu).
 
-Deliberately just name + text: no target kind, no remote execution, no
-result feedback. Any automation can be run against any RDP or SSH tab.
+Deliberately just name + text + a declared shell: no remote execution,
+no result feedback. The shell is a label, not something this app runs --
+the script is typed into whatever already has focus in the session -- but
+the tab menu uses it to list the automations that fit that tab first
+(Bash for SSH/terminal tabs, PowerShell/cmd for RDP). Any automation can
+still be run against any RDP or SSH tab.
 Mirrors connection_manager/ui/manage_hosts_dialog.py.
 """
 
@@ -14,6 +18,7 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QComboBox,
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
@@ -27,18 +32,35 @@ from PySide6.QtWidgets import (
 
 AUTOMATION_ROLE = Qt.ItemDataRole.UserRole
 
+SHELL_ANY = "Any"
+SHELLS = (SHELL_ANY, "Bash", "PowerShell", "cmd")
+
+
+def display_name(name: str, shell: str) -> str:
+    """How an automation is labelled in the library list and the tab
+    menu -- the shell in parentheses, unless it's the catch-all "Any"."""
+    return name if shell == SHELL_ANY else f"{name} ({shell})"
+
 
 @dataclass(frozen=True)
 class Automation:
     name: str
     content: str
+    shell: str = SHELL_ANY
 
     @classmethod
     def from_dict(cls, data: dict) -> "Automation":
-        return cls(name=data.get("name", ""), content=data.get("content", ""))
+        # Automations saved before the shell field existed have no
+        # "shell" key -- they load as "Any".
+        shell = data.get("shell", SHELL_ANY)
+        return cls(
+            name=data.get("name", ""),
+            content=data.get("content", ""),
+            shell=shell if shell in SHELLS else SHELL_ANY,
+        )
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "content": self.content}
+        return {"name": self.name, "content": self.content, "shell": self.shell}
 
 
 class _AutomationEditDialog(QDialog):
@@ -50,6 +72,9 @@ class _AutomationEditDialog(QDialog):
         self.resize(560, 420)
 
         self._name_edit = QLineEdit(automation.name if automation else "")
+        self._shell_combo = QComboBox()
+        self._shell_combo.addItems(SHELLS)
+        self._shell_combo.setCurrentText(automation.shell if automation else SHELL_ANY)
         self._content_edit = QPlainTextEdit(automation.content if automation else "")
         self._content_edit.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         self._content_edit.setPlaceholderText(
@@ -59,6 +84,7 @@ class _AutomationEditDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Name:", self._name_edit)
+        form.addRow("Shell:", self._shell_combo)
         form.addRow("Script:", self._content_edit)
 
         buttons = QDialogButtonBox(
@@ -75,6 +101,7 @@ class _AutomationEditDialog(QDialog):
         return Automation(
             name=self._name_edit.text().strip(),
             content=self._content_edit.toPlainText(),
+            shell=self._shell_combo.currentText(),
         )
 
 
@@ -128,7 +155,7 @@ class ManageAutomationsDialog(QDialog):
         return _AutomationEditDialog(automation, parent=self)
 
     def _add_list_item(self, automation: Automation) -> None:
-        item = QListWidgetItem(automation.name)
+        item = QListWidgetItem(display_name(automation.name, automation.shell))
         item.setData(AUTOMATION_ROLE, automation)
         self._list.addItem(item)
 
@@ -149,7 +176,7 @@ class ManageAutomationsDialog(QDialog):
             return
         automation = dialog.automation()
         if automation.name and automation.content:
-            item.setText(automation.name)
+            item.setText(display_name(automation.name, automation.shell))
             item.setData(AUTOMATION_ROLE, automation)
 
     def _on_remove_clicked(self) -> None:

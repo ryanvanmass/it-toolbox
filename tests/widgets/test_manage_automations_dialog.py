@@ -103,3 +103,30 @@ def test_automation_dict_round_trip():
     automation = Automation("n", "c")
 
     assert Automation.from_dict(automation.to_dict()) == automation
+
+
+def test_shell_defaults_to_any_for_automations_saved_without_one():
+    assert Automation.from_dict({"name": "n", "content": "c"}).shell == "Any"
+    assert Automation.from_dict({"name": "n", "content": "c", "shell": "bogus"}).shell == "Any"
+
+
+def test_automation_dict_round_trip_keeps_shell():
+    automation = Automation("n", "c", "PowerShell")
+
+    assert automation.to_dict() == {"name": "n", "content": "c", "shell": "PowerShell"}
+    assert Automation.from_dict(automation.to_dict()) == automation
+
+
+def test_edit_dialog_round_trips_shell(qtbot):
+    edit = _AutomationEditDialog(Automation("Svc", "Get-Service", "PowerShell"))
+    qtbot.addWidget(edit)
+
+    assert edit.automation().shell == "PowerShell"
+    edit._shell_combo.setCurrentText("cmd")
+    assert edit.automation().shell == "cmd"
+
+
+def test_list_labels_show_the_declared_shell(qtbot):
+    dialog = _make_dialog(qtbot, [Automation("Svc", "x", "PowerShell"), Automation("Any one", "y")])
+
+    assert [dialog._list.item(i).text() for i in range(2)] == ["Svc (PowerShell)", "Any one"]
