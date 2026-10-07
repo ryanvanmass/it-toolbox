@@ -25,6 +25,7 @@ from pathlib import Path
 import requests
 
 from it_toolbox.core import settings
+from it_toolbox.core.subprocess_utils import no_window_kwargs
 from it_toolbox.modules.cloud_storage.models import (
     ConfigStep,
     Provider,
@@ -94,6 +95,7 @@ def _run(*args: str, timeout: int = RCLONE_TIMEOUT_SEC) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            **no_window_kwargs(),
         )
     except subprocess.TimeoutExpired as e:
         raise RcloneApiError(f"rclone {' '.join(args)} timed out") from e

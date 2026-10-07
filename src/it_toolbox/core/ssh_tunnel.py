@@ -40,6 +40,8 @@ import sys
 import tempfile
 import time
 
+from it_toolbox.core.subprocess_utils import no_window_kwargs
+
 READY_POLL_INTERVAL_SEC = 0.1
 
 def _popen_kwargs() -> dict:
@@ -48,15 +50,9 @@ def _popen_kwargs() -> dict:
     subsystem executable like ssh.exe -- confirmed live: a real report of
     a bare "ssh.exe" window staying open behind the app for the whole
     session, titled after the binary's own path since nothing else sets
-    one. A function, not a module-level constant, so this is actually
-    testable without needing a real Windows Python interpreter to import
-    this module at all -- CREATE_NO_WINDOW only exists as a subprocess
-    attribute there, hence getattr with a harmless fallback rather than
-    a direct attribute reference.
+    one. See subprocess_utils.no_window_kwargs.
     """
-    if sys.platform == "win32":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
-    return {}
+    return no_window_kwargs()
 
 
 class SshTunnelError(Exception):

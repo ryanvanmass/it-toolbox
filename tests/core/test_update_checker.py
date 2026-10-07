@@ -473,3 +473,14 @@ def test_macos_swap_script_restores_the_old_bundle_if_the_move_fails(tmp_path):
     assert (target / "old").exists()
     assert not Path(f"{target}.old").exists()
     assert opened == [str(target)]
+
+
+def test_newest_release_ignores_wsl_rootfs_releases():
+    # package-wsl.yml publishes `wsl-rootfs-<N>` releases to the same repo
+    # (as pre-releases) -- the beta channel must never offer one as an app
+    # update.
+    releases = [
+        {"tag_name": "wsl-rootfs-7"},
+        {"tag_name": "v0.3.9-beta.2"},
+    ]
+    assert update_checker._newest_release(releases)["tag_name"] == "v0.3.9-beta.2"

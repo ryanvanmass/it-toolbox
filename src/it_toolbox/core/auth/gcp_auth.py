@@ -6,6 +6,8 @@ import subprocess
 
 from google.oauth2.credentials import Credentials
 
+from it_toolbox.core.subprocess_utils import no_window_kwargs
+
 GCLOUD_CMD = "gcloud"
 
 # On Windows, gcloud is a .cmd batch script — CreateProcess (what subprocess
@@ -61,6 +63,7 @@ def _run(*args: str, env: dict[str, str] | None = None) -> str:
         check=False,
         shell=_IS_WINDOWS,
         env=env,
+        **no_window_kwargs(),
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"gcloud {' '.join(args)} failed")
