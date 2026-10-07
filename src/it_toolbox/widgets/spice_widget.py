@@ -53,7 +53,6 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.scancodes import SCANCODES
-from it_toolbox.core.spice.spice_session_worker import SpiceSessionWorker
 
 _BUTTON_NAMES = {
     Qt.MouseButton.LeftButton: "left",
@@ -79,7 +78,16 @@ class SpiceWidget(QWidget):
         port: int,
         password: str = "",
         parent: QWidget | None = None,
+        *,
+        worker=None,
     ) -> None:
+        """`worker` is anything with SpiceSessionWorker's signal/method
+        surface -- on Windows, a core/spice/remote_spice_worker.RemoteSpiceWorker
+        running the session inside the Linux tools WSL distro (host/port
+        are then informational only). Omitted, an in-process
+        SpiceSessionWorker connects to host:port -- imported only then, so
+        this module itself never needs PyGObject.
+        """
         super().__init__(parent)
         # A persistent backing canvas, not a fresh QImage per signal --
         # each frame_ready delivers only the rows that actually changed
@@ -104,7 +112,11 @@ class SpiceWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._status_label)
 
-        self._worker = SpiceSessionWorker(host, port, password)
+        if worker is None:
+            from it_toolbox.core.spice.spice_session_worker import SpiceSessionWorker
+
+            worker = SpiceSessionWorker(host, port, password)
+        self._worker = worker
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
         self._worker.signals.agent_connected.connect(self._on_agent_connected)

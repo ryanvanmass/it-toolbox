@@ -29,11 +29,14 @@ connection manager for RDP, SSH, and Cloud Storage.
   configures and browses `rclone` remotes: any of rclone's ~50 backend
   types (S3, SFTP, WebDAV, Google Drive, local, etc.), via a generic
   form built from rclone's own config schema rather than one form per
-  backend. See `docs/cloud-storage-status.md` for its current
-  verification status.
+  backend. Any remote can also be mounted locally (right-click →
+  Mount Locally): under `~/CloudMounts/` on Linux/macOS, or on a free
+  drive letter on Windows. See `docs/cloud-storage-status.md` for its
+  current verification status.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
-  rclone, gcloud, QEMU/libvirt, and FreeRDP, plus config backup/restore
+  rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools
+  WSL distro, plus config backup/restore
   to a zip. See
   `docs/app-settings-status.md` for its current verification status.
 - **Identity Management** — a separate module (no GCP account needed)
@@ -59,6 +62,14 @@ connection manager for RDP, SSH, and Cloud Storage.
 - **Cloud Storage module**: needs the `rclone` CLI on PATH — see
   [rclone.org/downloads](https://rclone.org/downloads/). Every other
   module works without it.
+  Mounting a remote locally additionally needs FUSE on Linux (`fuse3`),
+  macFUSE or FUSE-T on macOS, or [WinFsp](https://winfsp.dev/rel/) on
+  Windows; the app says which is missing if you try without it.
+- **Windows, for QEMU/libvirt and embedded SPICE**: these run inside a
+  small Linux distro the app manages itself under WSL2. Set it up once
+  from Settings > Integrations > Linux tools (WSL); it's an ~80 MB
+  download and needs WSL installed (the same page can start that). See
+  `docs/wsl-interconnect-plan.md`.
 - **Linux only, for embedded QEMU/SPICE**: needs your distro's
   GObject-Introspection SPICE client library — there's no PyPI-installable
   equivalent, so it has to come from the system package manager (Fedora:

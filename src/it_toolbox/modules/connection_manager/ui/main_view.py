@@ -18,11 +18,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import async_utils, ftp_client, settings
+from it_toolbox.core import async_utils, ftp_client, linux_backend, settings, wsl_distro
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
+from it_toolbox.core.linux_tools_events import linux_tools_events
 from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
+from it_toolbox.core.spice.remote_spice_worker import RemoteSpiceWorker
 from it_toolbox.core.ssh_tunnel import SshTunnel
 from it_toolbox.core.tunnel_session import BackgroundTunnel
 from it_toolbox.modules.connection_manager import (
@@ -88,22 +90,24 @@ try:
 except (ImportError, OSError):
     RdpWidget = None
 
+from it_toolbox.widgets.spice_widget import SpiceWidget
+
 try:
-    # SpiceWidget pulls in PyGObject/spice-glib (core/spice/spice_session_worker.py
-    # does `from gi.repository import GLib`), which pyproject.toml only
-    # installs on sys_platform == "linux" — importing it unconditionally
-    # here would crash the *entire app* at startup on Windows/macOS, not
-    # just disable the QEMU/SPICE feature. VM discovery/power actions
-    # (qemu_client.py, pure subprocess/virsh) don't need this and stay
-    # available regardless; only the actual "Connect via SPICE" action is
-    # gated on SpiceWidget being importable. ValueError (not just
-    # ImportError) is the realistic failure mode: PyGObject itself can be
-    # present while the spice-glib GObject-Introspection typelib specifically
-    # is missing, which surfaces as gi.require_version() raising ValueError,
-    # not an ImportError.
-    from it_toolbox.widgets.spice_widget import SpiceWidget
+    # The in-process SPICE worker pulls in PyGObject/spice-glib
+    # (core/spice/spice_session_runner.py does `from gi.repository import
+    # GLib`), which pyproject.toml only installs on sys_platform == "linux"
+    # — importing it unconditionally here would crash the *entire app* at
+    # startup on Windows/macOS, not just disable the QEMU/SPICE feature.
+    # SpiceWidget itself only imports it lazily, so it's always importable.
+    # On Windows, "Connect via SPICE" uses RemoteSpiceWorker instead (the
+    # session runs inside the Linux tools WSL distro) -- see _spice_mode.
+    # ValueError (not just ImportError) is the realistic failure mode:
+    # PyGObject itself can be present while the spice-glib
+    # GObject-Introspection typelib specifically is missing, which
+    # surfaces as gi.require_version() raising ValueError.
+    from it_toolbox.core.spice.spice_session_worker import SpiceSessionWorker
 except (ImportError, ValueError):
-    SpiceWidget = None
+    SpiceSessionWorker = None
 
 PROJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 CHILDREN_LOADED_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -133,6 +137,19 @@ GCP_REFRESH_INTERVAL_MS = 30 * 60 * 1000  # manual refresh covers "need it soone
 # ssh's null device, for discarding a known_hosts write — see _embed_ssh's
 # skip_host_key_check.
 _NULL_DEVICE = "NUL" if platform.system() == "Windows" else "/dev/null"
+
+
+def _spice_mode() -> str | None:
+    """How "Connect via SPICE" works on this machine: "wsl" (Windows,
+    session runs in the Linux tools distro via RemoteSpiceWorker),
+    "local" (in-process SpiceSessionWorker), or None (unavailable)."""
+    if SpiceWidget is None:
+        return None
+    if linux_backend.is_wsl():
+        return "wsl"
+    if SpiceSessionWorker is not None:
+        return "local"
+    return None
 
 
 def _instance_key(instance: Instance) -> tuple[str, str, str]:
@@ -272,6 +289,11 @@ class ConnectionManagerView(QWidget):
         # Signing in/out happens in Settings, not here — this view only
         # reacts to it (see _on_account_changed).
         auth_events.account_changed.connect(self._on_account_changed)
+
+        # Same for the Windows-only Linux tools distro (Settings > Linux
+        # tools (WSL)): installing/removing it shows/hides the QEMU tree.
+        linux_tools_events.changed.connect(self._on_linux_tools_changed)
+        self._prepare_wsl_backend()
 
         if not gcp_auth.is_available():
             return
@@ -692,6 +714,28 @@ class ConnectionManagerView(QWidget):
             self._qemu_root_item.addChild(host_item)
         self._apply_tree_filter()
 
+    def _on_linux_tools_changed(self) -> None:
+        self._populate_qemu_hosts()
+        self._prepare_wsl_backend()
+
+    @staticmethod
+    def _prepare_wsl_backend() -> None:
+        """Windows only (a no-op natively): boots the Linux tools distro
+        in the background so the first QEMU tree expansion doesn't pay
+        WSL's few-second cold start, and re-syncs the Windows SSH keys
+        into it so a key added since setup works for qemu+ssh:// too."""
+        backend = linux_backend.get_backend()
+        if not isinstance(backend, linux_backend.WslBackend):
+            return
+
+        def warm_up_and_sync() -> None:
+            backend.warm_up()
+            wsl_distro.sync_ssh_credentials(backend)
+
+        # Best-effort: a failure here surfaces anyway, more usefully, as
+        # the error from whichever real virsh call hits the same problem.
+        async_utils.run_in_background(warm_up_and_sync, on_error=lambda _error: None)
+
     def _find_qemu_host_item(self, host: QemuHost) -> QTreeWidgetItem | None:
         if self._qemu_root_item is None:
             return None
@@ -1083,11 +1127,11 @@ class ConnectionManagerView(QWidget):
     def _show_qemu_vm_context_menu(self, pos, item: QTreeWidgetItem, vm: QemuVm) -> None:
         host = item.data(0, HOST_ROLE)
         menu = QMenu(self)
-        # SpiceWidget (and so "Connect via SPICE") is only available where
-        # PyGObject/spice-glib are installed — see the SpiceWidget import
-        # at the top of this file. VM discovery/power actions below don't
-        # need it and stay available regardless.
-        connect_action = menu.addAction("Connect via SPICE") if SpiceWidget is not None else None
+        # "Connect via SPICE" is only available where PyGObject/spice-glib
+        # are installed, or (Windows) the Linux tools distro is — see
+        # _spice_mode. VM discovery/power actions below don't need it and
+        # stay available regardless.
+        connect_action = menu.addAction("Connect via SPICE") if _spice_mode() is not None else None
         sftp_action = menu.addAction("Connect via SFTP")
         menu.addSeparator()
         start_action = menu.addAction("Start")
@@ -1995,12 +2039,20 @@ class ConnectionManagerView(QWidget):
     # -- Connect: QEMU/libvirt, tunnel over SSH (if remote), embed SPICE -------
 
     def _connect_qemu(self, host: QemuHost, vm: QemuVm) -> None:
-        if SpiceWidget is None:
+        mode = _spice_mode()
+        if mode is None:
             QMessageBox.warning(
                 self,
                 "SPICE unavailable",
-                "Embedded SPICE needs PyGObject/spice-glib, which aren't available on "
-                "this platform — see docs/qemu-spice-status.md.",
+                "Embedded SPICE needs PyGObject/spice-glib (or, on Windows, Linux tools "
+                "set up in Settings > Linux tools (WSL)), which aren't available here.",
+            )
+            return
+        if mode == "wsl":
+            async_utils.run_in_background(
+                lambda: self._find_qemu_spice_port(host, vm),
+                on_result=lambda port: self._on_remote_qemu_spice_port_ready(host, vm, port),
+                on_error=self._on_session_error,
             )
             return
         async_utils.run_in_background(
@@ -2010,14 +2062,30 @@ class ConnectionManagerView(QWidget):
         )
 
     @staticmethod
+    def _find_qemu_spice_port(host: QemuHost, vm: QemuVm) -> int:
+        spice_port = qemu_client.get_vm_spice_port(host, vm.name)
+        if spice_port is None:
+            raise QemuApiError(qemu_client.diagnose_missing_spice_port(host, vm.name, vm.state))
+        return spice_port
+
+    def _on_remote_qemu_spice_port_ready(self, host: QemuHost, vm: QemuVm, spice_port: int) -> None:
+        """Windows: the helper inside the Linux tools distro opens the
+        qemu+ssh:// tunnel itself (see wsl_helper/spice_service.py), so
+        there's no tunnel to track here -- closing the widget stops the
+        helper, which tears its tunnel down."""
+        session_id = self._next_session_id
+        self._next_session_id += 1
+        worker = RemoteSpiceWorker(host.uri, spice_port)
+        self._embed_spice(session_id, vm.name, spice_port, worker=worker)
+        self._active_sessions_dialog.add_session(session_id, f"{vm.name} (SPICE via WSL) — {host.name}")
+
+    @staticmethod
     def _prepare_qemu_spice_connection(host: QemuHost, vm: QemuVm) -> tuple[QemuTunnel | None, int]:
         """(tunnel, port-to-connect-to-on-127.0.0.1) -- tunnel is None for a
         local libvirt host (see qemu_tunnel.is_local_uri()'s docstring for
         why that case needs no tunnel at all: its SPICE port is already
         directly reachable on this same machine)."""
-        spice_port = qemu_client.get_vm_spice_port(host, vm.name)
-        if spice_port is None:
-            raise QemuApiError(qemu_client.diagnose_missing_spice_port(host, vm.name, vm.state))
+        spice_port = ConnectionManagerView._find_qemu_spice_port(host, vm)
         if is_local_uri(host.uri):
             return None, spice_port
         tunnel = QemuTunnel(host.uri, spice_port)
@@ -2041,8 +2109,8 @@ class ConnectionManagerView(QWidget):
         label = f"{vm.name} (SPICE) — 127.0.0.1:{port}"
         self._active_sessions_dialog.add_session(session_id, label)
 
-    def _embed_spice(self, session_id: int, display_name: str, port: int) -> None:
-        spice = SpiceWidget("127.0.0.1", port)
+    def _embed_spice(self, session_id: int, display_name: str, port: int, worker=None) -> None:
+        spice = SpiceWidget("127.0.0.1", port) if worker is None else SpiceWidget("127.0.0.1", port, worker=worker)
         spice.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = spice
         self._owned_tab_widgets.add(spice)

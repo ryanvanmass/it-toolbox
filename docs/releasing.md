@@ -131,3 +131,25 @@ Pushing a version tag is a real, world-visible publish action — same
 category as merging a PR. The script does the mechanical, reversible part
 (edit + local commit + local tag); pushing is a deliberate, separate step
 you take when you're actually ready to publish.
+
+## WSL rootfs releases (Windows Linux tools)
+
+The Windows build's QEMU/libvirt and SPICE support runs in an
+app-managed WSL distro whose rootfs is published separately from app
+releases (see `docs/wsl-interconnect-plan.md`). Cut a new one only when
+`src/it_toolbox/core/linux_tools.py` gains a package or the Debian base
+needs refreshing:
+
+1. Bump `ROOTFS_VERSION` in `src/it_toolbox/core/wsl_distro.py` (to N)
+   in the same PR as the registry change. `package-wsl.yml` builds and
+   smoke-tests the image on that PR.
+2. After merging, tag and push: `git tag wsl-rootfs-N && git push origin wsl-rootfs-N`.
+   `package-wsl.yml` publishes `it-toolbox-wsl-rootfs-N.tar.gz` and its
+   `.sha256` as a pre-release that's never marked latest, so the app's
+   own update checker ignores it.
+3. Publish the rootfs **before** the app release that expects it: an app
+   with `ROOTFS_VERSION = N` downloads `wsl-rootfs-N` the moment a user
+   clicks "Set Up/Update Linux Tools".
+
+To build it locally: `packaging/wsl/build.sh N` (podman or docker),
+output in `dist/wsl/`.

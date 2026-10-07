@@ -79,7 +79,7 @@ project if it happens).
      they're missing — same reasoning as the `SpiceWidget`/PyGObject
      guard already in `connection_manager/ui/main_view.py`). Off
      Windows, shows "Not applicable". On Windows, a "Fetch FreeRDP DLLs"
-     button runs the existing `scripts/fetch_freerdp_windows.ps1` via
+     button runs the packaged `it_toolbox/resources/scripts/fetch_freerdp_windows.ps1` via
      `subprocess`, then re-sets `IT_TOOLBOX_FREERDP_DIR` in-process and
      retries the import — no restart needed if it works, since the
      module wasn't successfully imported before (Python doesn't leave a
