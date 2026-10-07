@@ -47,6 +47,7 @@ def _make_view(
     jumpcloud_key_configured=False,
     gcp_ssh_key_override=None,
     gcp_ssh_public_key=None,
+    disabled_modules=frozenset(),
 ):
     # Keep tests hermetic — exercising Settings-page wiring, not real
     # gcloud/rclone discovery, so they shouldn't depend on (or spawn a
@@ -62,6 +63,7 @@ def _make_view(
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
     monkeypatch.setattr(settings, "load_rdp_keyboard_layout", lambda: rdp_keyboard_layout)
     monkeypatch.setattr(settings, "load_terminal_font_size", lambda: terminal_font_size)
+    monkeypatch.setattr(settings, "load_disabled_modules", lambda: disabled_modules)
     monkeypatch.setattr(
         settings, "load_default_double_click_action", lambda: default_double_click_action
     )
@@ -181,6 +183,40 @@ def test_toggling_include_prerelease_checkbox_saves_it(qtbot, monkeypatch):
     view._include_prerelease_checkbox.setChecked(True)
 
     assert saved == [True]
+
+
+def test_modules_section_lists_every_module_but_settings_checked_by_default(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+
+    assert list(view._module_checkboxes) == [
+        "connection_manager",
+        "shell_launcher",
+        "cloud_storage",
+        "general_tools",
+        "identity_management",
+    ]
+    assert all(checkbox.isChecked() for checkbox in view._module_checkboxes.values())
+    assert view._modules_restart_label.isHidden()
+
+
+def test_modules_section_unchecks_saved_disabled_modules(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, disabled_modules={"identity_management"})
+
+    assert not view._module_checkboxes["identity_management"].isChecked()
+    assert view._module_checkboxes["connection_manager"].isChecked()
+
+
+def test_toggling_a_module_saves_it_and_asks_for_restart(qtbot, monkeypatch):
+    saved = []
+    monkeypatch.setattr(settings, "save_disabled_modules", lambda ids: saved.append(ids))
+    view = _make_view(qtbot, monkeypatch)
+
+    view._module_checkboxes["cloud_storage"].setChecked(False)
+    view._module_checkboxes["shell_launcher"].setChecked(False)
+    view._module_checkboxes["cloud_storage"].setChecked(True)
+
+    assert saved == [{"cloud_storage"}, {"cloud_storage", "shell_launcher"}, {"shell_launcher"}]
+    assert not view._modules_restart_label.isHidden()
 
 
 def test_check_updates_passes_include_prerelease_flag(qtbot, monkeypatch):

@@ -3479,3 +3479,34 @@ def test_search_filters_glinet_hosts_and_survives_repopulating(qtbot, monkeypatc
     assert root.isHidden() is False
     assert root.child(0).isHidden() is False
     assert root.child(1).isHidden() is True
+
+
+def test_project_menu_opens_the_project_in_the_gcp_console(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    view = _make_view(qtbot, monkeypatch)
+    view._all_projects = [GcpProject(project_id="my-proj-123", display_name="My Project")]
+    view._apply_project_selection({"my-proj-123"})
+    project_item = view._tree.topLevelItem(0).child(0)
+    monkeypatch.setattr(view._tree, "itemAt", lambda pos: project_item)
+    seen = []
+
+    class _AutoPickMenu(QMenu):
+        def exec(self, *args):
+            seen.extend(action.text() for action in self.actions() if action.text())
+            picked = next(a for a in self.actions() if a.text() == "Open in GCP Console")
+            picked.trigger()
+            return picked
+
+    monkeypatch.setattr(main_view_module, "QMenu", _AutoPickMenu)
+    opened = []
+    monkeypatch.setattr(
+        main_view_module.QDesktopServices, "openUrl", lambda url: opened.append(url.toString())
+    )
+
+    view._on_tree_context_menu(QPoint(0, 0))
+
+    assert seen == ["Refresh", "Open in GCP Console"]
+    assert opened == ["https://console.cloud.google.com/home/dashboard?project=my-proj-123"]

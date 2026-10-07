@@ -464,6 +464,28 @@ def test_save_and_load_include_prerelease_updates(monkeypatch, tmp_path):
     assert settings.load_include_prerelease_updates() is False
 
 
+def test_disabled_modules_empty_when_never_set(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_disabled_modules() == set()
+
+
+def test_save_and_load_disabled_modules(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_disabled_modules({"shell_launcher", "cloud_storage"})
+    assert settings.load_disabled_modules() == {"shell_launcher", "cloud_storage"}
+    settings.save_disabled_modules(set())
+    assert settings.load_disabled_modules() == set()
+    assert not settings.disabled_modules_path().exists()
+
+
+def test_disabled_modules_ignores_corrupt_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.disabled_modules_path().write_text("{not json")
+    assert settings.load_disabled_modules() == set()
+    settings.disabled_modules_path().write_text('{"shell_launcher": true}')
+    assert settings.load_disabled_modules() == set()
+
+
 # -- Per-GCP-instance RDP credentials ------------------------------------------
 
 _VM = ("proj", "us-central1-a", "vm-1")
