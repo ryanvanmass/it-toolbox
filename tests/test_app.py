@@ -35,19 +35,20 @@ def test_main_window_loads_connection_manager_by_default(qtbot, monkeypatch):
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window._module_list.count() == 5
+    assert window._module_list.count() == 6
     assert window._module_list.item(0).text() == "Connection Manager"
     assert window._module_list.item(1).text() == "Shell Launcher"
     assert window._module_list.item(2).text() == "Cloud Storage"
-    assert window._module_list.item(3).text() == "Identity Management"
-    assert window._module_list.item(4).text() == "Settings"
+    assert window._module_list.item(3).text() == "General Tools"
+    assert window._module_list.item(4).text() == "Identity Management"
+    assert window._module_list.item(5).text() == "Settings"
 
 
 def test_main_window_leaves_out_disabled_modules(qtbot, monkeypatch):
     _disable_external_tools(monkeypatch)
     monkeypatch.setattr(
         "it_toolbox.modules.registry.settings.load_disabled_modules",
-        lambda: {"connection_manager", "identity_management"},
+        lambda: {"connection_manager", "general_tools", "identity_management"},
     )
 
     window = MainWindow()
@@ -69,6 +70,7 @@ def test_settings_module_cannot_be_disabled(qtbot, monkeypatch):
             "connection_manager",
             "shell_launcher",
             "cloud_storage",
+            "general_tools",
             "identity_management",
             "settings",
         },
