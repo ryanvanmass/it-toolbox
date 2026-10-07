@@ -2,7 +2,12 @@ import subprocess
 
 import pytest
 
-from it_toolbox.core import rclone_client, shell_discovery, subprocess_utils
+from it_toolbox.core import (
+    linux_backend,
+    rclone_client,
+    shell_discovery,
+    subprocess_utils,
+)
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.modules.connection_manager import qemu_client, qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost
@@ -55,8 +60,10 @@ def _call_wsl(monkeypatch):
     [
         (rclone_client, _call_rclone),
         (gcp_auth, _call_gcloud),
-        (qemu_client, _call_virsh),
-        (qemu_provisioning, _call_virt_install),
+        # virsh/virt-install spawn through core/linux_backend (natively on
+        # Linux, via the Linux tools WSL distro on Windows).
+        (linux_backend, _call_virsh),
+        (linux_backend, _call_virt_install),
         (shell_discovery, _call_wsl),
     ],
 )

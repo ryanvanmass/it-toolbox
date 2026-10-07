@@ -37,3 +37,15 @@ Qt. PySide6 itself is LGPLv3 (or a commercial Qt license) — see
 <https://www.qt.io/licensing/> for details. IT Toolbox uses PySide6 as
 an unmodified, dynamically-linked dependency (installed via `pip`), which
 does not require IT Toolbox's own code to be LGPL-licensed.
+
+## Linux tools WSL rootfs (Windows only)
+
+The `it-toolbox-wsl-rootfs-<N>.tar.gz` release asset, which the Windows
+build downloads on request from Settings > Linux tools (WSL), is an
+unmodified Debian (trixie) base image plus unmodified Debian packages
+(libvirt-clients, virtinst, python3-gi, gir1.2-spiceclientglib-2.0,
+openssh-client and their dependencies), built by `packaging/wsl/`. Each
+package keeps its own license, found in the image under
+`/usr/share/doc/<package>/copyright`. Corresponding source for every
+package is available from Debian at <https://sources.debian.org> and,
+for the exact versions in a given image, <https://snapshot.debian.org>.

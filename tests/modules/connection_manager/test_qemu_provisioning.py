@@ -2,6 +2,7 @@ import subprocess
 
 import pytest
 
+from it_toolbox.core import linux_backend
 from it_toolbox.modules.connection_manager import qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost, VmCreateSpec
 
@@ -316,12 +317,12 @@ def test_add_disk_live_forces_virtio_target_and_bus(monkeypatch):
 
 
 def test_is_available_true_when_virt_install_on_path(monkeypatch):
-    monkeypatch.setattr(qemu_provisioning.shutil, "which", lambda name: "/usr/bin/virt-install")
+    monkeypatch.setattr(linux_backend.shutil, "which", lambda name: "/usr/bin/virt-install")
     assert qemu_provisioning.is_available() is True
 
 
 def test_is_available_false_when_virt_install_missing(monkeypatch):
-    monkeypatch.setattr(qemu_provisioning.shutil, "which", lambda name: None)
+    monkeypatch.setattr(linux_backend.shutil, "which", lambda name: None)
     assert qemu_provisioning.is_available() is False
 
 

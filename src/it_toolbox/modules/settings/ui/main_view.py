@@ -46,11 +46,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from it_toolbox.core import config_backup, rclone_client, settings, update_checker
+from it_toolbox.core import (
+    config_backup,
+    linux_backend,
+    linux_tools,
+    rclone_client,
+    settings,
+    update_checker,
+    wsl_distro,
+)
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
+from it_toolbox.core.linux_tools_events import linux_tools_events
 from it_toolbox.core.subprocess_utils import no_window_kwargs
+from it_toolbox.core.wsl import transport
+from it_toolbox.core.wsl.helper_process import HelperProcess
 from it_toolbox.modules.connection_manager import (
     glinet_client,
     qemu_client,
@@ -61,6 +72,7 @@ from it_toolbox.widgets.rclone_location_picker import (
     clear_rclone_path,
     prompt_for_rclone_path,
 )
+from it_toolbox.wsl_helper import selftest_service
 
 # FreeRDP DLL loading happens as an import-time side effect in
 # core/rdp/freerdp_client.py (raises OSError there if the libraries
@@ -81,6 +93,21 @@ _FREERDP_FETCH_SCRIPT = (
     Path(__file__).resolve().parents[3] / "resources" / "scripts" / "fetch_freerdp_windows.ps1"
 )
 _FREERDP_DEST_DIR_ENV = "IT_TOOLBOX_FREERDP_DIR"
+
+
+def _helper_selftest(backend) -> bool:
+    """Runs the WSL helper's echo service: proves the spawn, handshake and
+    WSL2 localhost forwarding the embedded SPICE viewer depends on all
+    work, without needing a VM."""
+    helper = HelperProcess("selftest", {}, backend=backend)
+    try:
+        conn = helper.start()
+        msg_type, _payload = conn.recv()
+        return msg_type == selftest_service.READY
+    except (transport.TransportError, OSError, EOFError):
+        return False
+    finally:
+        helper.stop()
 
 
 class _DownloadProgressSignal(QObject):
@@ -181,6 +208,7 @@ class SettingsView(QWidget):
                     self._build_gcp_ssh_key_section(),
                     self._build_jumpcloud_section(),
                     self._build_qemu_section(),
+                    self._build_linux_tools_section(),
                     self._build_glinet_section(),
                 ],
             ),
@@ -843,6 +871,15 @@ class SettingsView(QWidget):
         box = QGroupBox("QEMU / libvirt")
         layout = QVBoxLayout(box)
 
+        if platform.system() == "Windows":
+            # virsh/virt-install run inside the app-managed WSL distro on
+            # Windows (core/linux_backend) -- set up from the "Linux tools
+            # (WSL)" section right below, not installed by hand.
+            self._qemu_status_label = QLabel()
+            layout.addWidget(self._qemu_status_label)
+            self._refresh_qemu_windows_status()
+            return box
+
         if platform.system() != "Linux":
             self._qemu_status_label = QLabel("Not applicable on this platform.")
             layout.addWidget(self._qemu_status_label)
@@ -856,8 +893,7 @@ class SettingsView(QWidget):
             self._qemu_status_label = QLabel(
                 "virsh not found. It's a system package, not something this app can "
                 "download — install it via your distro's package manager, e.g.:\n"
-                "  Debian/Ubuntu: sudo apt install libvirt-clients\n"
-                "  Fedora/RHEL:   sudo dnf install libvirt-client"
+                + linux_tools.get("virsh").native_hint
             )
         layout.addWidget(self._qemu_status_label)
 
@@ -873,12 +909,280 @@ class SettingsView(QWidget):
             self._virt_install_status_label = QLabel(
                 "virt-install not found — VM discovery/power control above still work, "
                 "but \"Deploy VM…\" also needs it:\n"
-                "  Debian/Ubuntu: sudo apt install virtinst\n"
-                "  Fedora/RHEL:   sudo dnf install virt-install"
+                + linux_tools.get("virt-install").native_hint
             )
         layout.addWidget(self._virt_install_status_label)
 
         return box
+
+    def _refresh_qemu_windows_status(self) -> None:
+        if qemu_client.is_available():
+            self._qemu_status_label.setText(
+                "QEMU/libvirt host connections, VM deployment and the embedded SPICE "
+                "viewer are available, running through the Linux tools distro."
+            )
+        else:
+            self._qemu_status_label.setText(
+                "QEMU/libvirt needs Linux tools that run inside WSL — set them up in "
+                "\"Linux tools (WSL)\" below."
+            )
+
+    # -- Linux tools (WSL) ----------------------------------------------------
+
+    def _build_linux_tools_section(self) -> QGroupBox:
+        """Windows only: installs/updates/removes the app-managed WSL
+        distro (core/wsl_distro.py) that the Linux-only features run in.
+        Generic on purpose -- every tool in core/linux_tools.TOOLS lives
+        there, not just QEMU's."""
+        box = QGroupBox("Linux tools (WSL)")
+        layout = QVBoxLayout(box)
+
+        if platform.system() != "Windows":
+            self._linux_tools_status_label = QLabel(
+                "Not applicable on this platform — Linux tools run natively here."
+            )
+            layout.addWidget(self._linux_tools_status_label)
+            return box
+
+        self._linux_tools_status_label = QLabel()
+        self._linux_tools_status_label.setWordWrap(True)
+        layout.addWidget(self._linux_tools_status_label)
+
+        self._linux_tools_progress_bar = QProgressBar()
+        self._linux_tools_progress_bar.hide()
+        layout.addWidget(self._linux_tools_progress_bar)
+
+        self._linux_tools_detail_label = QLabel()
+        self._linux_tools_detail_label.setWordWrap(True)
+        self._linux_tools_detail_label.hide()
+        layout.addWidget(self._linux_tools_detail_label)
+
+        button_row = QHBoxLayout()
+        self._linux_tools_action_button = QPushButton()
+        self._linux_tools_action_button.clicked.connect(self._on_linux_tools_action_clicked)
+        button_row.addWidget(self._linux_tools_action_button)
+        self._linux_tools_check_button = QPushButton("Check Tools")
+        self._linux_tools_check_button.clicked.connect(self._on_linux_tools_check_clicked)
+        button_row.addWidget(self._linux_tools_check_button)
+        self._linux_tools_sync_ssh_button = QPushButton("Copy SSH Keys into WSL")
+        self._linux_tools_sync_ssh_button.clicked.connect(self._on_linux_tools_sync_ssh_clicked)
+        button_row.addWidget(self._linux_tools_sync_ssh_button)
+        self._linux_tools_remove_button = QPushButton("Remove Linux Tools")
+        self._linux_tools_remove_button.clicked.connect(self._on_linux_tools_remove_clicked)
+        button_row.addWidget(self._linux_tools_remove_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._refresh_linux_tools_status()
+        return box
+
+    def _refresh_linux_tools_status(self) -> None:
+        status = wsl_distro.status()
+        self._linux_tools_status = status
+        state = status.state
+        ready = state is wsl_distro.DistroState.READY
+        installed = state in (wsl_distro.DistroState.READY, wsl_distro.DistroState.OUTDATED)
+
+        if state is wsl_distro.DistroState.NO_WSL:
+            text = (
+                "WSL isn't installed. QEMU/libvirt and the embedded SPICE viewer run inside "
+                "a small Linux distro this app manages for you, which needs WSL first. "
+                "Installing WSL asks for administrator access and usually a restart."
+            )
+            action = "Install WSL…"
+        elif state is wsl_distro.DistroState.NOT_INSTALLED:
+            text = (
+                "Linux tools aren't set up. QEMU/libvirt and the embedded SPICE viewer "
+                f"run inside a small Linux distro this app manages (\"{wsl_distro.DISTRO_NAME}\", "
+                "a one-time download of about 80 MB)."
+            )
+            action = "Set Up Linux Tools"
+        elif state is wsl_distro.DistroState.OUTDATED:
+            installed_version = status.installed_version or "unknown"
+            text = (
+                f"Linux tools need an update (installed: rootfs {installed_version}, "
+                f"this version of IT Toolbox needs rootfs {wsl_distro.ROOTFS_VERSION}). "
+                "Features that use them are unavailable until it's updated."
+            )
+            action = "Update Linux Tools"
+        else:
+            text = (
+                f"Linux tools are installed (rootfs {status.installed_version}) — "
+                "QEMU/libvirt and the embedded SPICE viewer are available."
+            )
+            action = None
+
+        self._linux_tools_status_label.setText(text)
+        self._linux_tools_action_button.setVisible(action is not None)
+        if action is not None:
+            self._linux_tools_action_button.setText(action)
+        self._linux_tools_check_button.setVisible(ready)
+        self._linux_tools_sync_ssh_button.setVisible(ready)
+        self._linux_tools_remove_button.setVisible(installed)
+
+    def _set_linux_tools_busy(self, busy: bool) -> None:
+        for button in (
+            self._linux_tools_action_button,
+            self._linux_tools_check_button,
+            self._linux_tools_sync_ssh_button,
+            self._linux_tools_remove_button,
+        ):
+            button.setEnabled(not busy)
+
+    def _on_linux_tools_backend_changed(self) -> None:
+        linux_backend.reset_backend()
+        self._refresh_linux_tools_status()
+        self._refresh_qemu_windows_status()
+        linux_tools_events.changed.emit()
+
+    def _on_linux_tools_action_clicked(self) -> None:
+        if self._linux_tools_status.state is wsl_distro.DistroState.NO_WSL:
+            self._start_wsl_install()
+        else:
+            self._start_linux_tools_install()
+
+    def _start_wsl_install(self) -> None:
+        choice = QMessageBox.question(
+            self,
+            "Install WSL",
+            "This runs Windows' own WSL installer (wsl --install --no-distribution). "
+            "It asks for administrator access, and Windows usually needs a restart "
+            "afterwards. Continue?",
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            wsl_distro.start_wsl_install()
+        except wsl_distro.WslDistroError as exc:
+            self._linux_tools_status_label.setText(str(exc))
+            return
+        self._linux_tools_status_label.setText(
+            "The WSL installer is running in its own window. Once it finishes (and "
+            "Windows has restarted, if it asks to), come back here to set up Linux tools."
+        )
+        self._linux_tools_action_button.setEnabled(False)
+
+    def _start_linux_tools_install(self) -> None:
+        self._set_linux_tools_busy(True)
+        self._linux_tools_detail_label.hide()
+        self._linux_tools_status_label.setText("Downloading Linux tools…")
+        self._linux_tools_progress_bar.setRange(0, 0)
+        self._linux_tools_progress_bar.show()
+
+        # Kept on self for the same reason as the app-update download's
+        # _DownloadProgressSignal: it must outlive this method.
+        self._linux_tools_progress_signal = _DownloadProgressSignal()
+        self._linux_tools_progress_signal.progress.connect(self._on_linux_tools_download_progress)
+        report_progress = self._linux_tools_progress_signal.progress.emit
+
+        def install_and_sync() -> int:
+            wsl_distro.install(on_progress=report_progress)
+            linux_backend.reset_backend()
+            backend = linux_backend.get_backend()
+            return wsl_distro.sync_ssh_credentials(backend) if backend is not None else 0
+
+        run_in_background(
+            install_and_sync,
+            on_result=self._on_linux_tools_installed,
+            on_error=self._on_linux_tools_error,
+        )
+
+    def _on_linux_tools_download_progress(self, downloaded: int, total: int) -> None:
+        downloaded_mb = downloaded / (1024 * 1024)
+        if total > 0 and downloaded >= total:
+            self._linux_tools_progress_bar.setRange(0, 0)  # importing has no progress of its own
+            self._linux_tools_status_label.setText("Installing Linux tools into WSL…")
+        elif total > 0:
+            self._linux_tools_progress_bar.setRange(0, total)
+            self._linux_tools_progress_bar.setValue(downloaded)
+            self._linux_tools_status_label.setText(
+                f"Downloading Linux tools… {downloaded * 100 // total}% "
+                f"({downloaded_mb:.1f} / {total / (1024 * 1024):.1f} MB)"
+            )
+        else:
+            self._linux_tools_status_label.setText(f"Downloading Linux tools… ({downloaded_mb:.1f} MB)")
+
+    def _on_linux_tools_installed(self, ssh_files_copied: int) -> None:
+        self._linux_tools_progress_bar.hide()
+        self._set_linux_tools_busy(False)
+        self._on_linux_tools_backend_changed()
+        self._linux_tools_detail_label.setText(
+            f"Copied {ssh_files_copied} SSH file(s) from your Windows profile into WSL."
+            if ssh_files_copied
+            else "No SSH keys found in your Windows profile to copy into WSL."
+        )
+        self._linux_tools_detail_label.show()
+
+    def _on_linux_tools_error(self, error: Exception) -> None:
+        self._linux_tools_progress_bar.hide()
+        self._set_linux_tools_busy(False)
+        self._refresh_linux_tools_status()
+        self._linux_tools_detail_label.setText(f"Failed: {error}")
+        self._linux_tools_detail_label.show()
+
+    def _on_linux_tools_check_clicked(self) -> None:
+        backend = linux_backend.get_backend()
+        if not isinstance(backend, linux_backend.WslBackend):
+            return
+        self._set_linux_tools_busy(True)
+        self._linux_tools_detail_label.setText("Checking tools inside WSL…")
+        self._linux_tools_detail_label.show()
+
+        def check() -> list[tuple[str, bool]]:
+            results = [(tool.display_name, backend.probe_tool(tool)) for tool in linux_tools.TOOLS]
+            results.append(("App ↔ WSL helper connection", _helper_selftest(backend)))
+            return results
+
+        run_in_background(check, on_result=self._on_linux_tools_checked, on_error=self._on_linux_tools_error)
+
+    def _on_linux_tools_checked(self, results: list[tuple[str, bool]]) -> None:
+        self._set_linux_tools_busy(False)
+        lines = [f"{'✓' if ok else '✗'} {name}" for name, ok in results]
+        if not all(ok for _, ok in results):
+            lines.append("Something's missing — try \"Remove Linux Tools\" and set them up again.")
+        self._linux_tools_detail_label.setText("\n".join(lines))
+
+    def _on_linux_tools_sync_ssh_clicked(self) -> None:
+        backend = linux_backend.get_backend()
+        if backend is None:
+            return
+        self._set_linux_tools_busy(True)
+        run_in_background(
+            lambda: wsl_distro.sync_ssh_credentials(backend),
+            on_result=self._on_linux_tools_ssh_synced,
+            on_error=self._on_linux_tools_error,
+        )
+
+    def _on_linux_tools_ssh_synced(self, copied: int) -> None:
+        self._set_linux_tools_busy(False)
+        self._linux_tools_detail_label.setText(
+            f"Copied {copied} SSH file(s) from {wsl_distro.windows_ssh_dir()} into WSL."
+            if copied
+            else f"No SSH keys found in {wsl_distro.windows_ssh_dir()}."
+        )
+        self._linux_tools_detail_label.show()
+
+    def _on_linux_tools_remove_clicked(self) -> None:
+        choice = QMessageBox.question(
+            self,
+            "Remove Linux tools",
+            f"Remove the \"{wsl_distro.DISTRO_NAME}\" WSL distro? QEMU/libvirt and the "
+            "embedded SPICE viewer stop working until it's set up again. Your QEMU host "
+            "list and other settings are kept.",
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        self._set_linux_tools_busy(True)
+        run_in_background(
+            wsl_distro.remove,
+            on_result=self._on_linux_tools_removed,
+            on_error=self._on_linux_tools_error,
+        )
+
+    def _on_linux_tools_removed(self, _result: None) -> None:
+        self._set_linux_tools_busy(False)
+        self._linux_tools_detail_label.hide()
+        self._on_linux_tools_backend_changed()
 
     # -- GL.iNet --------------------------------------------------------------
 
