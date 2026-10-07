@@ -407,3 +407,42 @@ def test_shift_symbol_key_uses_the_base_keys_scancode(rdp_widget, key, scancode)
 
     assert (scancode, False, True) in rdp_widget._worker.scancode_calls
     assert rdp_widget._worker.unicode_calls == []
+
+
+SHIFT = (0x2A, False)
+
+
+def _press(code):
+    return [(code, False, True), (code, False, False)]
+
+
+def _shifted(code):
+    return [(*SHIFT, True), (code, False, True), (code, False, False), (*SHIFT, False)]
+
+
+def test_send_text_types_lowercase_and_digits_as_plain_scancodes(rdp_widget):
+    rdp_widget.send_text("a1 ")
+
+    assert rdp_widget._worker.scancode_calls == _press(0x1E) + _press(0x02) + _press(0x39)
+    assert rdp_widget._worker.unicode_calls == []
+
+
+def test_send_text_wraps_uppercase_and_shifted_symbols_in_shift(rdp_widget):
+    rdp_widget.send_text('A"$')
+
+    assert rdp_widget._worker.scancode_calls == _shifted(0x1E) + _shifted(0x28) + _shifted(0x05)
+
+
+def test_send_text_sends_line_breaks_as_enter(rdp_widget):
+    rdp_widget.send_text("a\r\nb\n")
+
+    assert rdp_widget._worker.scancode_calls == (
+        _press(0x1E) + _press(0x1C) + _press(0x30) + _press(0x1C)
+    )
+
+
+def test_send_text_falls_back_to_unicode_for_non_us_keyboard_characters(rdp_widget):
+    rdp_widget.send_text("é")
+
+    assert rdp_widget._worker.scancode_calls == []
+    assert rdp_widget._worker.unicode_calls == [(ord("é"), True), (ord("é"), False)]
