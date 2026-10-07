@@ -14,8 +14,12 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils, rclone_client, rclone_mount, settings
 from it_toolbox.modules.cloud_storage.models import RemoteConfig
 from it_toolbox.modules.cloud_storage.ui.add_remote_dialog import AddRemoteDialog
+from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.rclone_browser_widget import RcloneBrowserWidget
-from it_toolbox.widgets.rclone_location_picker import clear_rclone_path, prompt_for_rclone_path
+from it_toolbox.widgets.rclone_location_picker import (
+    clear_rclone_path,
+    prompt_for_rclone_path,
+)
 
 REMOTE_ROLE = Qt.ItemDataRole.UserRole
 IS_REMOTES_ROOT_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -107,11 +111,20 @@ class CloudStorageView(QWidget):
             )
             self._remotes_root.addChild(placeholder)
             return
+        task = status_bar.begin(self, "Loading rclone remotes…")
         async_utils.run_in_background(
             rclone_client.list_remotes,
-            on_result=self._populate_remotes,
-            on_error=self._on_load_error,
+            on_result=lambda remotes: self._on_remotes_loaded(remotes, task),
+            on_error=lambda error: self._on_task_error(
+                error, task, "Couldn't load rclone remotes", "Failed to load remotes"
+            ),
         )
+
+    def _on_remotes_loaded(
+        self, remotes: list[RemoteConfig], task: status_bar.StatusTask
+    ) -> None:
+        task.finish()
+        self._populate_remotes(remotes)
 
     def _populate_remotes(self, remotes: list[RemoteConfig]) -> None:
         self._remotes_root.takeChildren()
@@ -131,8 +144,11 @@ class CloudStorageView(QWidget):
                 category_item.addChild(item)
                 self._update_mount_indicator(item)
 
-    def _on_load_error(self, error: Exception) -> None:
-        QMessageBox.warning(self, "Failed to load remotes", str(error))
+    def _on_task_error(
+        self, error: Exception, task: status_bar.StatusTask, status: str, title: str
+    ) -> None:
+        task.finish(status)
+        QMessageBox.warning(self, title, str(error))
 
     def _on_tree_context_menu(self, pos) -> None:
         item = self._tree.itemAt(pos)
@@ -209,32 +225,54 @@ class CloudStorageView(QWidget):
             return
         self._mount_busy[remote.name] = "mounting…"
         self._refresh_mount_indicators()
+        task = status_bar.begin(self, f"Mounting {remote.name}…")
         async_utils.run_in_background(
             lambda: rclone_mount.manager.mount(remote.name),
-            on_result=lambda _: self._on_mount_changed(remote.name),
-            on_error=lambda e: self._on_mount_error(remote.name, "Failed to mount remote", e),
+            on_result=lambda _: self._on_mounted(remote.name, task),
+            on_error=lambda e: self._on_mount_error(
+                remote.name, task, f"Mounting {remote.name} failed", "Failed to mount remote", e
+            ),
         )
 
     def _unmount_remote(self, remote: RemoteConfig) -> None:
         # unmount() first waits for pending uploads, which can take a while.
-        self._mount_busy[remote.name] = (
-            "finishing uploads…"
-            if rclone_mount.manager.has_pending_uploads(remote.name)
-            else "unmounting…"
-        )
+        if rclone_mount.manager.has_pending_uploads(remote.name):
+            self._mount_busy[remote.name] = "finishing uploads…"
+            message = f"Finishing uploads to {remote.name}, then unmounting…"
+        else:
+            self._mount_busy[remote.name] = "unmounting…"
+            message = f"Unmounting {remote.name}…"
         self._refresh_mount_indicators()
+        task = status_bar.begin(self, message)
         async_utils.run_in_background(
             lambda: rclone_mount.manager.unmount(remote.name),
-            on_result=lambda _: self._on_mount_changed(remote.name),
-            on_error=lambda e: self._on_mount_error(remote.name, "Failed to unmount remote", e),
+            on_result=lambda _: self._on_mount_changed(remote.name, task, f"Unmounted {remote.name}"),
+            on_error=lambda e: self._on_mount_error(
+                remote.name, task, f"Unmounting {remote.name} failed", "Failed to unmount remote", e
+            ),
         )
 
-    def _on_mount_changed(self, remote_name: str) -> None:
+    def _on_mounted(self, remote_name: str, task: status_bar.StatusTask) -> None:
+        mount_point = rclone_mount.manager.mount_point(remote_name)
+        where = f" at {mount_point}" if mount_point else ""
+        self._on_mount_changed(remote_name, task, f"Mounted {remote_name}{where}")
+
+    def _on_mount_changed(
+        self, remote_name: str, task: status_bar.StatusTask, status: str
+    ) -> None:
+        task.finish(status)
         self._mount_busy.pop(remote_name, None)
         self._refresh_mount_indicators()
 
-    def _on_mount_error(self, remote_name: str, title: str, error: Exception) -> None:
-        self._on_mount_changed(remote_name)
+    def _on_mount_error(
+        self,
+        remote_name: str,
+        task: status_bar.StatusTask,
+        status: str,
+        title: str,
+        error: Exception,
+    ) -> None:
+        self._on_mount_changed(remote_name, task, status)
         QMessageBox.warning(self, title, str(error))
 
     def _refresh_mount_indicators(self) -> None:
@@ -267,11 +305,18 @@ class CloudStorageView(QWidget):
         )
         if confirmed != QMessageBox.StandardButton.Yes:
             return
+        task = status_bar.begin(self, f"Removing remote {remote.name}…")
         async_utils.run_in_background(
             lambda: self._unmount_and_delete(remote.name),
-            on_result=lambda _: self.refresh_remotes(),
-            on_error=self._on_load_error,
+            on_result=lambda _: self._on_remote_removed(remote.name, task),
+            on_error=lambda error: self._on_task_error(
+                error, task, f"Removing {remote.name} failed", "Failed to remove remote"
+            ),
         )
+
+    def _on_remote_removed(self, remote_name: str, task: status_bar.StatusTask) -> None:
+        task.finish(f"Removed remote {remote_name}")
+        self.refresh_remotes()
 
     @staticmethod
     def _unmount_and_delete(remote_name: str) -> None:

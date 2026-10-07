@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils, rclone_client
 from it_toolbox.modules.cloud_storage.models import RcloneEntry
+from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.bucket_browser_widget import format_size
 
 ENTRY_ROLE = Qt.ItemDataRole.UserRole
@@ -92,10 +93,6 @@ class RcloneBrowserWidget(QWidget):
         top_bar.addWidget(self._upload_button)
         top_bar.addWidget(self._refresh_button)
 
-        self._status_label = QLabel()
-        self._status_label.setStyleSheet("color: gray; font-style: italic;")
-        self._status_label.setVisible(False)
-
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["Name", "Size", "Modified"])
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -108,7 +105,6 @@ class RcloneBrowserWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
-        layout.addWidget(self._status_label)
         layout.addWidget(self._table)
 
         self._reload()
@@ -117,11 +113,16 @@ class RcloneBrowserWidget(QWidget):
         self._update_breadcrumb()
         self._up_button.setEnabled(bool(self._path))
         self._table.setRowCount(0)
+        location = self._location(self._path)
+        task = status_bar.begin(self, f"Loading {location}…")
         async_utils.run_in_background(
             lambda: rclone_client.list_directory(self._remote_name, self._path),
-            on_result=self._populate_table,
-            on_error=self._on_error,
+            on_result=lambda entries: self._on_listing_loaded(entries, task),
+            on_error=lambda error: self._on_error(error, task, f"Couldn't load {location}"),
         )
+
+    def _location(self, path: str) -> str:
+        return f"{self._remote_name}:{path}"
 
     def _update_breadcrumb(self) -> None:
         while self._breadcrumb_layout.count():
@@ -156,6 +157,10 @@ class RcloneBrowserWidget(QWidget):
         self._path = path
         self._reload()
 
+    def _on_listing_loaded(self, entries: list[RcloneEntry], task: status_bar.StatusTask) -> None:
+        task.finish()
+        self._populate_table(entries)
+
     def _focus_search(self) -> None:
         self._search_edit.setFocus()
         self._search_edit.selectAll()
@@ -167,10 +172,6 @@ class RcloneBrowserWidget(QWidget):
             entry: RcloneEntry | None = item.data(ENTRY_ROLE) if item is not None else None
             matches = entry is None or not needle or needle in entry.name.casefold()
             self._table.setRowHidden(row, not matches)
-
-    def _set_status(self, text: str) -> None:
-        self._status_label.setText(text)
-        self._status_label.setVisible(bool(text))
 
     def _populate_table(self, entries: list[RcloneEntry]) -> None:
         # The tab (and this widget) can be closed while a listing was still
@@ -203,18 +204,12 @@ class RcloneBrowserWidget(QWidget):
         dest, _ = QFileDialog.getSaveFileName(self, "Download File", entry.name)
         if not dest:
             return
-        self._set_status(f"Downloading {entry.name}…")
+        task = status_bar.begin(self, f"Downloading {entry.name} from {self._remote_name}…")
         async_utils.run_in_background(
             lambda: rclone_client.download(self._remote_name, full_path, dest),
-            on_result=lambda _: self._on_download_done(),
-            on_error=self._on_error,
+            on_result=lambda _: task.finish(f"Downloaded {entry.name}"),
+            on_error=lambda error: self._on_error(error, task, f"Download of {entry.name} failed"),
         )
-
-    def _on_download_done(self) -> None:
-        try:
-            self._set_status("")
-        except RuntimeError:
-            pass  # tab was closed before the download finished
 
     def _on_upload_button_clicked(self) -> None:
         self._upload_menu.exec(self._upload_button.mapToGlobal(self._upload_button.rect().bottomLeft()))
@@ -224,13 +219,15 @@ class RcloneBrowserWidget(QWidget):
         if not local_paths:
             return
         if len(local_paths) == 1:
-            self._set_status(f"Uploading {os.path.basename(local_paths[0])}…")
+            what = os.path.basename(local_paths[0])
         else:
-            self._set_status(f"Uploading {len(local_paths)} files…")
+            what = f"{len(local_paths)} files"
+        destination = self._location(self._path)
+        task = status_bar.begin(self, f"Uploading {what} to {destination}…")
         async_utils.run_in_background(
             lambda: self._upload_files(local_paths),
-            on_result=lambda _: self._on_upload_done(),
-            on_error=self._on_error,
+            on_result=lambda _: self._on_upload_done(task, f"Uploaded {what}"),
+            on_error=lambda error: self._on_error(error, task, f"Upload of {what} failed"),
         )
 
     def _upload_files(self, local_paths: list[str]) -> None:
@@ -249,19 +246,26 @@ class RcloneBrowserWidget(QWidget):
             return
         folder_name = os.path.basename(local_dir.rstrip("/\\"))
         dest_path = _join(self._path, folder_name)
-        self._set_status(f"Uploading folder {folder_name}…")
+        task = status_bar.begin(
+            self, f"Uploading folder {folder_name} to {self._location(self._path)}…"
+        )
         async_utils.run_in_background(
             lambda: rclone_client.upload_directory(self._remote_name, local_dir, dest_path),
-            on_result=lambda _: self._on_upload_done(),
-            on_error=self._on_error,
+            on_result=lambda _: self._on_upload_done(task, f"Uploaded folder {folder_name}"),
+            on_error=lambda error: self._on_error(
+                error, task, f"Upload of folder {folder_name} failed"
+            ),
         )
 
-    def _on_upload_done(self) -> None:
+    def _on_upload_done(self, task: status_bar.StatusTask, message: str) -> None:
+        task.finish(message)
+        self._reload_if_open()
+
+    def _reload_if_open(self) -> None:
         try:
-            self._set_status("")
+            self._reload()
         except RuntimeError:
-            return  # tab was closed before the upload finished
-        self._reload()
+            pass  # tab was closed before the background call finished
 
     def _build_entry_menu(self, entry: RcloneEntry) -> tuple[QMenu, object, object]:
         """Returns (menu, download_action_or_None, delete_action) — split
@@ -296,15 +300,20 @@ class RcloneBrowserWidget(QWidget):
             return
         full_path = _join(self._path, entry.path)
         delete_call = rclone_client.delete_directory if entry.is_dir else rclone_client.delete_file
+        task = status_bar.begin(self, f"Deleting {entry.name} from {self._remote_name}…")
         async_utils.run_in_background(
             lambda: delete_call(self._remote_name, full_path),
-            on_result=lambda _: self._reload(),
-            on_error=self._on_error,
+            on_result=lambda _: self._on_delete_done(task, f"Deleted {entry.name}"),
+            on_error=lambda error: self._on_error(error, task, f"Delete of {entry.name} failed"),
         )
 
-    def _on_error(self, error: Exception) -> None:
+    def _on_delete_done(self, task: status_bar.StatusTask, message: str) -> None:
+        task.finish(message)
+        self._reload_if_open()
+
+    def _on_error(self, error: Exception, task: status_bar.StatusTask, message: str) -> None:
+        task.finish(message)
         try:
-            self._set_status("")
             QMessageBox.warning(self, "Error", str(error))
         except RuntimeError:
             pass  # tab was closed before the background call finished

@@ -384,3 +384,32 @@ def test_search_clears_when_changing_folder(qtbot, monkeypatch):
 
     assert browser._search_edit.text() == ""
     qtbot.waitUntil(lambda: _visible_names(browser) == ["a.jpg"], timeout=2000)
+
+
+def test_upload_reports_progress_in_the_main_window_status_bar(qtbot, monkeypatch):
+    import threading
+
+    from PySide6.QtWidgets import QMainWindow
+
+    import it_toolbox.widgets.rclone_browser_widget as module
+
+    window = QMainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(module.rclone_client, "list_directory", lambda remote, path: [])
+    browser = RcloneBrowserWidget("myRemote")
+    window.setCentralWidget(browser)  # window owns it, so no qtbot.addWidget
+
+    monkeypatch.setattr(
+        module.QFileDialog, "getOpenFileNames", lambda *a, **k: (["/tmp/local.txt"], "")
+    )
+    release = threading.Event()
+    monkeypatch.setattr(module.rclone_client, "upload", lambda *a: release.wait(2))
+
+    browser._on_upload_files_clicked()
+    assert window.statusBar().currentMessage() == "Uploading local.txt to myRemote:…"
+
+    release.set()
+    qtbot.waitUntil(
+        lambda: window.statusBar().currentMessage() in ("Uploaded local.txt", "Ready"),
+        timeout=2000,
+    )
