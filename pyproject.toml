@@ -49,4 +49,4 @@ where = ["src"]
 # The Settings page's "Fetch FreeRDP DLLs" button runs scripts/*.ps1 from
 # here, so it must ship in the wheel too (the Windows installer has no
 # repo checkout to fall back on).
-"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "scripts/*.ps1"]
+"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "scripts/*.ps1", "proftpd/*"]

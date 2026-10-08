@@ -1,0 +1,179 @@
+# Written and managed by cockpit-proftpd -- do not hand-edit, changes
+# will be overwritten the next time the module re-runs setup.
+#
+# Layout here reflects three things confirmed the hard way against a
+# real ProFTPD instance, not assumed from documentation alone:
+#
+# 1. A bare `Port N` directive at top level *replaces* the default
+#    server's listening port instead of adding a second one -- SFTP
+#    needs its own dedicated <VirtualHost>, or plain FTP silently stops
+#    listening on 21 entirely.
+# 2. AuthOrder can only be set once per context -- the base
+#    /etc/proftpd.conf this ships alongside already sets it (to PAM +
+#    unix auth), so setup() comments that line out rather than trying to
+#    redeclare it here, which ProFTPD refuses as a duplicate directive.
+# 3. Directives placed outside <Global> do NOT inherit into
+#    <VirtualHost> blocks. Without <Global> here, SFTP logins fail with
+#    "no account for user found" (AuthOrder/SQL* never reached that
+#    context) even though plain FTP logins work fine.
+LoadModule mod_sql.c
+LoadModule mod_sql_sqlite.c
+LoadModule mod_sftp.c
+LoadModule mod_sftp_sql.c
+LoadModule mod_quotatab.c
+LoadModule mod_quotatab_sql.c
+LoadModule mod_ifsession.c
+
+<Global>
+  AuthOrder mod_sql.c
+  # Chroot every virtual user to their own home directory -- without
+  # this, an authenticated user can navigate the whole filesystem
+  # (as their assigned UID/GID's real Unix permissions allow).
+  DefaultRoot ~
+
+  SQLBackend sqlite3
+  SQLConnectInfo {db_path}
+  SQLAuthTypes Crypt
+  SQLMinUserUID {min_uid}
+  SQLMinUserGID {min_gid}
+  RequireValidShell off
+
+  # A fixed range instead of the OS-assigned ephemeral port ProFTPD
+  # would otherwise pick per passive-mode data connection -- without
+  # this, no firewall rule can be written for passive FTP at all (see
+  # cmd_open_firewall, which opens exactly this range).
+  PassivePorts {passive_port_min} {passive_port_max}
+
+  # Per-user storage quotas (see _set_user_quota) -- in <Global> like
+  # everything else above, so the same quota is enforced identically
+  # whichever protocol a user actually connects with. The four
+  # SQLNamedQuery directives' column lists/order are fixed by
+  # mod_quotatab_sql itself, not something this module can rename --
+  # see quotalimits/quotatallies in schema.sql, which must stay in sync
+  # with these.
+  QuotaEngine on
+  QuotaLock {quota_lock_path}
+  SQLNamedQuery get-quota-limit SELECT "name, quota_type, per_session, limit_type, bytes_in_avail, bytes_out_avail, bytes_xfer_avail, files_in_avail, files_out_avail, files_xfer_avail FROM quotalimits WHERE name = '%{{0}}' AND quota_type = '%{{1}}'"
+  SQLNamedQuery get-quota-tally SELECT "name, quota_type, bytes_in_used, bytes_out_used, bytes_xfer_used, files_in_used, files_out_used, files_xfer_used FROM quotatallies WHERE name = '%{{0}}' AND quota_type = '%{{1}}'"
+  SQLNamedQuery update-quota-tally UPDATE "bytes_in_used = bytes_in_used + %{{0}}, bytes_out_used = bytes_out_used + %{{1}}, bytes_xfer_used = bytes_xfer_used + %{{2}}, files_in_used = files_in_used + %{{3}}, files_out_used = files_out_used + %{{4}}, files_xfer_used = files_xfer_used + %{{5}} WHERE name = '%{{6}}' AND quota_type = '%{{7}}'" quotatallies
+  SQLNamedQuery insert-quota-tally INSERT "%{{0}}, %{{1}}, %{{2}}, %{{3}}, %{{4}}, %{{5}}, %{{6}}, %{{7}}" quotatallies
+  QuotaLimitTable sql:/get-quota-limit
+  QuotaTallyTable sql:/get-quota-tally/update-quota-tally/insert-quota-tally
+
+  # Recent transfer activity (see cmd_list_transfers) -- confirmed
+  # against mod_sql/mod_log's own docs: %u/%m/%f/%b/%{{epoch}} are
+  # username/command/absolute-path/bytes/unix-timestamp (braces doubled
+  # for the same reason as the quota queries above -- literal, not a
+  # Python .format() placeholder). The three TEXT substitutions are
+  # single-quoted as SQL string literals -- confirmed the hard way
+  # ("near '/': syntax error") that %f (an absolute path, containing
+  # slashes) can't go into a raw INSERT VALUES list unquoted the way
+  # the all-numeric quota queries above do; %b/%{{epoch}} stay bare
+  # since those columns are INTEGER. Column order must match transfers'
+  # own order in schema.sql. SQLLog fires "at the end of command
+  # processing" per mod_sql's own docs, so only completed transfers are
+  # logged, not attempts.
+  SQLNamedQuery log-transfer INSERT "'%u', '%m', '%f', %b, %{{epoch}}" transfers
+  SQLLog RETR,STOR,DELE log-transfer
+
+  # SFTP public-key auth (see _set_user_key) -- mod_sftp_sql's own
+  # example query, confirmed against its docs. %U (not %{{0}}, unlike
+  # the quota queries above -- a different meta-sequence family
+  # entirely) is substituted with the authenticating username. Only
+  # ever referenced from the SFTP VirtualHost below (SFTPAuthorizedUserKeys),
+  # but the named query itself lives here alongside the others.
+  SQLNamedQuery get-user-authorized-keys SELECT "key FROM sftpuserkeys WHERE name='%U'"
+
+  # Users in the "readonly" group (see _set_user_readonly) may not
+  # upload, delete, rename, or create directories -- WRITE covers
+  # exactly those commands (APPE DELE MKD RMD RNTO STOR STOU XMKD
+  # XRMD, confirmed against ProFTPD's own docs), leaving RETR/LIST
+  # untouched. In <Global> like quotas, so it applies the same way
+  # over FTP or SFTP.
+  <Limit WRITE>
+    DenyGroup readonly
+  </Limit>
+
+  # FTPS (explicit TLS on the plain-FTP control/data channels) --
+  # mod_tls is compiled into this ProFTPD build already, no LoadModule
+  # needed (that directive is only for DSO .so modules). Confirmed the
+  # hard way that this does NOT stay harmlessly inert inside the SFTP
+  # VirtualHost the way e.g. quotas do: ProFTPD flatly refuses to start
+  # at all ("cannot support both FTPS (TLSEngine on) and SFTP
+  # (SFTPEngine on) for the same host") if TLSEngine is left on where
+  # SFTPEngine is also on -- so the SFTP VirtualHost below explicitly
+  # sets `TLSEngine off` to override what it would otherwise inherit
+  # from here.
+  TLSEngine on
+  TLSRequired {tls_required}
+  # Algorithm-specific directive names, not a generic
+  # TLSCertificateFile/TLSCertificateKeyFile -- confirmed the hard way
+  # against a real instance ("fatal: unknown configuration directive
+  # 'TLSCertificateFile'"); this module always generates an RSA key.
+  TLSRSACertificateFile {tls_cert_path}
+  TLSRSACertificateKeyFile {tls_key_path}
+  TLSLog /var/log/proftpd/tls.log
+
+  # Bandwidth tiers (see _set_user_rate_limit) -- TransferRate is a
+  # static, per-context config value, not something mod_sql can look up
+  # per-user the way quotas are, so only a small fixed set of tiers is
+  # offered (via mod_ifsession's <IfGroup>, not a directive this module
+  # can parameterize per-user directly). Applies to both RETR
+  # (download) and STOR (upload).
+  <IfGroup rate-slow>
+    TransferRate RETR,STOR 128
+  </IfGroup>
+  <IfGroup rate-medium>
+    TransferRate RETR,STOR 1024
+  </IfGroup>
+
+  # Users in the "locked" group (see _set_user_locked) may not log in
+  # at all, over either protocol, by either auth method -- unlike the
+  # protocol-restriction Limits below (deliberately scoped to only one
+  # context each), this one is meant to apply everywhere, so it
+  # belongs in <Global> where it propagates into the SFTP VirtualHost
+  # too, the same way every other <Global> directive here does.
+  <Limit LOGIN>
+    DenyGroup locked
+  </Limit>
+</Global>
+
+# Users the helper has placed in the "protocol-sftp-only" group (see
+# PROTOCOL_GROUPS) may not log in here -- only via the SFTP VirtualHost
+# below. Deliberately kept OUTSIDE <Global>: a directive in <Global>
+# would also apply inside that VirtualHost, which is exactly what must
+# NOT happen here -- see the oppositely-scoped, mirror-image Limit
+# inside it.
+<Limit LOGIN>
+  DenyGroup protocol-sftp-only
+</Limit>
+
+<IfModule mod_sftp.c>
+  <VirtualHost 0.0.0.0>
+    ServerName "cockpit-proftpd SFTP"
+    Port {sftp_port}
+    SFTPEngine on
+    SFTPLog /var/log/proftpd/sftp.log
+    SFTPHostKey {host_key_path}
+    # Overrides the inherited <Global> TLSEngine on -- see that
+    # directive's own comment for why this is required, not optional.
+    TLSEngine off
+
+    # No SFTPAuthMethods override needed -- confirmed against
+    # mod_sftp's own docs that its default is already "publickey
+    # password" (both offered), which is exactly what's wanted here:
+    # additive, not exclusive. A stored key lets someone log in without
+    # a password, but a correct password still works too -- adding a
+    # key never locks anyone out of an account that already had a
+    # working password. (Also confirmed the hard way that the
+    # directive's syntax is space-delimited, not comma-separated --
+    # `SFTPAuthMethods publickey,password` is a fatal config error.)
+    SFTPAuthorizedUserKeys sql:/get-user-authorized-keys
+
+    # Mirror image of the top-level Limit above -- "protocol-ftp-only"
+    # members may not log in here, only via plain FTP.
+    <Limit LOGIN>
+      DenyGroup protocol-ftp-only
+    </Limit>
+  </VirtualHost>
+</IfModule>
