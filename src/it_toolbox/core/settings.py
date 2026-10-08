@@ -832,3 +832,27 @@ def load_sftp_server_test_configs() -> dict[str, dict]:
 
 def save_sftp_server_test_configs(configs: dict[str, dict]) -> None:
     sftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
+
+
+def proftpd_servers_path() -> Path:
+    return data_dir() / "proftpd_servers.json"
+
+
+def load_proftpd_servers() -> list[dict]:
+    """Servers saved in the ProFTPD Manager (General Tools), as raw dicts
+    (see core/proftpd_manager.ProftpdServer.to_dict). No passwords: SSH
+    and sudo passwords are only ever prompted for."""
+    path = proftpd_servers_path()
+    if not path.is_file():
+        return []
+    try:
+        servers = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(servers, list):
+        return []
+    return [s for s in servers if isinstance(s, dict)]
+
+
+def save_proftpd_servers(servers: list[dict]) -> None:
+    proftpd_servers_path().write_text(json.dumps(servers))
