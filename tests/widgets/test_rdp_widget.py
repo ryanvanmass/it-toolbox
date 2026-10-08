@@ -85,7 +85,7 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     captured = {}
 
     class _CapturingWorker(_FakeWorker):
-        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None):
+        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None):
             super().__init__()
             captured["desktop_size"] = desktop_size
 
@@ -102,7 +102,8 @@ def test_keyboard_layout_is_passed_to_the_worker(qtbot, monkeypatch):
 
     class _CapturingWorker(_FakeWorker):
         def __init__(
-            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
+            shared_folder=None,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -120,7 +121,8 @@ def test_keyboard_layout_defaults_to_english_us(qtbot, monkeypatch):
 
     class _CapturingWorker(_FakeWorker):
         def __init__(
-            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
+            shared_folder=None,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -446,3 +448,22 @@ def test_send_text_falls_back_to_unicode_for_non_us_keyboard_characters(rdp_widg
 
     assert rdp_widget._worker.scancode_calls == []
     assert rdp_widget._worker.unicode_calls == [(ord("é"), True), (ord("é"), False)]
+
+
+def test_shared_folder_is_passed_to_the_worker(qtbot, monkeypatch):
+    captured = {}
+
+    class _CapturingWorker(_FakeWorker):
+        def __init__(
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
+            shared_folder=None,
+        ):
+            super().__init__()
+            captured["shared_folder"] = shared_folder
+
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _CapturingWorker)
+
+    widget = RdpWidget("host", 3389, "user", "pass", shared_folder="/home/alice/Downloads")
+    qtbot.addWidget(widget)
+
+    assert captured["shared_folder"] == "/home/alice/Downloads"

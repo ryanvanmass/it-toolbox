@@ -79,6 +79,7 @@ class RdpWidget(QWidget):
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
+        shared_folder: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -112,7 +113,7 @@ class RdpWidget(QWidget):
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
         self._worker = RdpSessionWorker(
-            host, port, username, password, domain, desktop_size, keyboard_layout
+            host, port, username, password, domain, desktop_size, keyboard_layout, shared_folder
         )
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)

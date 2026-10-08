@@ -219,6 +219,7 @@ class SettingsView(QWidget):
                 [
                     self._build_rdp_display_section(),
                     self._build_rdp_keyboard_layout_section(),
+                    self._build_rdp_shared_folder_section(),
                     self._build_freerdp_section(),
                 ],
             ),
@@ -1278,6 +1279,51 @@ class SettingsView(QWidget):
     def _on_rdp_keyboard_layout_changed(self, index: int) -> None:
         _, layout_id = RDP_KEYBOARD_LAYOUT_PRESETS[index]
         settings.save_rdp_keyboard_layout(layout_id)
+
+    # -- RDP shared folder ---------------------------------------------------
+
+    def _build_rdp_shared_folder_section(self) -> QGroupBox:
+        box = QGroupBox("RDP Shared Folder")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "A local folder that shows up inside embedded RDP sessions as a drive "
+            "(under This PC, or \\\\tsclient\\<folder name>), for copying files to and from "
+            "Windows VMs. Applies to sessions opened after changing it."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        folder = settings.load_rdp_shared_folder()
+        self._rdp_shared_folder = folder or str(Path.home() / "Downloads")
+        self._rdp_share_checkbox = QCheckBox("Share a folder with RDP sessions")
+        self._rdp_share_checkbox.setChecked(folder is not None)
+        self._rdp_share_checkbox.toggled.connect(self._on_rdp_share_toggled)
+        layout.addWidget(self._rdp_share_checkbox)
+
+        self._rdp_shared_folder_label = QLabel(self._rdp_shared_folder)
+        self._rdp_shared_folder_label.setWordWrap(True)
+        choose_button = QPushButton("Choose Folder…")
+        choose_button.clicked.connect(self._on_choose_rdp_shared_folder_clicked)
+        row = QHBoxLayout()
+        row.addWidget(self._rdp_shared_folder_label, 1)
+        row.addWidget(choose_button)
+        layout.addLayout(row)
+        return box
+
+    def _on_rdp_share_toggled(self, checked: bool) -> None:
+        settings.save_rdp_shared_folder(self._rdp_shared_folder if checked else None)
+
+    def _on_choose_rdp_shared_folder_clicked(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Folder to share with RDP sessions", self._rdp_shared_folder)
+        if not folder:
+            return
+        self._rdp_shared_folder = folder
+        self._rdp_shared_folder_label.setText(folder)
+        if self._rdp_share_checkbox.isChecked():
+            settings.save_rdp_shared_folder(folder)
+        else:
+            self._rdp_share_checkbox.setChecked(True)  # saves via _on_rdp_share_toggled
 
     # -- Automations ----------------------------------------------------------
 
