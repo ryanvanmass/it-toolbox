@@ -1476,11 +1476,14 @@ class _FakeRdpWidget(QWidget):
 
     finished = Signal()
 
-    def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None):
+    def __init__(
+        self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None
+    ):
         super().__init__()
         self.host, self.port, self.username, self.password = host, port, username, password
         self.desktop_size = desktop_size
         self.keyboard_layout = keyboard_layout
+        self.shared_folder = shared_folder
 
     def close_session(self):
         pass
@@ -1546,6 +1549,18 @@ def test_rdp_connect_passes_the_configured_keyboard_layout(qtbot, monkeypatch):
     view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice", "secret")
 
     assert view._tabs.widget(0).keyboard_layout == 0x040C
+
+
+def test_rdp_connect_passes_the_configured_shared_folder(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(main_view_module.settings, "load_rdp_shared_folder", lambda: "/home/alice/Downloads")
+    view = _make_view(qtbot, monkeypatch)
+
+    view._on_tunnel_ready(_FakeTunnel(), "test-vm", "rdp", "alice", "secret")
+
+    assert view._tabs.widget(0).shared_folder == "/home/alice/Downloads"
 
 
 def test_rdp_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):

@@ -41,6 +41,7 @@ class RdpSessionWorker:
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
+        shared_folder: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -49,6 +50,7 @@ class RdpSessionWorker:
         self._domain = domain
         self._desktop_size = desktop_size
         self._keyboard_layout = keyboard_layout
+        self._shared_folder = shared_folder
         self.signals = RdpSessionSignals()
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
@@ -131,6 +133,7 @@ class RdpSessionWorker:
                 domain=self._domain,
                 desktop_size=self._desktop_size,
                 keyboard_layout=self._keyboard_layout,
+                shared_folder=self._shared_folder,
             )
         except Exception as exc:  # noqa: BLE001 - see comment below
             # Deliberately broader than FreeRdpError: an uncaught exception

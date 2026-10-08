@@ -42,6 +42,7 @@ def _make_view(
     virt_install_available=False,
     default_rdp_resolution=None,
     rdp_keyboard_layout=0x0409,
+    rdp_shared_folder="/home/alice/Downloads",
     terminal_font_size=None,
     default_double_click_action="ask",
     jumpcloud_key_configured=False,
@@ -63,6 +64,7 @@ def _make_view(
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
     monkeypatch.setattr(settings, "load_rdp_keyboard_layout", lambda: rdp_keyboard_layout)
+    monkeypatch.setattr(settings, "load_rdp_shared_folder", lambda: rdp_shared_folder)
     monkeypatch.setattr(settings, "load_terminal_font_size", lambda: terminal_font_size)
     monkeypatch.setattr(settings, "load_disabled_modules", lambda: disabled_modules)
     monkeypatch.setattr(
@@ -1305,3 +1307,36 @@ def test_manage_automations_dialog_is_seeded_from_saved_automations(qtbot, monke
     qtbot.addWidget(dialog)
 
     assert [(a.name, a.content) for a in dialog.automations()] == [("old", "ls")]
+
+
+def test_rdp_shared_folder_section_shows_the_current_folder(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, rdp_shared_folder="/home/alice/Downloads")
+    assert view._rdp_share_checkbox.isChecked() is True
+    assert view._rdp_shared_folder_label.text() == "/home/alice/Downloads"
+
+
+def test_rdp_shared_folder_unchecking_turns_sharing_off(qtbot, monkeypatch):
+    saved = []
+    view = _make_view(qtbot, monkeypatch, rdp_shared_folder="/home/alice/Downloads")
+    monkeypatch.setattr(settings, "save_rdp_shared_folder", lambda folder: saved.append(folder))
+
+    view._rdp_share_checkbox.setChecked(False)
+    view._rdp_share_checkbox.setChecked(True)
+
+    assert saved == [None, "/home/alice/Downloads"]
+
+
+def test_rdp_shared_folder_choosing_a_folder_saves_and_enables_it(qtbot, monkeypatch):
+    import it_toolbox.modules.settings.ui.main_view as module
+
+    saved = []
+    view = _make_view(qtbot, monkeypatch, rdp_shared_folder=None)
+    assert view._rdp_share_checkbox.isChecked() is False
+    monkeypatch.setattr(settings, "save_rdp_shared_folder", lambda folder: saved.append(folder))
+    monkeypatch.setattr(module.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "/srv/transfer"))
+
+    view._on_choose_rdp_shared_folder_clicked()
+
+    assert saved == ["/srv/transfer"]
+    assert view._rdp_share_checkbox.isChecked() is True
+    assert view._rdp_shared_folder_label.text() == "/srv/transfer"
