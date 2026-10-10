@@ -1,8 +1,10 @@
 # macOS (Apple Silicon) support — status and handoff
 
-Branch: `feature/macos-arm64`. Read this file first if you're picking
-this work up in a new session. It's written so a fresh session with no
-prior conversation history can get oriented from the repo alone.
+Merged to `main` in PR #86 (2026-10-10) from `feature/macos-arm64`, and
+tested on a real Apple Silicon Mac with v0.3.11-beta.3. Read this file
+first if you're picking up macOS work in a new session. It's written so a
+fresh session with no prior conversation history can get oriented from
+the repo alone.
 
 ## What this branch is
 
@@ -27,12 +29,16 @@ just calls). Decisions made up front:
      (`lib<name>.3.dylib`, then unversioned) before bare names. A
      Finder-launched app gets no `DYLD_*` variables and no Homebrew
      `PATH`. Missing libraries still raise `OSError`, so `RdpWidget = None`
-     and the app falls back to external RDP clients.
+     and Connection Manager shows "RDP unavailable", the same as on the
+     other platforms.
    - `core/session_launcher.py`: external RDP writes a temp `.rdp` file
      and runs `open -a "Windows App"` (or "Microsoft Remote Desktop").
      Without either, it falls back to Homebrew `sdl-freerdp`/`xfreerdp`,
      else raises `SessionLaunchError` with an install hint. SSH opens a
-     Terminal.app window via `osascript` (`do script`).
+     Terminal.app window via `osascript` (`do script`). **Nothing in the
+     UI calls `session_launcher` yet** (on any platform). RDP and SSH
+     always open embedded, so these external launchers are unused code
+     until something wires them up.
    - Settings > Remote Desktop: the FreeRDP section reports Homebrew
      status on macOS (no fetch button).
    - `resources/icons/it-toolbox.icns`, rendered from the `.svg` and
@@ -54,33 +60,39 @@ just calls). Decisions made up front:
    flow (with `hdiutil`/`ditto` faked), and the swap helper script itself
    (run for real under `/bin/sh`, including the restore-on-failure path).
 
-## What's unverified (needs a person on an Apple Silicon Mac)
+## Real-Mac verification
 
-CI proves the bundle builds, is validly signed, and starts headless.
-Nothing below has been exercised yet. Use a `vX.Y.Z-beta.N` cut from the
-branch (`docs/releasing.md`, "Before merging a PR"):
+On 2026-10-10 the maintainer installed v0.3.11-beta.3, cut from `main`
+right after PR #86 merged, on an Apple Silicon Mac and reported that
+everything worked. That covered installing from the `.dmg`, first launch
+and general use of the app. The results weren't recorded item by item.
+So if a specific behaviour below turns out wrong, treat it as a fresh bug
+rather than a regression:
 
-- [ ] The `.dmg` opens, drags to Applications, and launches after
-      right-click > Open. Check that the **Dock shows "IT Toolbox" and its
-      icon**, not "python". The `Contents/MacOS/python` symlink is meant
-      to ensure that. If it doesn't, the fallback is a small compiled stub
-      as `CFBundleExecutable`.
-- [ ] gcloud/rclone installed via Homebrew or the Cloud SDK installer are
-      found when launched from Finder (the launcher's login-shell `PATH`).
-- [ ] SSH opens Terminal.app. Expect a one-time "IT Toolbox wants to
-      control Terminal" Automation prompt (`NSAppleEventsUsageDescription`).
-- [ ] With `brew install freerdp`: embedded RDP connects, renders, takes
-      keyboard/mouse input, resizes, and the clipboard works. The Qt
-      scancode mapping (`core/rdp/scancodes.py`) has never been tested
-      against macOS key events, and the Cmd/Option keys especially may
-      need mapping.
-- [ ] Without FreeRDP: the app still starts, and RDP opens in Windows App
-      (or shows the install hint).
-- [ ] In-app update: from an installed beta, update to a newer beta.
-      Confirm the app quits, the bundle is replaced, and the new version
-      relaunches without a Gatekeeper prompt.
-- [ ] Shell Launcher lists zsh/bash from `/etc/shells`, and the embedded
-      terminal works (`ptyprocess`).
+- The `.dmg` opens, drags to Applications, and launches after
+  right-click > Open. The Dock should show "IT Toolbox" and its icon,
+  not "python". If it ever doesn't, the fallback is a small compiled
+  stub as `CFBundleExecutable`.
+- gcloud/rclone installed via Homebrew are found when launched from
+  Finder (the launcher's login-shell `PATH`).
+- With `brew install freerdp`, embedded RDP connects, renders, and takes
+  keyboard/mouse input. The Qt scancode mapping (`core/rdp/scancodes.py`)
+  was written without macOS key events in mind, so the Cmd/Option keys
+  are the most likely to need mapping.
+- Embedded SSH and Shell Launcher (zsh/bash from `/etc/shells`,
+  `ptyprocess`) work.
+
+Still not exercised on a Mac:
+
+- [ ] **In-app update from one `.dmg` build to a newer one** (quit,
+      bundle swap, relaunch, no Gatekeeper prompt). It needs two
+      published builds, so the first chance is the next release after
+      v0.3.11-beta.3. The swap script itself is tested under `/bin/sh` in
+      CI.
+- [ ] **Cloud Storage → Mount Locally** with macFUSE or FUSE-T.
+- [ ] The **external launchers** in `session_launcher.py` (Windows App,
+      `sdl-freerdp`, Terminal.app). They're unreachable from the UI today,
+      see above.
 
 ## Out of scope
 

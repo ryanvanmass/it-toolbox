@@ -15,9 +15,8 @@ connection manager for RDP, SSH, and Cloud Storage.
     dynamic resolution resizing (resize the window, the remote desktop
     resizes with it). See `docs/embedded-rdp-status.md` for its current
     verification status.
-  - Falls back to launching the OS's own client (`mstsc.exe`/`xfreerdp`,
-    or Windows App/`sdl-freerdp` on macOS) where the embedded path isn't
-    available.
+  - Where FreeRDP's libraries aren't installed, RDP reports itself as
+    unavailable (Settings shows how to install them).
 - **SSH**, tunneled over IAP, with an embedded terminal (`pyte` +
   `pywinpty`/`ptyprocess`).
 - **GCS bucket browsing** per project, rclone-browser style.
