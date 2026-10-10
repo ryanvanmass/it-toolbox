@@ -77,6 +77,13 @@ KEYBOARD_LAYOUT_ENGLISH_US = 0x0409
 PIXEL_FORMAT_BGRX32 = (32 << 24) | (4 << 16) | (0 << 12) | (8 << 8) | (8 << 4) | 8
 
 _IS_WINDOWS = platform.system() == "Windows"
+_IS_MACOS = platform.system() == "Darwin"
+
+# Homebrew's lib dirs (Apple Silicon, then Intel). An app launched from
+# Finder/the Dock gets neither Homebrew's PATH nor any DYLD_* variables, and
+# dlopen's default search path doesn't include them, so on macOS each
+# library is tried by absolute path in these first, then by bare name.
+_MACOS_LIB_DIRS = ("/opt/homebrew/lib", "/usr/local/lib")
 
 # Set this to the folder holding freerdp3.dll/freerdp-client3.dll/winpr3.dll
 # (e.g. a vcpkg installed/x64-windows/bin, or wherever you extracted a
@@ -114,28 +121,41 @@ def _load(candidates: list[str]) -> ctypes.CDLL:
         except OSError as exc:
             errors.append(f"  {name}: {exc}")
     tried = "\n".join(errors)
-    hint = (
-        f"Set {_FREERDP_DIR_ENV} to the folder containing these DLLs — see "
-        "docs/windows-freerdp-setup.md."
-        if _IS_WINDOWS
-        else "Is the freerdp/libfreerdp3 package installed?"
-    )
+    if _IS_WINDOWS:
+        hint = f"Set {_FREERDP_DIR_ENV} to the folder containing these DLLs — see docs/windows-freerdp-setup.md."
+    elif _IS_MACOS:
+        hint = "Is FreeRDP installed? Run 'brew install freerdp'."
+    else:
+        hint = "Is the freerdp/libfreerdp3 package installed?"
     raise OSError(f"Could not load any of:\n{tried}\n{hint}")
+
+
+def _library_candidates(base: str, system: str) -> list[str]:
+    """Names to try for one FreeRDP3 library (`base` is e.g. "freerdp3") on
+    `system` (a platform.system() value), most specific first.
+
+    Windows naming is unverified — CMake shared libraries don't get a "lib"
+    prefix there by default, but some FreeRDP Windows builds have
+    historically kept it, so both are tried. macOS (Homebrew) installs a
+    versioned `lib<base>.3.dylib` plus an unversioned symlink; see
+    _MACOS_LIB_DIRS for why absolute paths come first.
+    """
+    if system == "Windows":
+        return [f"{base}.dll", f"lib{base}.dll"]
+    if system == "Darwin":
+        names = [f"lib{base}.3.dylib", f"lib{base}.dylib"]
+        return [os.path.join(d, n) for d in _MACOS_LIB_DIRS for n in names] + names
+    return [f"lib{base}.so.3"]
 
 
 # libfreerdp-client3 provides the client-context scaffolding functions;
 # libfreerdp3 provides the core connect/disconnect/settings API. Two
-# separate shared objects on Linux (confirmed via `nm -D`); Windows naming
-# is unverified — CMake shared libraries don't get a "lib" prefix there by
-# default, but some FreeRDP Windows builds have historically kept it, so
-# both are tried.
-_client_lib = _load(
-    ["libfreerdp-client3.so.3"] if not _IS_WINDOWS else ["freerdp-client3.dll", "libfreerdp-client3.dll"]
-)
-_core_lib = _load(["libfreerdp3.so.3"] if not _IS_WINDOWS else ["freerdp3.dll", "libfreerdp3.dll"])
+# separate shared objects on Linux (confirmed via `nm -D`).
+_client_lib = _load(_library_candidates("freerdp-client3", platform.system()))
+_core_lib = _load(_library_candidates("freerdp3", platform.system()))
 # winpr3 provides PubSub_Subscribe, used to learn when a virtual channel
 # (disp/cliprdr/...) has connected — see FreeRdpSession._on_channel_connected.
-_winpr_lib = _load(["libwinpr3.so.3"] if not _IS_WINDOWS else ["winpr3.dll", "libwinpr3.dll"])
+_winpr_lib = _load(_library_candidates("winpr3", platform.system()))
 
 # rdpContext* freerdp_client_context_new(const RDP_CLIENT_ENTRY_POINTS* pEntryPoints);
 _client_lib.freerdp_client_context_new.argtypes = [ctypes.POINTER(RdpClientEntryPointsV1)]
