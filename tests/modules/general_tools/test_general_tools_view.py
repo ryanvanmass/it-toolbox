@@ -23,7 +23,8 @@ def _make_view(qtbot):
 def test_each_tool_is_a_top_level_category(qtbot):
     view = _make_view(qtbot)
 
-    assert view._tree.topLevelItemCount() == 1
+    assert view._tree.topLevelItemCount() == 2
+    assert view._tree.topLevelItem(1).text(0) == "SFTP Server Test"
     mbox_item = view._tree.topLevelItem(0)
     assert mbox_item.text(0) == "Mbox Browser"
     assert mbox_item.isExpanded()
@@ -39,6 +40,7 @@ def test_module_context_menu_offers_tool_actions(qtbot):
     assert [a.text() for a in menu.actions()] == [
         "Open Mbox File…",
         "Clear Recent Mbox Files",
+        "New SFTP Server Test…",
     ]
 
 
