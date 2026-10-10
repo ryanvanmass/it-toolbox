@@ -1,4 +1,5 @@
 import ftplib
+import io
 import stat as stat_module
 
 import paramiko
@@ -416,3 +417,106 @@ def test_list_local_dir_sorts_directories_first(tmp_path):
 
     assert [e.name for e in entries] == ["a_dir", "a.txt", "b.txt"]
     assert entries[0].is_dir is True
+
+
+# -- FtpSession additions for the FTP Server Test ---------------------------
+
+
+class _StreamingFakeFtp(_FakeFtp):
+    def __init__(self):
+        super().__init__()
+        self.stored = b""
+        self.commands = []
+
+    def storbinary(self, cmd, fp, blocksize=8192, callback=None):
+        self.commands.append(cmd)
+        while chunk := fp.read(blocksize):
+            self.stored += chunk
+
+    def retrbinary(self, cmd, callback):
+        self.commands.append(cmd)
+        callback(b"hel")
+        callback(b"lo")
+
+    def sendcmd(self, cmd):
+        self.commands.append(cmd)
+        raise ftplib.error_perm("500 Unknown command")
+
+    def voidcmd(self, cmd):
+        self.commands.append(cmd)
+
+    def size(self, path):
+        if not path.endswith(".bin"):
+            raise ftplib.error_perm("550 Not a regular file")
+        return 5
+
+    def cwd(self, path):
+        self.commands.append(f"CWD {path}")
+        if path.endswith("missing"):
+            raise ftplib.error_perm("550 No such directory")
+        return "250 OK"
+
+    def mlsd(self, path):
+        raise ftplib.error_perm("500 MLSD not understood")
+
+    def retrlines(self, cmd, callback):
+        self.commands.append(cmd)
+        for line in [
+            "total 8",
+            "drwxr-xr-x    2 ftp      ftp          4096 Oct 10 12:00 photos",
+            "-rw-r--r--    1 ftp      ftp            42 Oct 10 12:00 read me.txt",
+            "lrwxrwxrwx    1 ftp      ftp             5 Oct 10 12:00 link -> photos",
+        ]:
+            callback(line)
+
+
+def _connected(monkeypatch):
+    fake = _StreamingFakeFtp()
+    monkeypatch.setattr(ftplib, "FTP", lambda: fake)
+    session = ftp_client.FtpSession("example.com", 21, "alice")
+    session.connect()
+    return session, fake
+
+
+def test_ftp_session_streams_file_objects(monkeypatch):
+    session, fake = _connected(monkeypatch)
+    source = io.BytesIO(b"x" * 20000)
+
+    session.upload_fileobj(source, "/up.bin", 20000)
+    sink = io.BytesIO()
+    session.download_fileobj("/down.bin", sink)
+
+    assert fake.stored == b"x" * 20000
+    assert sink.getvalue() == b"hello"
+    assert fake.commands == ["STOR /up.bin", "RETR /down.bin"]
+
+
+def test_ftp_session_stat_falls_back_without_mlst(monkeypatch):
+    session, fake = _connected(monkeypatch)
+
+    assert session.stat("/file.bin") == "5"
+    assert session.stat("/dir") == "250 OK"
+    assert "CWD /" in fake.commands  # back to where it was
+    with pytest.raises(ftp_client.FtpClientError, match="550"):
+        session.stat("/missing")
+
+
+def test_ftp_session_lists_with_list_when_mlsd_is_missing(monkeypatch):
+    session, fake = _connected(monkeypatch)
+
+    entries = session.list_dir("/pub")
+
+    assert [(e.name, e.is_dir, e.size) for e in entries] == [
+        ("photos", True, 4096),
+        ("link", False, 5),
+        ("read me.txt", False, 42),
+    ]
+    assert fake.commands == ["LIST /pub"]
+    assert session._has_mlsd is False
+
+
+def test_parse_list_line_handles_dos_style():
+    assert ftp_client._parse_list_line("10-10-26  12:00PM       <DIR>          My Files") == ftp_client.FileEntry(
+        "My Files", True
+    )
+    assert ftp_client._parse_list_line("10-10-26  12:00PM                  42 a.txt").size == 42

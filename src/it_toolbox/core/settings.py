@@ -832,3 +832,47 @@ def load_sftp_server_test_configs() -> dict[str, dict]:
 
 def save_sftp_server_test_configs(configs: dict[str, dict]) -> None:
     sftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
+
+
+def ftp_server_test_defaults_path() -> Path:
+    return data_dir() / "ftp_server_test.json"
+
+
+def load_ftp_server_test_defaults() -> dict:
+    """The FTP Server Test form as last started, like
+    load_sftp_server_test_defaults(). Never includes the password."""
+    path = ftp_server_test_defaults_path()
+    if not path.is_file():
+        return {}
+    try:
+        defaults = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return defaults if isinstance(defaults, dict) else {}
+
+
+def save_ftp_server_test_defaults(defaults: dict) -> None:
+    ftp_server_test_defaults_path().write_text(json.dumps(defaults))
+
+
+def ftp_server_test_configs_path() -> Path:
+    return data_dir() / "ftp_server_test_configs.json"
+
+
+def load_ftp_server_test_configs() -> dict[str, dict]:
+    """Named FTP Server Test configurations, like
+    load_sftp_server_test_configs(). Never includes passwords."""
+    path = ftp_server_test_configs_path()
+    if not path.is_file():
+        return {}
+    try:
+        configs = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(configs, dict):
+        return {}
+    return {name: values for name, values in configs.items() if isinstance(values, dict)}
+
+
+def save_ftp_server_test_configs(configs: dict[str, dict]) -> None:
+    ftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))

@@ -188,9 +188,9 @@ class StressStats:
             )
 
 
-def test_folder_name(now: float | None = None) -> str:
+def test_folder_name(now: float | None = None, prefix: str = "it-toolbox-sftp-test") -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
-    return f"it-toolbox-sftp-test-{stamp}-{secrets.token_hex(3)}"
+    return f"{prefix}-{stamp}-{secrets.token_hex(3)}"
 
 
 class _Worker:
@@ -208,8 +208,10 @@ class _Worker:
         stop: threading.Event,
         session_factory: Callable[[], SftpSession],
         rng: random.Random,
+        connection_lost: Callable[[Exception], bool] | None = None,
     ) -> None:
         self.index = index
+        self._connection_lost = connection_lost or _is_connection_lost
         self._config = config
         self._dir = posixpath.join(root, f"worker-{index}")
         self._stats = stats
@@ -236,7 +238,7 @@ class _Worker:
                     break
                 except Exception as exc:  # noqa: BLE001 - every failure is a result to report
                     self._stats.record(operation, time.perf_counter() - started, _describe(exc), self.index)
-                    if _is_connection_lost(exc):
+                    if self._connection_lost(exc):
                         self._drop_session()
                 else:
                     self._stats.record(operation, time.perf_counter() - started)
@@ -251,8 +253,11 @@ class _Worker:
             session.connect()
             try:
                 session.mkdir(self._dir)
-            except OSError:
-                pass  # already there from a previous connection of this worker
+            except Exception:  # noqa: BLE001
+                # Already there from a previous connection of this worker
+                # (SFTP raises OSError, FTP FtpClientError); anything worse
+                # shows up on the first real operation.
+                pass
         except Exception as exc:  # noqa: BLE001
             self._stats.record("connect", time.perf_counter() - started, _describe(exc), self.index)
             try:
@@ -405,7 +410,18 @@ class StressTest:
     """One run of the tool. prepare() (blocking: connects once to check the
     credentials and host key, and creates the test folder), then start()
     the workers, stop() them, and cleanup() (blocking) to remove the
-    folder again."""
+    folder again.
+
+    Nothing here is SFTP-specific beyond the defaults below: any session
+    with SftpSession's connect/home_dir/list_dir/upload_fileobj/
+    download_fileobj/stat/mkdir/rename/remove/rmdir/close works, which is
+    how core/ftp_stress_test.py reuses it for FTP."""
+
+    folder_prefix = "it-toolbox-sftp-test"
+    thread_prefix = "sftp-test-worker"
+    #: Whether a failed operation means the connection is gone (the worker
+    #: reconnects) rather than a server-side error on a still-usable one.
+    is_connection_lost = staticmethod(_is_connection_lost)
 
     def __init__(
         self,
@@ -426,7 +442,7 @@ class StressTest:
         session.connect()
         try:
             base = self.config.remote_dir.strip() or session.home_dir()
-            root = posixpath.join(base, test_folder_name())
+            root = posixpath.join(base, test_folder_name(prefix=self.folder_prefix))
             session.mkdir(root)
         finally:
             session.close()
@@ -445,8 +461,9 @@ class StressTest:
                 self._stop,
                 self._session_factory,
                 random.Random(self._rng.random()),
+                self.is_connection_lost,
             )
-            thread = threading.Thread(target=worker.run, name=f"sftp-test-worker-{index}", daemon=True)
+            thread = threading.Thread(target=worker.run, name=f"{self.thread_prefix}-{index}", daemon=True)
             self._threads.append(thread)
             thread.start()
 

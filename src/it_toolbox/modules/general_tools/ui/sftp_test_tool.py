@@ -21,9 +21,21 @@ class SftpTestTool:
     server details. Several tabs can run at once (e.g. against two servers).
     Tests saved from a tab ("Save Test…") are listed under it, the way VMs
     are in Connection Manager: double-click one to open it in a new tab.
+
+    FtpTestTool is the same thing for FTP: it swaps in its own name,
+    widget class and saved-test storage.
     """
 
     name = "SFTP Server Test"
+    widget_class = SftpServerTestWidget
+
+    @staticmethod
+    def _load_configs() -> dict[str, dict]:
+        return settings.load_sftp_server_test_configs()
+
+    @staticmethod
+    def _save_configs(configs: dict[str, dict]) -> None:
+        settings.save_sftp_server_test_configs(configs)
 
     def __init__(self, view: QWidget, tabs: QTabWidget) -> None:
         self._view = view
@@ -40,7 +52,7 @@ class SftpTestTool:
     def add_category_actions(self, menu: QMenu) -> None:
         """Actions for this tool's own node, and for the General Tools
         entry's context menu."""
-        menu.addAction("New SFTP Server Test…").triggered.connect(self.new_test)
+        menu.addAction(f"New {self.name}…").triggered.connect(self.new_test)
 
     def add_item_actions(self, menu: QMenu, item: QTreeWidgetItem) -> None:
         name = item.data(0, SAVED_TEST_NAME_ROLE)
@@ -61,19 +73,20 @@ class SftpTestTool:
         """Re-lists the saved tests under "New Test…"."""
         while self.item.childCount() > 1:
             self.item.removeChild(self.item.child(1))
-        configs = settings.load_sftp_server_test_configs()
+        configs = self._load_configs()
         for name in sorted(configs, key=str.casefold):
             values = configs[name]
             child = QTreeWidgetItem([name])
             child.setData(0, SAVED_TEST_NAME_ROLE, name)
-            target = f"{values.get('username', '')}@{values.get('host', '')}:{values.get('port', 22)}"
+            port = values.get("port", self.widget_class.default_port)
+            target = f"{values.get('username', '')}@{values.get('host', '')}:{port}"
             child.setToolTip(0, f"{target}\nDouble-click to open in a new test tab.")
             self.item.addChild(child)
 
     # -- Saved tests --------------------------------------------------------
 
     def open_saved_test(self, name: str) -> SftpServerTestWidget | None:
-        if name not in settings.load_sftp_server_test_configs():
+        if name not in self._load_configs():
             self.refresh_saved_tests()
             return None
         widget = self.new_test()
@@ -85,7 +98,7 @@ class SftpTestTool:
         new_name = new_name.strip()
         if not ok or not new_name or new_name == name:
             return
-        configs = settings.load_sftp_server_test_configs()
+        configs = self._load_configs()
         if name not in configs:
             self.refresh_saved_tests()
             return
@@ -93,7 +106,7 @@ class SftpTestTool:
             QMessageBox.warning(self._view, "Rename Saved Test", f"There's already a saved test called “{new_name}”.")
             return
         configs[new_name] = configs.pop(name)
-        settings.save_sftp_server_test_configs(configs)
+        self._save_configs(configs)
         for widget in self._owned_tab_widgets:
             if widget.saved_name == name:
                 widget.saved_name = new_name
@@ -103,9 +116,9 @@ class SftpTestTool:
         answer = QMessageBox.question(self._view, "Delete Saved Test", f"Delete the saved test “{name}”?")
         if answer != QMessageBox.StandardButton.Yes:
             return
-        configs = settings.load_sftp_server_test_configs()
+        configs = self._load_configs()
         configs.pop(name, None)
-        settings.save_sftp_server_test_configs(configs)
+        self._save_configs(configs)
         for widget in self._owned_tab_widgets:
             if widget.saved_name == name:
                 widget.saved_name = None
@@ -114,7 +127,7 @@ class SftpTestTool:
     # -- Tabs -------------------------------------------------------------
 
     def new_test(self) -> SftpServerTestWidget:
-        widget = SftpServerTestWidget()
+        widget = self.widget_class()
         self._owned_tab_widgets.add(widget)
         index = self._tabs.addTab(widget, self.name)
         self._tabs.setCurrentIndex(index)
