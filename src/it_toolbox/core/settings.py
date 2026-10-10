@@ -856,3 +856,27 @@ def load_proftpd_servers() -> list[dict]:
 
 def save_proftpd_servers(servers: list[dict]) -> None:
     proftpd_servers_path().write_text(json.dumps(servers))
+
+
+def hosting_servers_path() -> Path:
+    return data_dir() / "hosting_servers.json"
+
+
+def load_hosting_servers() -> list[dict]:
+    """Servers saved in the Hosting Manager (General Tools), as raw dicts
+    (see core/remote_helper.RemoteServer.to_dict). No passwords: SSH
+    and sudo passwords are only ever prompted for."""
+    path = hosting_servers_path()
+    if not path.is_file():
+        return []
+    try:
+        servers = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(servers, list):
+        return []
+    return [s for s in servers if isinstance(s, dict)]
+
+
+def save_hosting_servers(servers: list[dict]) -> None:
+    hosting_servers_path().write_text(json.dumps(servers))
