@@ -118,9 +118,11 @@ process with the bundle (Dock name and icon) rather than a bare
 `PBS_RELEASE` and `PBS_SHA256` at the top of the script, from that
 release's `SHA256SUMS`), in step with `build.ps1`'s `$PyVersion`.
 
-FreeRDP is not bundled: embedded RDP needs `brew install freerdp`, and
-the app degrades to the "open in Windows App / sdl-freerdp" path without
-it, the same way it does on any platform when the libraries are missing.
+FreeRDP is not bundled: embedded RDP needs `brew install freerdp`.
+Without it the app still starts, and Connection Manager reports "RDP
+unavailable" when you try to connect, the same as on any platform when
+the libraries are missing. Settings > Remote Desktop > FreeRDP (macOS)
+shows whether they were found.
 
 The bundle is **ad-hoc signed only** (`codesign --sign -` — Apple
 Silicon won't run unsigned arm64 code at all), not Developer ID signed or
@@ -148,8 +150,8 @@ verifies the signature, imports every native-extension dependency
 through the bundled interpreter and launches the app headless
 (`QT_QPA_PLATFORM=offscreen`), so a bundle that can't start fails CI. It
 also runs on PRs touching `packaging/macos/`, and can be triggered
-manually (`workflow_dispatch`). None of that proves real RDP, Terminal
-or update behaviour — see `docs/macos-status.md` for what still needs a
+manually (`workflow_dispatch`). None of that proves real RDP or update
+behaviour — see `docs/macos-status.md` for what still needs a
 person on a Mac.
 
 ## Linux packages
