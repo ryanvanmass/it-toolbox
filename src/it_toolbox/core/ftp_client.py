@@ -294,11 +294,57 @@ def _parse_mlsd_modify(raw: str) -> float:
         return 0.0
 
 
+def _parse_list_line(line: str) -> FileEntry | None:
+    """One line of a LIST reply, for servers without MLSD (vsftpd, IIS):
+    Unix `ls -l` style or the DOS style IIS can be set to. None for lines
+    that are neither (e.g. "total 12")."""
+    parts = line.split(None, 8)
+    if len(parts) == 9 and parts[0][:1] in "-dl":
+        size = int(parts[4]) if parts[4].isdigit() else 0
+        name = parts[8]
+        if parts[0].startswith("l") and " -> " in name:
+            name = name.split(" -> ", 1)[0]
+        return FileEntry(name=name, is_dir=parts[0].startswith("d"), size=size, permissions=parts[0])
+    parts = line.split(None, 3)
+    if len(parts) == 4 and parts[0][:2].isdigit() and parts[0][2:3] == "-":
+        is_dir = parts[2].upper() == "<DIR>"
+        size = int(parts[2]) if parts[2].isdigit() else 0
+        return FileEntry(name=parts[3], is_dir=is_dir, size=size)
+    return None
+
+
+def _error_text(exc: BaseException) -> str:
+    """ftplib's own errors carry the server's reply; socket-level ones
+    (EOFError when the server hangs up, a timeout) can be blank."""
+    text = str(exc)
+    if isinstance(exc, EOFError):
+        return text or "Connection closed by the server"
+    return text or type(exc).__name__
+
+
+def _is_unsupported_command(exc: Exception) -> bool:
+    """500/502/504 -- the server doesn't know the command (as opposed to
+    550 "no such file" and friends)."""
+    return isinstance(exc, ftplib.error_perm) and str(exc)[:3] in ("500", "502", "504")
+
+
+class _FtpTlsWithSessionReuse(ftplib.FTP_TLS):
+    """FTP_TLS that resumes the control connection's TLS session on every
+    data connection. vsftpd (require_ssl_reuse, on by default) and ProFTPD
+    (unless TLSOptions NoSessionReuseRequired) refuse data connections
+    that don't, which plain FTP_TLS doesn't do."""
+
+    def ntransfercmd(self, cmd, rest=None):
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(conn, server_hostname=self.host, session=self.sock.session)
+        return conn, size
+
+
 class FtpSession:
     """One plain-FTP (or FTPS, if use_tls) connection via the stdlib
-    ftplib. Directory listing uses MLSD (RFC 3659), which every FTP
-    server built in the last ~20 years supports — no LIST-text-parsing
-    fallback for the rare server that doesn't.
+    ftplib. Directory listing uses MLSD (RFC 3659), falling back to
+    parsing LIST for servers that don't have it (vsftpd, IIS).
     """
 
     kind = "ftp"
@@ -317,9 +363,10 @@ class FtpSession:
         self._password = password
         self._use_tls = use_tls
         self._ftp: ftplib.FTP | None = None
+        self._has_mlsd = True
 
     def connect(self) -> None:
-        ftp = ftplib.FTP_TLS() if self._use_tls else ftplib.FTP()
+        ftp = _FtpTlsWithSessionReuse() if self._use_tls else ftplib.FTP()
         try:
             ftp.connect(self._host, self._port, timeout=15)
             ftp.login(self._username, self._password)
@@ -334,22 +381,37 @@ class FtpSession:
         return self._ftp.pwd()
 
     def list_dir(self, path: str) -> list[FileEntry]:
-        entries = []
         try:
-            listing = self._ftp.mlsd(path or ".")
-            for name, facts in listing:
-                if name in (".", ".."):
-                    continue
-                entries.append(
-                    FileEntry(
-                        name=name,
-                        is_dir=facts.get("type") == "dir",
-                        size=int(facts.get("size", 0) or 0),
-                        modified=_parse_mlsd_modify(facts.get("modify", "")),
-                    )
-                )
+            if self._has_mlsd:
+                try:
+                    return self._list_dir_mlsd(path)
+                except ftplib.error_perm as exc:
+                    if not _is_unsupported_command(exc):
+                        raise
+                    self._has_mlsd = False
+            return self._list_dir_list(path)
         except ftplib.all_errors as exc:
-            raise FtpClientError(str(exc)) from exc
+            raise FtpClientError(_error_text(exc)) from exc
+
+    def _list_dir_mlsd(self, path: str) -> list[FileEntry]:
+        entries = []
+        for name, facts in self._ftp.mlsd(path or "."):
+            if facts.get("type") in ("cdir", "pdir") or name in (".", ".."):
+                continue
+            entries.append(
+                FileEntry(
+                    name=name,
+                    is_dir=facts.get("type") == "dir",
+                    size=int(facts.get("size", 0) or 0),
+                    modified=_parse_mlsd_modify(facts.get("modify", "")),
+                )
+            )
+        return _sort_entries(entries)
+
+    def _list_dir_list(self, path: str) -> list[FileEntry]:
+        lines: list[str] = []
+        self._ftp.retrlines(f"LIST {path}" if path else "LIST", lines.append)
+        entries = [entry for entry in map(_parse_list_line, lines) if entry and entry.name not in (".", "..")]
         return _sort_entries(entries)
 
     def download(self, remote_path: str, local_path: str, progress: ProgressCallback | None = None) -> None:
@@ -370,7 +432,7 @@ class FtpSession:
 
                 self._ftp.retrbinary(f"RETR {remote_path}", _write)
         except ftplib.all_errors as exc:
-            raise FtpClientError(str(exc)) from exc
+            raise FtpClientError(_error_text(exc)) from exc
 
     def upload(self, local_path: str, remote_path: str, progress: ProgressCallback | None = None) -> None:
         total = os.path.getsize(local_path)
@@ -386,31 +448,67 @@ class FtpSession:
             with open(local_path, "rb") as f:
                 self._ftp.storbinary(f"STOR {remote_path}", f, callback=_report)
         except ftplib.all_errors as exc:
-            raise FtpClientError(str(exc)) from exc
+            raise FtpClientError(_error_text(exc)) from exc
+
+    def upload_fileobj(self, fileobj: BinaryIO, remote_path: str, size: int) -> None:
+        """Streams `fileobj` (read in chunks until EOF) to `remote_path`.
+        `size` is unused -- FTP doesn't announce it -- but keeps the same
+        signature as SftpSession.upload_fileobj."""
+        try:
+            self._ftp.storbinary(f"STOR {remote_path}", fileobj)
+        except ftplib.all_errors as exc:
+            raise FtpClientError(_error_text(exc)) from exc
+
+    def download_fileobj(self, remote_path: str, fileobj: BinaryIO) -> None:
+        """Streams `remote_path` into `fileobj` chunk by chunk."""
+        try:
+            self._ftp.retrbinary(f"RETR {remote_path}", fileobj.write)
+        except ftplib.all_errors as exc:
+            raise FtpClientError(_error_text(exc)) from exc
+
+    def stat(self, path: str) -> str:
+        """Checks that `path` exists, via MLST, or SIZE then CWD on servers
+        without it. Returns the server's reply."""
+        try:
+            try:
+                return self._ftp.sendcmd(f"MLST {path}")
+            except ftplib.error_perm as exc:
+                if not _is_unsupported_command(exc):
+                    raise
+            try:
+                self._ftp.voidcmd("TYPE I")
+                return str(self._ftp.size(path))
+            except ftplib.error_perm:
+                current = self._ftp.pwd()
+                reply = self._ftp.cwd(path)  # a directory, or raises
+                self._ftp.cwd(current)
+                return reply
+        except ftplib.all_errors as exc:
+            raise FtpClientError(_error_text(exc)) from exc
 
     def mkdir(self, path: str) -> None:
         try:
             self._ftp.mkd(path)
         except ftplib.all_errors as exc:
-            raise FtpClientError(str(exc)) from exc
+            raise FtpClientError(_error_text(exc)) from exc
 
     def rmdir(self, path: str) -> None:
         try:
             self._ftp.rmd(path)
         except ftplib.all_errors as exc:
-            raise FtpClientError(str(exc)) from exc
+            raise FtpClientError(_error_text(exc)) from exc
 
     def remove(self, path: str) -> None:
         try:
             self._ftp.delete(path)
         except ftplib.all_errors as exc:
-            raise FtpClientError(str(exc)) from exc
+            raise FtpClientError(_error_text(exc)) from exc
 
     def rename(self, old_path: str, new_path: str) -> None:
         try:
             self._ftp.rename(old_path, new_path)
         except ftplib.all_errors as exc:
-            raise FtpClientError(str(exc)) from exc
+            raise FtpClientError(_error_text(exc)) from exc
 
     def join(self, base: str, name: str) -> str:
         return posixpath.join(base or "/", name)

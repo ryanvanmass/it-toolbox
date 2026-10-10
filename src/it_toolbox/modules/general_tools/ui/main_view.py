@@ -9,13 +9,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from it_toolbox.modules.general_tools.ui.ftp_test_tool import FtpTestTool
 from it_toolbox.modules.general_tools.ui.mbox_tool import MboxTool
 from it_toolbox.modules.general_tools.ui.sftp_test_tool import SftpTestTool
 
 
 class GeneralToolsView(QWidget):
     """Home for small standalone utilities that don't belong to a
-    connection family (the Mbox Browser and the SFTP Server Test). Each tool is a
+    connection family (the Mbox Browser and the SFTP and FTP Server Tests). Each tool is a
     top-level node in the sidebar tree with its own entries beneath it,
     and opens its tabs in the shared session-tab pane.
 
@@ -42,7 +43,8 @@ class GeneralToolsView(QWidget):
 
         self.mbox = MboxTool(self, self._tabs)
         self.sftp_test = SftpTestTool(self, self._tabs)
-        self._tools = [self.mbox, self.sftp_test]
+        self.ftp_test = FtpTestTool(self, self._tabs)
+        self._tools = [self.mbox, self.sftp_test, self.ftp_test]
 
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Tools"])
