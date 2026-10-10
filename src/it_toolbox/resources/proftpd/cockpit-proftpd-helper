@@ -1,0 +1,1623 @@
+#!/usr/bin/python3
+"""cockpit-proftpd-helper -- the single privileged surface for the
+cockpit-proftpd Cockpit module.
+
+Invoked as `cockpit-proftpd-helper <subcommand>` with a JSON object on
+stdin (subcommand-specific args, or {} for none) and exactly one JSON
+object printed to stdout. Exit 0 + a result object means success; a
+non-zero exit + {"error": "..."} means failure -- the frontend surfaces
+that message directly, so it should read like something a sysadmin can
+act on, never a raw Python traceback.
+
+This is the *only* place in the whole module that runs privileged
+operations (package install, editing /etc/proftpd.conf, the SQLite user
+database, chown/chmod on home directories). The frontend calls this via
+cockpit.spawn(..., {superuser: "require"}) and never shells out to
+sqlite3/useradd-style commands on its own.
+"""
+
+import datetime
+import grp
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+# Container mode (see container/ and README "Docker / TrueNAS"): the same
+# helper runs inside a plain Docker container with no systemd, dnf,
+# SELinux, or firewalld, so the few places that depend on those are gated
+# on this flag, and the persistent paths below can be pointed at a
+# mounted volume via COCKPIT_PROFTPD_* environment variables. With none
+# of these set, behavior is exactly the packaged-RPM behavior.
+CONTAINER = os.environ.get("COCKPIT_PROFTPD_CONTAINER") == "1"
+
+
+def _env_path(name: str, default: str) -> Path:
+    return Path(os.environ.get(name) or default)
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name) or default)
+
+
+DB_PATH = _env_path("COCKPIT_PROFTPD_DB", "/var/lib/cockpit-proftpd/virtual-users.db")
+CONF_PATH = _env_path("COCKPIT_PROFTPD_CONF", "/etc/proftpd/conf.d/cockpit-proftpd.conf")
+HOST_KEY_PATH = _env_path("COCKPIT_PROFTPD_HOST_KEY", "/etc/pki/cockpit-proftpd/ssh_host_ed25519_key")
+TLS_CERT_PATH = _env_path("COCKPIT_PROFTPD_TLS_CERT", "/etc/pki/cockpit-proftpd/tls_cert.pem")
+TLS_KEY_PATH = _env_path("COCKPIT_PROFTPD_TLS_KEY", "/etc/pki/cockpit-proftpd/tls_key.pem")
+BASE_CONF_PATH = _env_path("COCKPIT_PROFTPD_BASE_CONF", "/etc/proftpd.conf")
+# /var/ftp itself (the proftpd package's own pre-existing directory) is
+# already covered by the distro's default SELinux file-context mapping
+# -- but only as public_content_t (anonymous *read-only* content).
+# Anything actually written to (the SQLite database, and each user's
+# home directory under here) needs an explicit public_content_rw_t
+# override -- see _ensure_selinux_fcontext, cmd_setup, and _chown_home.
+# Confirmed the hard way against a real SELinux-enforcing instance: this
+# was NOT optional, and the resulting denial did not appear in the audit
+# log at all (confirmed via `semanage permissive -a ftpd_t`, which fixed
+# it -- proof it really was SELinux even though nothing was logged) --
+# don't take an empty `ausearch -m avc` as proof SELinux isn't involved.
+FTP_ROOT = _env_path("COCKPIT_PROFTPD_FTP_ROOT", "/var/ftp")
+SFTP_PORT = _env_int("COCKPIT_PROFTPD_SFTP_PORT", 2222)
+# A fixed range, not the OS-assigned ephemeral ports ProFTPD would use by
+# default -- passive-mode FTP data connections need a fixed, small range
+# so a firewall rule can actually be written for them (see PassivePorts
+# in proftpd-cockpit.conf.tmpl and cmd_open_firewall).
+PASSIVE_PORT_MIN = _env_int("COCKPIT_PROFTPD_PASSIVE_MIN", 49152)
+PASSIVE_PORT_MAX = _env_int("COCKPIT_PROFTPD_PASSIVE_MAX", 49216)
+MIN_UID = 5000
+MIN_GID = 5000
+# A fixed constant, not a setup-time UI choice -- consistent with how
+# SFTP_PORT/the passive-port range aren't configurable either.
+MIN_PASSWORD_LENGTH = 8
+# Synthetic ACL groups (not real Unix groups, and never assigned as a
+# user's own gid -- MIN_GID starts real virtual users at 5000, so these
+# sentinel values below it can't collide) that proftpd-cockpit.conf.tmpl's
+# <Limit ...> DenyGroup directives key off of. Each group is managed
+# independently (see _set_acl_group_membership) so a user can be in any
+# combination of these at once -- e.g. both protocol-restricted and
+# read-only.
+ACL_GROUP_GIDS = {
+    "protocol-ftp-only": 4998,
+    "protocol-sftp-only": 4999,
+    "readonly": 4997,
+    "rate-slow": 4996,
+    "rate-medium": 4995,
+    "locked": 4994,
+}
+# Shared *writable* virtual mounts (v5) use a dynamically-allocated,
+# real (non-sentinel) SQL group per distinct real_path that ends up
+# used by more than one user -- confirmed live that a pure SQL
+# groups-table row, with no matching /etc/group entry at all, produces
+# real OS-level supplementary-group membership for ProFTPD's worker
+# process (a member's write through the group-owned, 0770 directory
+# succeeds; a non-member is denied even a chdir into it). Kept in its
+# own gid range, clearly separated from both ACL_GROUP_GIDS
+# (4994-4999) and real virtual users (MIN_GID and up).
+SHARE_GROUP_GID_MIN = 4000
+# Admin-named, persistent user groups (v6) -- a *third* category of row
+# in the same SQL groups table (alongside the fixed ACL_GROUP_GIDS
+# sentinels and v5's per-real_path vshare-<hash> promotion groups),
+# created/deleted explicitly rather than derived from a path hash, so
+# a team's membership can be defined once and reused across many
+# virtual directories instead of re-adding the same users to every
+# one. Own gid pool, clearly disjoint from SHARE_GROUP_GID_MIN
+# (4000+), ACL_GROUP_GIDS (4994-4999), and real virtual users (MIN_GID
+# and up).
+GROUP_GID_MIN = 3000
+# Keyed by the *_require_protocol-facing name ("ftp"/"sftp" -- the
+# protocol a restricted user is limited *to*) rather than by which group
+# they're denied from, since that's the direction the frontend/API
+# actually thinks in.
+PROTOCOL_GROUPS = {"ftp": "protocol-ftp-only", "sftp": "protocol-sftp-only"}
+# TransferRate is a static, per-context config value -- not looked up
+# per-SQL-user the way quotas are -- so unlike quotas this can only
+# offer a small, fixed set of tiers (each an <IfGroup> in
+# proftpd-cockpit.conf.tmpl), not an arbitrary per-user number.
+RATE_TIER_GROUPS = {"slow": "rate-slow", "medium": "rate-medium"}
+# mod_quotatab's own lock file, for safe concurrent tally updates (its
+# docs "strongly encourage" one for SQL-backed tally tables) -- lives
+# alongside the database, in the same directory cmd_setup already makes
+# writable by ProFTPD's connection-handling group.
+QUOTA_LOCK_PATH = _env_path("COCKPIT_PROFTPD_QUOTA_LOCK", "/var/lib/cockpit-proftpd/quota.lock")
+# A named firewalld service (shows as e.g. "cockpit-proftpd" on Cockpit's
+# own Networking page) instead of unlabeled "Additional port" rows --
+# firewalld ships no built-in service covering a custom SFTP port or
+# this module's passive-port range (only "ftp", for plain port 21,
+# exists), so this defines its own. See cmd_open_firewall.
+FIREWALLD_SERVICE_NAME = "cockpit-proftpd"
+FIREWALLD_SERVICE_PATH = Path(f"/etc/firewalld/services/{FIREWALLD_SERVICE_NAME}.xml")
+# A systemd timer, not a lazy check on list-users/status -- an expired
+# account should actually get locked even if nobody happens to open
+# Cockpit. First thing in this project to install its own systemd
+# units rather than just editing ProFTPD's config.
+EXPIRE_TIMER_NAME = "cockpit-proftpd-expire"
+EXPIRE_SERVICE_PATH = Path(f"/etc/systemd/system/{EXPIRE_TIMER_NAME}.service")
+EXPIRE_TIMER_PATH = Path(f"/etc/systemd/system/{EXPIRE_TIMER_NAME}.timer")
+# The transfers table (populated by ProFTPD itself, see
+# proftpd-cockpit.conf.tmpl's SQLLog directive) has no other retention
+# story -- cmd_list_transfers prunes down to this many of the most
+# recent rows on every call, a self-contained cap rather than a
+# separate cleanup timer.
+MAX_TRANSFER_LOG_ROWS = 1000
+# Virtual directories (v5): real Linux bind mounts, persisted as real
+# systemd .mount units so they survive a reboot -- not fstab, to match
+# this project's existing systemd-unit pattern (the expire timer
+# above). Unit files live alongside the expire timer's own, under the
+# same directory.
+VIRTUAL_MOUNT_UNIT_DIR = Path("/etc/systemd/system")
+
+_HELPER_DIR = Path(__file__).resolve().parent
+SCHEMA_SQL = _HELPER_DIR / "schema.sql"
+CONF_TEMPLATE = _HELPER_DIR / "proftpd-cockpit.conf.tmpl"
+
+# Deliberately restrictive -- this becomes a directory name (under
+# FTP_ROOT) and a SQL value, and there's no real need to support
+# anything fancier for a virtual FTP/SFTP account.
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+# Becomes a subdirectory name under a user's own homedir -- no slashes
+# or dots, so it can't be used to escape the homedir or collide with
+# "." /"..".
+VIRTUAL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Admin-named groups (v6) share the same groups table as the fixed ACL
+# sentinels and v5's vshare-<hash> promotion groups -- disallowing the
+# "vshare-" prefix and any existing ACL_GROUP_GIDS name keeps a
+# user-chosen name from ever colliding with either.
+GROUP_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+
+class HelperError(Exception):
+    """Raised for any expected/anticipated failure -- str(e) goes
+    straight to the UI, so message text matters."""
+
+
+def _run(argv: list[str], input_text: str | None = None) -> subprocess.CompletedProcess:
+    result = subprocess.run(argv, input=input_text, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise HelperError(f"`{' '.join(argv)}` failed: {detail}")
+    return result
+
+
+def _connect_db() -> sqlite3.Connection:
+    if not DB_PATH.is_file():
+        raise HelperError("Not set up yet -- run setup first.")
+    return sqlite3.connect(DB_PATH)
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coldef: str) -> None:
+    """SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS -- checks
+    PRAGMA table_info first. CREATE TABLE IF NOT EXISTS (schema.sql)
+    only creates a table that doesn't exist *at all*; it can't add a
+    column to a table that already exists with an older shape. This bit
+    the sftpuserkeys.key_type column for real during development (added
+    after the table already existed on the dev VM from earlier
+    testing) -- this is the real forward-migration path that gap
+    should have had from the start.
+    """
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+
+
+def _ftpd_group() -> str:
+    """The group ProFTPD's connection-handling process actually runs as
+    -- our own conf.d file never overrides User/Group, so whatever the
+    base /etc/proftpd.conf says governs. Needed so the database
+    directory/file can be made accessible to that process without
+    opening it up to every local user (see cmd_setup). Falls back to
+    "nobody" (the stock default shipped by the proftpd package) if the
+    directive isn't found at all.
+    """
+    if BASE_CONF_PATH.is_file():
+        for line in BASE_CONF_PATH.read_text().splitlines():
+            match = re.match(r"^\s*Group\s+(\S+)", line)
+            if match:
+                return match.group(1)
+    return "nobody"
+
+
+def _hash_password(password: str) -> str:
+    # -stdin, not a `password` argv, so it never shows up in `ps` output
+    # for other users on the box to see.
+    result = _run(["openssl", "passwd", "-6", "-stdin"], input_text=password)
+    return result.stdout.strip()
+
+
+# A crypt(3) hash can never actually equal this -- guarantees a
+# password-less account (one created with only a public key) can't be
+# logged into over FTP, which has no concept of SSH keys at all and
+# would otherwise be comparing against a NULL/empty stored hash whose
+# behavior against mod_sql_sqlite isn't worth relying on.
+NO_PASSWORD_HASH = "!"
+
+
+def _set_user_key(conn: sqlite3.Connection, username: str, public_key: str | None) -> None:
+    """public_key is a full "ssh-ed25519 AAAA..." (or similar) line, or
+    None/"" to remove any stored key. Validated with `ssh-keygen -l`
+    (reading from stdin, same -stdin-not-argv pattern as password
+    hashing) before being stored, so a malformed paste fails clearly
+    here instead of silently breaking SFTP login later.
+    """
+    conn.execute("DELETE FROM sftpuserkeys WHERE name = ?", (username,))
+    if public_key:
+        result = subprocess.run(
+            ["ssh-keygen", "-l", "-f", "-"], input=public_key, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise HelperError("That doesn't look like a valid SSH public key.")
+        # mod_sftp_sql's SQLNamedQuery selects the "key" column and
+        # base64-decodes it directly -- it must hold *only* the raw
+        # blob, not the full "type base64 comment" line, confirmed via
+        # a real failed login ("error base64-decoding raw key data from
+        # database"). key_type is stored separately purely so this can
+        # be reconstructed as a real key line for the UI later.
+        parts = public_key.split(None, 2)
+        key_type, key_blob = parts[0], parts[1]
+        conn.execute(
+            "INSERT INTO sftpuserkeys (name, key, key_type) VALUES (?, ?, ?)", (username, key_blob, key_type)
+        )
+
+
+def _user_public_key(conn: sqlite3.Connection, username: str) -> str | None:
+    row = conn.execute("SELECT key, key_type FROM sftpuserkeys WHERE name = ?", (username,)).fetchone()
+    return f"{row[1]} {row[0]}" if row else None
+
+
+def _require_username(username: object) -> str:
+    if not isinstance(username, str) or not USERNAME_RE.match(username):
+        raise HelperError(
+            "Username must start with a lowercase letter or underscore, and contain only "
+            "lowercase letters, digits, '-' or '_' (max 32 characters)."
+        )
+    return username
+
+
+def _require_virtual_name(name: object) -> str:
+    if not isinstance(name, str) or not VIRTUAL_NAME_RE.match(name):
+        raise HelperError(
+            "Virtual directory name must contain only letters, digits, '-' or '_' (max 64 characters)."
+        )
+    return name
+
+
+def _require_group_name(name: object) -> str:
+    if not isinstance(name, str) or not GROUP_NAME_RE.match(name) or name.startswith("vshare-"):
+        raise HelperError(
+            "Group name must start with a lowercase letter, and contain only lowercase letters, "
+            "digits, '-' or '_' (max 32 characters)."
+        )
+    if name in ACL_GROUP_GIDS:
+        raise HelperError(f"'{name}' is a reserved name and can't be used for a group.")
+    return name
+
+
+def _require_password_length(password: str) -> None:
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HelperError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+
+
+def _selinux_enabled() -> bool:
+    return shutil.which("selinuxenabled") is not None and subprocess.run(
+        ["selinuxenabled"], capture_output=True
+    ).returncode == 0
+
+
+def _ensure_selinux_fcontext(path: Path, context_type: str) -> None:
+    """Best-effort: label `path` (recursively) as `context_type` so
+    ProFTPD's ftpd_t SELinux domain can actually read/write it. A no-op
+    if SELinux isn't enabled or semanage/restorecon aren't installed.
+    """
+    if not _selinux_enabled() or not shutil.which("semanage") or not shutil.which("restorecon"):
+        return
+    result = subprocess.run(
+        ["semanage", "fcontext", "-a", "-t", context_type, f"{path}(/.*)?"],
+        capture_output=True, text=True,
+    )
+    # setup()/create-user() are both idempotent and may re-apply this to
+    # the same path -- semanage exits non-zero for a mapping that's
+    # already there, which isn't a real failure.
+    if result.returncode != 0 and "already defined" not in result.stderr:
+        raise HelperError(f"semanage fcontext failed for {path}: {result.stderr.strip()}")
+    subprocess.run(["restorecon", "-R", str(path)], capture_output=True)
+
+
+def _ensure_selinux_boolean(name: str, on: bool) -> None:
+    if not _selinux_enabled() or not shutil.which("setsebool"):
+        return
+    _run(["setsebool", "-P", name, "on" if on else "off"])
+
+
+def _chown_home(homedir: str, uid: int, gid: int) -> None:
+    path = Path(homedir)
+    path.mkdir(parents=True, exist_ok=True)
+    os.chown(path, uid, gid)
+    path.chmod(0o700)
+    # public_content_rw_t, not the default public_content_t (read-only
+    # -- inherited from FTP_ROOT's own context) a new directory here
+    # would otherwise get. Confirmed the hard way: a virtual user's STOR
+    # failed with "550 Permission denied" under real SELinux enforcement
+    # until this was applied, even with the chown/chmod above already
+    # correct -- see FTP_ROOT's comment and cmd_setup's matching
+    # ftpd_anon_write boolean this depends on.
+    _ensure_selinux_fcontext(path, "public_content_rw_t")
+
+
+def _ensure_acl_group(conn: sqlite3.Connection, groupname: str) -> None:
+    if not conn.execute("SELECT 1 FROM groups WHERE groupname = ?", (groupname,)).fetchone():
+        conn.execute(
+            "INSERT INTO groups (groupname, gid, members) VALUES (?, ?, '')",
+            (groupname, ACL_GROUP_GIDS[groupname]),
+        )
+
+
+def _acl_group_members(conn: sqlite3.Connection, groupname: str) -> set[str]:
+    row = conn.execute("SELECT members FROM groups WHERE groupname = ?", (groupname,)).fetchone()
+    return {m for m in (row[0] or "").split(",") if m} if row else set()
+
+
+def _set_acl_group_membership(conn: sqlite3.Connection, groupname: str, username: str, is_member: bool) -> None:
+    """Adds or removes `username` from one synthetic ACL group, leaving
+    every other group's membership untouched -- so a user can be a
+    member of any combination of these (protocol-restricted *and*
+    read-only, say) without one feature's code clobbering another's.
+    """
+    _ensure_acl_group(conn, groupname)
+    members = _acl_group_members(conn, groupname) - {username}
+    if is_member:
+        members.add(username)
+    conn.execute(
+        "UPDATE groups SET members = ? WHERE groupname = ?", (",".join(sorted(members)), groupname)
+    )
+
+
+def _set_user_protocol(conn: sqlite3.Connection, username: str, protocol: str) -> None:
+    """protocol is "both" (default, unrestricted), or the single
+    protocol ("ftp"/"sftp") a user is limited to -- membership in the
+    matching PROTOCOL_GROUPS entry is what the config template's
+    <Limit LOGIN> DenyGroup directives actually act on.
+    """
+    if protocol not in ("both", *PROTOCOL_GROUPS):
+        raise HelperError("protocol must be 'both', 'ftp', or 'sftp'.")
+    for target_protocol, groupname in PROTOCOL_GROUPS.items():
+        _set_acl_group_membership(conn, groupname, username, is_member=(protocol == target_protocol))
+
+
+def _protocol_by_user(conn: sqlite3.Connection) -> dict[str, str]:
+    result = {}
+    for protocol, groupname in PROTOCOL_GROUPS.items():
+        for username in _acl_group_members(conn, groupname):
+            result[username] = protocol
+    return result
+
+
+def _set_user_readonly(conn: sqlite3.Connection, username: str, readonly: bool) -> None:
+    """membership in the "readonly" ACL group is what the config
+    template's <Limit WRITE> DenyGroup directive acts on -- covers
+    every mutating FTP command (STOR/DELE/RNTO/MKD/RMD/etc, confirmed
+    against ProFTPD's own docs), leaving RETR/LIST untouched.
+    """
+    _set_acl_group_membership(conn, "readonly", username, is_member=readonly)
+
+
+def _is_user_readonly(conn: sqlite3.Connection, username: str) -> bool:
+    return username in _acl_group_members(conn, "readonly")
+
+
+def _set_user_rate_limit(conn: sqlite3.Connection, username: str, tier: str) -> None:
+    """tier is "unlimited" (default), "slow", or "medium" -- membership
+    in the matching RATE_TIER_GROUPS entry is what the config
+    template's <IfGroup> TransferRate blocks act on.
+    """
+    if tier not in ("unlimited", *RATE_TIER_GROUPS):
+        raise HelperError("rate_limit must be 'unlimited', 'slow', or 'medium'.")
+    for target_tier, groupname in RATE_TIER_GROUPS.items():
+        _set_acl_group_membership(conn, groupname, username, is_member=(tier == target_tier))
+
+
+def _user_rate_limit(conn: sqlite3.Connection, username: str) -> str:
+    for tier, groupname in RATE_TIER_GROUPS.items():
+        if username in _acl_group_members(conn, groupname):
+            return tier
+    return "unlimited"
+
+
+def _set_user_locked(conn: sqlite3.Connection, username: str, locked: bool) -> None:
+    """membership in the "locked" ACL group is denied at <Limit LOGIN>
+    in <Global> (not scoped to just one context the way the
+    protocol-restriction Limits are) -- confirmed by the same mechanism
+    already blocking SFTP logins for protocol-sftp-only members that
+    <Global> propagates into the SFTP VirtualHost, so this blocks login
+    over *either* protocol, by *either* password or SFTP public key,
+    without needing to touch the users.passwd or sftpuserkeys tables at
+    all -- unlike NO_PASSWORD_HASH, nothing here is destructive, so
+    unlocking a user needs no "restore the original password" step.
+    """
+    _set_acl_group_membership(conn, "locked", username, is_member=locked)
+
+
+def _is_user_locked(conn: sqlite3.Connection, username: str) -> bool:
+    return username in _acl_group_members(conn, "locked")
+
+
+def _set_user_expiry(conn: sqlite3.Connection, username: str, expires_at: str | None) -> None:
+    if expires_at:
+        try:
+            datetime.date.fromisoformat(expires_at)
+        except ValueError as exc:
+            raise HelperError("expires_at must be an ISO date (YYYY-MM-DD).") from exc
+    conn.execute("UPDATE users SET expires_at = ? WHERE userid = ?", (expires_at or None, username))
+
+
+def _user_expiry(conn: sqlite3.Connection, username: str) -> str | None:
+    row = conn.execute("SELECT expires_at FROM users WHERE userid = ?", (username,)).fetchone()
+    return row[0] if row else None
+
+
+def _rename_user_everywhere(conn: sqlite3.Connection, old_username: str, new_username: str) -> None:
+    """userid is users' primary key, but it's referenced *by value* (not
+    a stable numeric id) from every table this module has added since:
+    groups.members (a comma-list containing the username as text),
+    quotalimits.name, quotatallies.name, sftpuserkeys.name -- the same
+    set cmd_delete_user's own cleanup already touches. Deliberately does
+    NOT touch homedir or its on-disk ownership -- homedir is just a
+    stored path, independent of username by this module's own
+    convention (only *new* users default it to FTP_ROOT/<username>), so
+    renaming a user doesn't imply their files need to move. Use the
+    separate homedir field if that's actually wanted too.
+    """
+    if conn.execute("SELECT 1 FROM users WHERE userid = ?", (new_username,)).fetchone():
+        raise HelperError(f"User '{new_username}' already exists.")
+    conn.execute("UPDATE users SET userid = ? WHERE userid = ?", (new_username, old_username))
+    # Every groups row, not just the fixed ACL_GROUP_GIDS set -- covers
+    # a share group (v5, dynamically named per real_path, not in that
+    # fixed dict) the same way as protocol/readonly/rate/locked.
+    for (groupname,) in conn.execute("SELECT groupname FROM groups").fetchall():
+        if old_username in _acl_group_members(conn, groupname):
+            _set_acl_group_membership(conn, groupname, old_username, is_member=False)
+            _set_acl_group_membership(conn, groupname, new_username, is_member=True)
+    conn.execute(
+        "UPDATE quotalimits SET name = ? WHERE name = ? AND quota_type = 'user'", (new_username, old_username)
+    )
+    conn.execute(
+        "UPDATE quotatallies SET name = ? WHERE name = ? AND quota_type = 'user'", (new_username, old_username)
+    )
+    conn.execute("UPDATE sftpuserkeys SET name = ? WHERE name = ?", (new_username, old_username))
+    # Mountpoints are derived from homedir (unchanged by a rename), not
+    # username -- the underlying .mount units stay valid as-is, only the
+    # bookkeeping row's username needs to follow the rename.
+    conn.execute("UPDATE virtual_mounts SET username = ? WHERE username = ?", (new_username, old_username))
+
+
+def _mount_unit_name(mountpoint: Path) -> str:
+    """systemd's path-to-unit-name escaping has real edge cases (a
+    leading '/', embedded '-' characters) -- computed via systemd-escape
+    itself, per systemd.mount(5)'s own requirement, not hand-rolled.
+    """
+    result = _run(["systemd-escape", "--path", "--suffix=mount", str(mountpoint)])
+    return result.stdout.strip()
+
+
+def _share_group_name(real_path: str) -> str:
+    """A stable, deterministic group name for a given real_path -- the
+    same real_path always resolves to the same group, so a second user
+    mounting it just joins the same group rather than creating a
+    duplicate one.
+    """
+    digest = hashlib.sha1(real_path.encode()).hexdigest()[:16]
+    return f"vshare-{digest}"
+
+
+def _get_or_create_share_group(conn: sqlite3.Connection, real_path: str) -> tuple[str, int]:
+    groupname = _share_group_name(real_path)
+    row = conn.execute("SELECT gid FROM groups WHERE groupname = ?", (groupname,)).fetchone()
+    if row is not None:
+        return groupname, row[0]
+    ceiling = conn.execute("SELECT MAX(gid) FROM groups WHERE groupname LIKE 'vshare-%'").fetchone()[0]
+    gid = (ceiling + 1) if ceiling is not None else SHARE_GROUP_GID_MIN
+    conn.execute("INSERT INTO groups (groupname, gid, members) VALUES (?, ?, '')", (groupname, gid))
+    return groupname, gid
+
+
+def _bind_mount(real: Path, mountpoint: Path, readonly: bool) -> None:
+    """Container-mode stand-in for the systemd .mount unit: a live bind
+    mount (needs CAP_SYS_ADMIN, see README), re-established after a
+    restart by cmd_restore_mounts from the virtual_mounts table.
+    Idempotent -- an already-mounted mountpoint is left alone.
+    """
+    mountpoint.mkdir(parents=True, exist_ok=True)
+    if subprocess.run(["mountpoint", "-q", str(mountpoint)]).returncode == 0:
+        return
+    try:
+        _run(["mount", "--bind", str(real), str(mountpoint)])
+        if readonly:
+            _run(["mount", "-o", "remount,bind,ro", str(mountpoint)])
+    except HelperError as e:
+        raise HelperError(f"{e} -- virtual directories need the container to have the SYS_ADMIN capability.") from e
+
+
+def _add_virtual_mount(
+    conn: sqlite3.Connection, username: str, uid: int, gid: int, homedir: str,
+    virtual_name: str, real_path: str, readonly: bool,
+    group: tuple[str, int] | None = None,
+) -> None:
+    """Bind-mounts real_path into <homedir>/virtual_name inside the
+    user's chroot via a real systemd .mount unit (so it survives a
+    reboot, not just a live `mount --bind`) -- the only way to make a
+    second real directory appear inside a chroot at an arbitrary name;
+    ProFTPD has no application-level virtual-filesystem concept the way
+    FileZilla Server does.
+
+    Three ownership models, in increasing order of how explicit the
+    sharing is:
+    - Called plainly (group=None): the *first* call for a given
+      real_path is a private, single-user mount (owned directly by
+      that user, same as their own homedir); a *second* call for the
+      same real_path under a *different* username auto-promotes it to
+      an anonymous, per-path shared mount (see _get_or_create_share_group)
+      -- no separate "make this shared" step needed.
+    - Called with `group` set (an admin-named group's (groupname, gid),
+      from cmd_add_group_mount/cmd_add_group_member -- v6): the mount is
+      owned by that persistent, named group instead of an anonymous
+      per-path one, and is tagged in virtual_mounts.group_name so
+      membership changes can find and propagate to it later. Skips the
+      auto-promotion logic entirely -- explicit group ownership always
+      wins over the anonymous per-path mechanism.
+    """
+    if conn.execute(
+        "SELECT 1 FROM virtual_mounts WHERE username = ? AND virtual_name = ?", (username, virtual_name)
+    ).fetchone():
+        raise HelperError(f"'{virtual_name}' is already a virtual mount for user '{username}'.")
+
+    real = Path(real_path)
+    if not real.is_absolute():
+        raise HelperError("real_path must be an absolute path.")
+    mountpoint = Path(homedir) / virtual_name
+
+    other_owners = [] if group else [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT username FROM virtual_mounts WHERE real_path = ? AND username != ?",
+            (str(real), username),
+        ).fetchall()
+    ]
+
+    # A pre-existing real_path (e.g. an admin's existing shared content,
+    # or a directory a prior add-virtual-mount call already set up) must
+    # not be touched or recreated, only used as-is -- exist_ok=True
+    # covers "don't recreate it", and the ownership/mode changes below
+    # are gated on real_existed specifically so a pre-existing path is
+    # never touched by the private (single-owner) case. A *promotion*
+    # to shared, and an explicit group mount, are the deliberate
+    # exceptions -- (re-)chowning an already-existing real_path is
+    # exactly the point there.
+    real_existed = real.is_dir()
+    real.mkdir(parents=True, exist_ok=True)
+    mountpoint.mkdir(parents=True, exist_ok=True)
+    if readonly:
+        pass  # a read-only mount needs no write access, so no ownership change at all, shared or not
+    elif group:
+        # Explicit, admin-named group ownership (v6) -- always applied
+        # (not gated on real_existed) since an admin deliberately asked
+        # for group ownership here, unlike the anonymous per-path
+        # promotion below, which only ever acts on a real_path this
+        # module itself created. Idempotent: every member's own
+        # add-virtual-mount call re-applies the same ownership/mode.
+        _, group_gid = group
+        os.chown(real, 0, group_gid)
+        real.chmod(0o770)
+    elif other_owners:
+        # Promote to a shared, group-owned mount -- confirmed live that
+        # a pure SQL groups-table row (no real /etc/group entry needed)
+        # produces real supplementary-group membership for ProFTPD's
+        # worker process. Every existing owner is (re-)added as a
+        # member too, not just the new one -- covers both "this
+        # real_path was already shared" (idempotent) and "this is the
+        # first time a second user has mounted it" (the actual
+        # single-user -> shared promotion, including a real_path that
+        # was already chowned to the first user by the branch below).
+        groupname, share_gid = _get_or_create_share_group(conn, str(real))
+        for owner in (*other_owners, username):
+            _set_acl_group_membership(conn, groupname, owner, is_member=True)
+        os.chown(real, 0, share_gid)
+        real.chmod(0o770)
+    elif not real_existed:
+        # First (and so far only) use of this real_path -- a private,
+        # single-user mount, owned by that user's own uid/gid, same
+        # convention as their own private homedir (_chown_home), so
+        # it's actually writable through the bind mount rather than
+        # sitting at mkdir's default root:root 0755.
+        os.chown(real, uid, gid)
+        real.chmod(0o700)
+    # Labels the *source* -- confirmed the mounted-through content keeps
+    # real_path's own SELinux context regardless of where it's mounted,
+    # so the mountpoint's own pre-mount label doesn't matter once the
+    # bind mount is active (only briefly, before that, and if the mount
+    # is ever removed).
+    _ensure_selinux_fcontext(real, "public_content_rw_t")
+
+    if CONTAINER:
+        _bind_mount(real, mountpoint, readonly)
+        conn.execute(
+            "INSERT INTO virtual_mounts (username, virtual_name, real_path, readonly, group_name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (username, virtual_name, str(real), int(readonly), group[0] if group else None),
+        )
+        return
+
+    unit_name = _mount_unit_name(mountpoint)
+    # Confirmed for real on a dev VM: Options=bind,ro on a systemd
+    # .mount unit is genuinely read-only from the very first mount --
+    # no separate `remount,bind,ro` step needed, unlike plain mount(8)'s
+    # historical behavior.
+    options = "bind,ro" if readonly else "bind"
+    VIRTUAL_MOUNT_UNIT_DIR.mkdir(parents=True, exist_ok=True)
+    (VIRTUAL_MOUNT_UNIT_DIR / unit_name).write_text(
+        "[Unit]\n"
+        f"Description=cockpit-proftpd virtual directory: {username}/{virtual_name}\n\n"
+        "[Mount]\n"
+        f"What={real}\n"
+        f"Where={mountpoint}\n"
+        "Type=none\n"
+        f"Options={options}\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+    _run(["systemctl", "daemon-reload"])
+    # Only inserted after the mount actually succeeds, not before --
+    # mirrors how cmd_setup fails loudly on a bad --configtest rather
+    # than leaving stale state.
+    _run(["systemctl", "enable", "--now", unit_name])
+
+    conn.execute(
+        "INSERT INTO virtual_mounts (username, virtual_name, real_path, readonly, group_name) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (username, virtual_name, str(real), int(readonly), group[0] if group else None),
+    )
+
+
+def _remove_virtual_mount(conn: sqlite3.Connection, username: str, virtual_name: str, homedir: str) -> None:
+    """Unmounts and removes the .mount unit, but never touches real_path
+    itself or its contents -- that's someone else's data living
+    elsewhere on disk, not something removing a mount should affect.
+    homedir is passed in explicitly (not looked up here) so this can
+    still run during cmd_delete_user, after the user's own row -- and
+    with it, the homedir a fresh lookup would need -- is already gone.
+    """
+    row = conn.execute(
+        "SELECT real_path, readonly FROM virtual_mounts WHERE username = ? AND virtual_name = ?",
+        (username, virtual_name),
+    ).fetchone()
+
+    mountpoint = Path(homedir) / virtual_name
+    if CONTAINER:
+        subprocess.run(["umount", str(mountpoint)], capture_output=True)
+    else:
+        unit_name = _mount_unit_name(mountpoint)
+        unit_path = VIRTUAL_MOUNT_UNIT_DIR / unit_name
+        # Best-effort, not _run -- the unit may already be gone (manually
+        # removed, or never successfully enabled), which isn't a failure.
+        subprocess.run(["systemctl", "disable", "--now", unit_name], capture_output=True)
+        if unit_path.is_file():
+            unit_path.unlink()
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    try:
+        mountpoint.rmdir()
+    except OSError:
+        pass
+
+    if row is not None and not row[1]:
+        # Was a writable mount -- may be a member of that real_path's
+        # share group (harmless no-op if it never was, e.g. a private
+        # single-owner mount that was never promoted to shared). Never
+        # re-chowns real_path itself back to anything on the way out --
+        # same "never touch real_path" principle as everywhere else
+        # here, just applied to ownership metadata rather than content.
+        groupname = _share_group_name(row[0])
+        if conn.execute("SELECT 1 FROM groups WHERE groupname = ?", (groupname,)).fetchone():
+            _set_acl_group_membership(conn, groupname, username, is_member=False)
+            if not _acl_group_members(conn, groupname):
+                conn.execute("DELETE FROM groups WHERE groupname = ?", (groupname,))
+
+    conn.execute(
+        "DELETE FROM virtual_mounts WHERE username = ? AND virtual_name = ?", (username, virtual_name)
+    )
+
+
+def _set_user_quota(conn: sqlite3.Connection, username: str, quota_mb: object) -> None:
+    """quota_mb is None/0 for "no quota" -- deletes any existing
+    quotalimits row, which is what makes mod_quotatab_sql find no limit
+    for this user and enforce nothing, same as never having set one --
+    or a positive number of megabytes for a hard, cumulative (not
+    per-session) total-upload quota. Only the upload-bytes dimension is
+    limited; downloads and file counts are left unlimited, matching
+    what "storage quota" means to whoever's filling in this field.
+    """
+    conn.execute("DELETE FROM quotalimits WHERE name = ? AND quota_type = 'user'", (username,))
+    if quota_mb:
+        if not isinstance(quota_mb, (int, float)) or isinstance(quota_mb, bool) or quota_mb <= 0:
+            raise HelperError("quota_mb must be a positive number, or 0/omitted for unlimited.")
+        bytes_avail = int(quota_mb * 1024 * 1024)
+        conn.execute(
+            "INSERT INTO quotalimits (name, quota_type, per_session, limit_type, "
+            "bytes_in_avail, bytes_out_avail, bytes_xfer_avail, "
+            "files_in_avail, files_out_avail, files_xfer_avail) "
+            "VALUES (?, 'user', 0, 'hard', ?, 0, 0, 0, 0, 0)",
+            (username, bytes_avail),
+        )
+
+
+def _user_quota_mb(conn: sqlite3.Connection, username: str) -> int | None:
+    row = conn.execute(
+        "SELECT bytes_in_avail FROM quotalimits WHERE name = ? AND quota_type = 'user'", (username,)
+    ).fetchone()
+    return int(row[0] // (1024 * 1024)) if row else None
+
+
+def _user_quota_used_mb(conn: sqlite3.Connection, username: str) -> float | None:
+    """mod_quotatab itself writes quotatallies (see schema.sql's own
+    comment) -- this only reads what it's already tracking. None means
+    no tally row exists yet, the normal state for a quota-restricted
+    user who hasn't transferred anything since the quota was set, not
+    an error.
+    """
+    row = conn.execute(
+        "SELECT bytes_in_used FROM quotatallies WHERE name = ? AND quota_type = 'user'", (username,)
+    ).fetchone()
+    return round(row[0] / (1024 * 1024), 1) if row else None
+
+
+# -- subcommands --------------------------------------------------------
+
+def cmd_status(_args: dict) -> dict:
+    installed = shutil.which("proftpd") is not None
+    configured = installed and CONF_PATH.is_file() and DB_PATH.is_file()
+    active = False
+    if installed and CONTAINER:
+        active = subprocess.run(["pgrep", "-x", "proftpd"], capture_output=True).returncode == 0
+    elif installed:
+        result = subprocess.run(
+            ["systemctl", "is-active", "proftpd"], capture_output=True, text=True
+        )
+        active = result.stdout.strip() == "active"
+    return {"installed": installed, "configured": configured, "active": active}
+
+
+def _disable_conflicting_auth_order() -> None:
+    """The stock /etc/proftpd.conf sets AuthOrder (to PAM + unix auth) in
+    the same context our own conf.d file needs to set it in (mod_sql).
+    ProFTPD refuses a directive configured twice in one context ("fatal:
+    AuthOrder: AuthOrder has already been configured") -- confirmed
+    directly against a real instance -- so the stock line has to be
+    disabled, not just shadowed by a later Include. Idempotent: does
+    nothing if already commented out, so re-running setup is safe.
+    """
+    if not BASE_CONF_PATH.is_file():
+        raise HelperError(f"{BASE_CONF_PATH} not found -- is proftpd actually installed?")
+    lines = BASE_CONF_PATH.read_text().splitlines(keepends=True)
+    changed = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("AuthOrder") and not line.lstrip().startswith("#"):
+            lines[i] = "#" + line
+            changed = True
+    if changed:
+        BASE_CONF_PATH.write_text("".join(lines))
+
+
+def cmd_setup(args: dict) -> dict:
+    # Defaults to requiring TLS on the control channel -- plain FTP
+    # sends the login password in cleartext otherwise. Left as a choice
+    # (not hardcoded) since forcing TLS on every client isn't always
+    # right for an existing client population that doesn't support it.
+    require_tls = args.get("require_tls", True)
+
+    if shutil.which("proftpd") is None and CONTAINER:
+        raise HelperError("proftpd is missing from this container image.")
+    if shutil.which("proftpd") is None:
+        _run(["dnf", "install", "-y", "proftpd", "proftpd-sqlite"])
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Unconditional, not just "if the database doesn't exist yet" --
+    # every statement in schema.sql is CREATE TABLE IF NOT EXISTS, so
+    # this is always safe to re-run, and doing so is what lets an
+    # existing install pick up a table a later version of this module
+    # added (quotalimits/quotatallies did not exist in v1) without
+    # requiring a real migration step. Found the hard way: re-running
+    # setup() on an already-configured instance from before the quota
+    # feature left the database missing those tables entirely, because
+    # this used to be gated behind `if not DB_PATH.is_file()`.
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executescript(SCHEMA_SQL.read_text())
+        # A genuine column addition to an already-existing table (as
+        # opposed to a whole new table, which the executescript above
+        # already handles) -- see _ensure_column's own docstring.
+        _ensure_column(conn, "users", "expires_at", "TEXT")
+        _ensure_column(conn, "virtual_mounts", "group_name", "TEXT")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # mod_sql_sqlite always opens the database read-write, even for a
+    # plain login lookup -- confirmed the hard way against a real
+    # instance: left at sqlite3.connect()'s default create mode
+    # (root:root, world-readable but not world-writable), ProFTPD's
+    # connection-handling process (which drops to the base config's
+    # Group -- "nobody" by default, not root) fails open() with EACCES,
+    # which mod_sql_sqlite reports as a generic "unable to open database
+    # file" with no SELinux involvement at all (verified no AVC denial
+    # was logged, even with dontaudit rules disabled). Re-applied on
+    # every setup() run, not just at creation, so re-running setup after
+    # an admin customizes the base config's Group still works.
+    try:
+        ftpd_gid = grp.getgrnam(_ftpd_group()).gr_gid
+    except KeyError as exc:
+        raise HelperError(f"Group '{_ftpd_group()}' from {BASE_CONF_PATH} does not exist.") from exc
+    os.chown(DB_PATH.parent, 0, ftpd_gid)
+    DB_PATH.parent.chmod(0o770)
+    os.chown(DB_PATH, 0, ftpd_gid)
+    DB_PATH.chmod(0o660)
+
+    # Same story as _chown_home's public_content_rw_t labeling below --
+    # confirmed the hard way that the DAC permissions above aren't
+    # enough under real SELinux enforcement: var_lib_t (the default
+    # label under /var/lib) isn't something ftpd_t may open at all,
+    # regardless of Unix file permissions, and mod_sql_sqlite's
+    # resulting "unable to open database file" produced *no* AVC denial
+    # in the audit log on the instance this was found on -- don't take
+    # an empty `ausearch -m avc` as proof SELinux isn't the cause; the
+    # decisive test was `semanage permissive -a ftpd_t`, which fixed it.
+    _ensure_selinux_fcontext(DB_PATH.parent, "public_content_rw_t")
+    _ensure_selinux_boolean("ftpd_anon_write", True)
+
+    HOST_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not HOST_KEY_PATH.is_file():
+        _run(["ssh-keygen", "-t", "ed25519", "-f", str(HOST_KEY_PATH), "-N", "", "-q"])
+        HOST_KEY_PATH.chmod(0o600)
+
+    # Self-signed -- good enough for encryption in transit, which is
+    # the actual gap this closes (plain FTP sends the login password in
+    # cleartext). Importing a real CA-signed cert is a real, separate
+    # feature (cert lifecycle/renewal) not needed for a first cut.
+    if not TLS_CERT_PATH.is_file() or not TLS_KEY_PATH.is_file():
+        _run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(TLS_KEY_PATH), "-out", str(TLS_CERT_PATH),
+            "-days", "3650", "-subj", f"/CN={platform.node()}",
+        ])
+        TLS_KEY_PATH.chmod(0o600)
+
+    if not CONTAINER:  # the container image ships its own base proftpd.conf
+        _disable_conflicting_auth_order()
+
+    CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONF_PATH.write_text(
+        CONF_TEMPLATE.read_text().format(
+            db_path=DB_PATH,
+            min_uid=MIN_UID,
+            min_gid=MIN_GID,
+            sftp_port=SFTP_PORT,
+            host_key_path=HOST_KEY_PATH,
+            passive_port_min=PASSIVE_PORT_MIN,
+            passive_port_max=PASSIVE_PORT_MAX,
+            quota_lock_path=QUOTA_LOCK_PATH,
+            tls_required=("ctrl" if require_tls else "off"),
+            tls_cert_path=TLS_CERT_PATH,
+            tls_key_path=TLS_KEY_PATH,
+        )
+    )
+
+    # Fail with ProFTPD's own parse error (clear, actionable) rather than
+    # leaving the service down after a botched restart.
+    _run(["proftpd", "--configtest"])
+    if CONTAINER:
+        # proftpd runs in the foreground as the container's main
+        # process (see container/entrypoint.sh); SIGHUP re-reads its
+        # config without dropping the container. Expiry is handled by
+        # the entrypoint's own loop instead of a systemd timer.
+        subprocess.run(["pkill", "-HUP", "-x", "proftpd"], capture_output=True)
+        return cmd_status({})
+    _run(["systemctl", "enable", "--now", "proftpd"])
+    _run(["systemctl", "restart", "proftpd"])
+
+    # A systemd timer, not a lazy check -- locks any account past its
+    # expires_at date even if nobody opens Cockpit. ExecStart is run
+    # with no stdin at all under systemd, which main()'s own "empty
+    # stdin treated as no args" handling already covers correctly.
+    EXPIRE_SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    EXPIRE_SERVICE_PATH.write_text(
+        "[Unit]\n"
+        "Description=Lock cockpit-proftpd accounts past their expiry date\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart=/usr/bin/python3 {Path(__file__).resolve()} expire-accounts\n"
+    )
+    EXPIRE_TIMER_PATH.write_text(
+        "[Unit]\n"
+        "Description=Periodically lock cockpit-proftpd accounts past their expiry date\n\n"
+        "[Timer]\n"
+        "OnCalendar=hourly\n"
+        "Persistent=true\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    _run(["systemctl", "daemon-reload"])
+    _run(["systemctl", "enable", "--now", f"{EXPIRE_TIMER_NAME}.timer"])
+
+    return cmd_status({})
+
+
+def cmd_list_transfers(_args: dict) -> dict:
+    """Read-only -- ProFTPD itself is the only writer, via the SQLLog
+    directive in proftpd-cockpit.conf.tmpl. Prunes down to
+    MAX_TRANSFER_LOG_ROWS on every call, a self-contained cap in place
+    of a separate cleanup timer.
+    """
+    conn = _connect_db()
+    try:
+        rows = conn.execute(
+            "SELECT username, command, path, bytes, timestamp FROM transfers "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (MAX_TRANSFER_LOG_ROWS,),
+        ).fetchall()
+        conn.execute(
+            "DELETE FROM transfers WHERE rowid NOT IN "
+            "(SELECT rowid FROM transfers ORDER BY timestamp DESC LIMIT ?)",
+            (MAX_TRANSFER_LOG_ROWS,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "transfers": [
+            {"username": r[0], "command": r[1], "path": r[2], "bytes": r[3], "timestamp": r[4]}
+            for r in rows
+        ]
+    }
+
+
+def cmd_add_virtual_mount(args: dict) -> dict:
+    username = _require_username(args.get("username"))
+    virtual_name = _require_virtual_name(args.get("virtual_name"))
+    real_path = args.get("real_path")
+    if not real_path or not isinstance(real_path, str):
+        raise HelperError("real_path is required.")
+    readonly = bool(args.get("readonly"))
+
+    conn = _connect_db()
+    try:
+        row = conn.execute("SELECT uid, gid, homedir FROM users WHERE userid = ?", (username,)).fetchone()
+        if row is None:
+            raise HelperError(f"User '{username}' does not exist.")
+        uid, gid, homedir = row
+        _add_virtual_mount(conn, username, uid, gid, homedir, virtual_name, real_path, readonly)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"username": username, "virtual_name": virtual_name, "real_path": real_path, "readonly": readonly}
+
+
+def cmd_remove_virtual_mount(args: dict) -> dict:
+    username = _require_username(args.get("username"))
+    virtual_name = _require_virtual_name(args.get("virtual_name"))
+
+    conn = _connect_db()
+    try:
+        row = conn.execute("SELECT homedir FROM users WHERE userid = ?", (username,)).fetchone()
+        if row is None:
+            raise HelperError(f"User '{username}' does not exist.")
+        if not conn.execute(
+            "SELECT 1 FROM virtual_mounts WHERE username = ? AND virtual_name = ?", (username, virtual_name)
+        ).fetchone():
+            raise HelperError(f"No virtual mount '{virtual_name}' for user '{username}'.")
+        _remove_virtual_mount(conn, username, virtual_name, row[0])
+        conn.commit()
+    finally:
+        conn.close()
+    return {"username": username, "virtual_name": virtual_name}
+
+
+def cmd_list_virtual_mounts(args: dict) -> dict:
+    conn = _connect_db()
+    try:
+        username = args.get("username")
+        if username:
+            rows = conn.execute(
+                "SELECT username, virtual_name, real_path, readonly, group_name FROM virtual_mounts "
+                "WHERE username = ? ORDER BY virtual_name",
+                (username,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT username, virtual_name, real_path, readonly, group_name FROM virtual_mounts "
+                "ORDER BY username, virtual_name"
+            ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "mounts": [
+            {
+                "username": r[0], "virtual_name": r[1], "real_path": r[2], "readonly": bool(r[3]),
+                "group_name": r[4],
+            }
+            for r in rows
+        ]
+    }
+
+
+def _require_existing_group(conn: sqlite3.Connection, groupname: str) -> int:
+    row = conn.execute("SELECT gid FROM groups WHERE groupname = ?", (groupname,)).fetchone()
+    if row is None:
+        raise HelperError(f"Group '{groupname}' does not exist.")
+    return row[0]
+
+
+def cmd_create_group(args: dict) -> dict:
+    groupname = _require_group_name(args.get("groupname"))
+    conn = _connect_db()
+    try:
+        if conn.execute("SELECT 1 FROM groups WHERE groupname = ?", (groupname,)).fetchone():
+            raise HelperError(f"Group '{groupname}' already exists.")
+        # Own gid pool (GROUP_GID_MIN and up, below SHARE_GROUP_GID_MIN)
+        # -- same MAX(gid)+1-or-floor allocation as every other gid pool
+        # in this module (users, vshare-* promotion groups).
+        ceiling = conn.execute(
+            "SELECT MAX(gid) FROM groups WHERE gid >= ? AND gid < ?", (GROUP_GID_MIN, SHARE_GROUP_GID_MIN)
+        ).fetchone()[0]
+        gid = (ceiling + 1) if ceiling is not None else GROUP_GID_MIN
+        conn.execute("INSERT INTO groups (groupname, gid, members) VALUES (?, ?, '')", (groupname, gid))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"groupname": groupname, "gid": gid, "members": []}
+
+
+def cmd_delete_group(args: dict) -> dict:
+    """Refuses (rather than cascading) while the group still owns any
+    virtual directory -- disbanding a team should be a deliberate,
+    two-step action (remove its directories via remove-group-mount,
+    then delete the group), not a surprise mass-unmount, the same
+    "explicit refusal over silent cascade" precedent as v5's
+    homedir-change-while-mounts-exist rule.
+    """
+    groupname = _require_group_name(args.get("groupname"))
+    conn = _connect_db()
+    try:
+        _require_existing_group(conn, groupname)
+        mounts = conn.execute(
+            "SELECT DISTINCT virtual_name FROM virtual_mounts WHERE group_name = ?", (groupname,)
+        ).fetchall()
+        if mounts:
+            names = ", ".join(m[0] for m in mounts)
+            raise HelperError(
+                f"Cannot delete group '{groupname}' while it owns virtual directories ({names}) -- "
+                "remove them first."
+            )
+        conn.execute("DELETE FROM groups WHERE groupname = ?", (groupname,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"groupname": groupname}
+
+
+def cmd_list_groups(_args: dict) -> dict:
+    conn = _connect_db()
+    try:
+        rows = conn.execute(
+            "SELECT groupname, gid, members FROM groups WHERE gid >= ? AND gid < ? ORDER BY groupname",
+            (GROUP_GID_MIN, SHARE_GROUP_GID_MIN),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "groups": [
+            {"groupname": r[0], "gid": r[1], "members": sorted(m for m in (r[2] or "").split(",") if m)}
+            for r in rows
+        ]
+    }
+
+
+def cmd_add_group_member(args: dict) -> dict:
+    groupname = _require_group_name(args.get("groupname"))
+    username = _require_username(args.get("username"))
+    conn = _connect_db()
+    try:
+        group_gid = _require_existing_group(conn, groupname)
+        row = conn.execute("SELECT uid, gid, homedir FROM users WHERE userid = ?", (username,)).fetchone()
+        if row is None:
+            raise HelperError(f"User '{username}' does not exist.")
+        uid, gid, homedir = row
+        _set_acl_group_membership(conn, groupname, username, is_member=True)
+        # Propagate: mount every *existing* group-owned directory into
+        # this new member's own homedir too -- the actual payoff of a
+        # named group over v5's plain per-user add-virtual-mount, which
+        # would otherwise need a separate call per directory per member.
+        mounts = conn.execute(
+            "SELECT DISTINCT virtual_name, real_path, readonly FROM virtual_mounts WHERE group_name = ?",
+            (groupname,),
+        ).fetchall()
+        for virtual_name, real_path, readonly in mounts:
+            already_has_it = conn.execute(
+                "SELECT 1 FROM virtual_mounts WHERE username = ? AND virtual_name = ?", (username, virtual_name)
+            ).fetchone()
+            if not already_has_it:
+                _add_virtual_mount(
+                    conn, username, uid, gid, homedir, virtual_name, real_path, bool(readonly),
+                    group=(groupname, group_gid),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"groupname": groupname, "username": username}
+
+
+def cmd_remove_group_member(args: dict) -> dict:
+    groupname = _require_group_name(args.get("groupname"))
+    username = _require_username(args.get("username"))
+    conn = _connect_db()
+    try:
+        _require_existing_group(conn, groupname)
+        row = conn.execute("SELECT homedir FROM users WHERE userid = ?", (username,)).fetchone()
+        if row is None:
+            raise HelperError(f"User '{username}' does not exist.")
+        homedir = row[0]
+        _set_acl_group_membership(conn, groupname, username, is_member=False)
+        # Tears down this member's own copy of every one of the group's
+        # directories, but leaves the group and every other member's
+        # mounts untouched.
+        mounts = conn.execute(
+            "SELECT virtual_name FROM virtual_mounts WHERE group_name = ? AND username = ?",
+            (groupname, username),
+        ).fetchall()
+        for (virtual_name,) in mounts:
+            _remove_virtual_mount(conn, username, virtual_name, homedir)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"groupname": groupname, "username": username}
+
+
+def cmd_add_group_mount(args: dict) -> dict:
+    """The group-owned equivalent of add-virtual-mount -- creates the
+    directory for every *current* member in one call (one row/unit
+    per member, all tagged group_name=groupname) instead of requiring
+    one add-virtual-mount call per member.
+    """
+    groupname = _require_group_name(args.get("groupname"))
+    virtual_name = _require_virtual_name(args.get("virtual_name"))
+    real_path = args.get("real_path")
+    if not real_path or not isinstance(real_path, str):
+        raise HelperError("real_path is required.")
+    readonly = bool(args.get("readonly"))
+
+    conn = _connect_db()
+    try:
+        group_gid = _require_existing_group(conn, groupname)
+        members = sorted(_acl_group_members(conn, groupname))
+        if not members:
+            raise HelperError(f"Group '{groupname}' has no members yet -- add one first.")
+        for username in members:
+            uid, gid, homedir = conn.execute(
+                "SELECT uid, gid, homedir FROM users WHERE userid = ?", (username,)
+            ).fetchone()
+            _add_virtual_mount(
+                conn, username, uid, gid, homedir, virtual_name, real_path, readonly,
+                group=(groupname, group_gid),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"groupname": groupname, "virtual_name": virtual_name, "real_path": real_path, "readonly": readonly}
+
+
+def cmd_remove_group_mount(args: dict) -> dict:
+    """The group-owned equivalent of remove-virtual-mount -- full
+    teardown for every current member in one call.
+    """
+    groupname = _require_group_name(args.get("groupname"))
+    virtual_name = _require_virtual_name(args.get("virtual_name"))
+    conn = _connect_db()
+    try:
+        _require_existing_group(conn, groupname)
+        rows = conn.execute(
+            "SELECT username FROM virtual_mounts WHERE group_name = ? AND virtual_name = ?",
+            (groupname, virtual_name),
+        ).fetchall()
+        if not rows:
+            raise HelperError(f"No virtual directory '{virtual_name}' owned by group '{groupname}'.")
+        for (username,) in rows:
+            homedir = conn.execute("SELECT homedir FROM users WHERE userid = ?", (username,)).fetchone()[0]
+            _remove_virtual_mount(conn, username, virtual_name, homedir)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"groupname": groupname, "virtual_name": virtual_name}
+
+
+def cmd_list_users(_args: dict) -> dict:
+    conn = _connect_db()
+    try:
+        rows = conn.execute(
+            "SELECT userid, uid, gid, homedir FROM users ORDER BY userid"
+        ).fetchall()
+        protocol_by_user = _protocol_by_user(conn)
+        users = [
+            {
+                "username": r[0], "uid": r[1], "gid": r[2], "homedir": r[3],
+                "protocol": protocol_by_user.get(r[0], "both"),
+                "quota_mb": _user_quota_mb(conn, r[0]),
+                "quota_used_mb": _user_quota_used_mb(conn, r[0]),
+                "readonly": _is_user_readonly(conn, r[0]),
+                "public_key": _user_public_key(conn, r[0]),
+                "rate_limit": _user_rate_limit(conn, r[0]),
+                "locked": _is_user_locked(conn, r[0]),
+                "expires_at": _user_expiry(conn, r[0]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+    return {"users": users}
+
+
+def cmd_create_user(args: dict) -> dict:
+    username = _require_username(args.get("username"))
+    password = args.get("password") or ""
+    public_key = args.get("public_key") or None
+    if not password and not public_key:
+        raise HelperError("A password or a public key is required.")
+    if password:
+        _require_password_length(password)
+    homedir = args.get("homedir") or str(FTP_ROOT / username)
+    protocol = args.get("protocol") or "both"
+    quota_mb = args.get("quota_mb")
+    readonly = bool(args.get("readonly"))
+    rate_limit = args.get("rate_limit") or "unlimited"
+    locked = bool(args.get("locked"))
+    expires_at = args.get("expires_at") or None
+
+    conn = _connect_db()
+    try:
+        if conn.execute("SELECT 1 FROM users WHERE userid = ?", (username,)).fetchone():
+            raise HelperError(f"User '{username}' already exists.")
+
+        row = conn.execute("SELECT MAX(uid) FROM users").fetchone()
+        new_id = (row[0] + 1) if row and row[0] is not None else MIN_UID
+        passwd_hash = _hash_password(password) if password else NO_PASSWORD_HASH
+
+        conn.execute(
+            "INSERT INTO users (userid, passwd, uid, gid, homedir, shell) VALUES (?,?,?,?,?,?)",
+            (username, passwd_hash, new_id, new_id, homedir, "/sbin/nologin"),
+        )
+        _set_user_protocol(conn, username, protocol)
+        _set_user_quota(conn, username, quota_mb)
+        _set_user_readonly(conn, username, readonly)
+        _set_user_key(conn, username, public_key)
+        _set_user_rate_limit(conn, username, rate_limit)
+        _set_user_locked(conn, username, locked)
+        _set_user_expiry(conn, username, expires_at)
+        conn.commit()
+    finally:
+        conn.close()
+
+    _chown_home(homedir, new_id, new_id)
+    return {
+        "username": username, "uid": new_id, "gid": new_id, "homedir": homedir,
+        "protocol": protocol, "quota_mb": int(quota_mb) if quota_mb else None,
+        "readonly": readonly, "public_key": public_key, "rate_limit": rate_limit,
+        "locked": locked, "expires_at": expires_at,
+    }
+
+
+def cmd_update_user(args: dict) -> dict:
+    username = _require_username(args.get("username"))
+    new_username = _require_username(args["new_username"]) if args.get("new_username") else None
+    password = args.get("password") or None
+    new_homedir = args.get("homedir") or None
+    protocol = args.get("protocol")  # None -- as opposed to "both" -- means "leave unchanged"
+    quota_mb = args.get("quota_mb")  # sentinel key check below distinguishes "leave unchanged"
+    readonly = args.get("readonly")  # None means "leave unchanged"; True/False is explicit
+    public_key = args.get("public_key")  # sentinel key check below distinguishes "leave unchanged"
+    rate_limit = args.get("rate_limit")  # None means "leave unchanged"
+    locked = args.get("locked")  # None means "leave unchanged"; True/False is explicit
+    expires_at = args.get("expires_at")  # sentinel key check below distinguishes "leave unchanged"
+
+    conn = _connect_db()
+    try:
+        row = conn.execute(
+            "SELECT uid, gid, homedir FROM users WHERE userid = ?", (username,)
+        ).fetchone()
+        if row is None:
+            raise HelperError(f"User '{username}' does not exist.")
+        uid, gid, old_homedir = row
+
+        if new_username and new_username != username:
+            _rename_user_everywhere(conn, username, new_username)
+            username = new_username  # everything below now acts on the renamed row
+
+        if password:
+            _require_password_length(password)
+            conn.execute(
+                "UPDATE users SET passwd = ? WHERE userid = ?",
+                (_hash_password(password), username),
+            )
+        if new_homedir and new_homedir != old_homedir:
+            # Virtual mounts are nested under the *old* homedir path --
+            # migrating them to a new one isn't something this module
+            # attempts automatically (see _add_virtual_mount/
+            # _remove_virtual_mount's own reasoning); a clear error here
+            # beats a silent, unverified attempt at a real filesystem
+            # move.
+            existing_mounts = conn.execute(
+                "SELECT virtual_name FROM virtual_mounts WHERE username = ?", (username,)
+            ).fetchall()
+            if existing_mounts:
+                names = ", ".join(m[0] for m in existing_mounts)
+                raise HelperError(
+                    f"Cannot change home directory while virtual directories exist ({names}) -- "
+                    "remove them first."
+                )
+            conn.execute(
+                "UPDATE users SET homedir = ? WHERE userid = ?", (new_homedir, username)
+            )
+        if protocol is not None:
+            _set_user_protocol(conn, username, protocol)
+        if "quota_mb" in args:
+            _set_user_quota(conn, username, quota_mb)
+        if readonly is not None:
+            _set_user_readonly(conn, username, bool(readonly))
+        if "public_key" in args:
+            _set_user_key(conn, username, public_key)
+        if rate_limit is not None:
+            _set_user_rate_limit(conn, username, rate_limit)
+        if locked is not None:
+            _set_user_locked(conn, username, bool(locked))
+        if "expires_at" in args:
+            _set_user_expiry(conn, username, expires_at)
+        conn.commit()
+    finally:
+        conn.close()
+
+    if new_homedir and new_homedir != old_homedir:
+        _chown_home(new_homedir, uid, gid)
+
+    return {"username": username}
+
+
+def cmd_set_permissions(args: dict) -> dict:
+    """Re-applies ownership/mode on a user's home directory -- covers
+    both "someone changed it outside this tool, fix it" and re-labeling
+    after a manual homedir move.
+    """
+    username = _require_username(args.get("username"))
+    conn = _connect_db()
+    try:
+        row = conn.execute(
+            "SELECT uid, gid, homedir FROM users WHERE userid = ?", (username,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HelperError(f"User '{username}' does not exist.")
+    uid, gid, homedir = row
+    _chown_home(homedir, uid, gid)
+    return {"username": username, "uid": uid, "gid": gid, "homedir": homedir}
+
+
+def cmd_delete_user(args: dict) -> dict:
+    """Removes the database row only -- deliberately does not touch the
+    home directory's contents. Losing someone's uploaded files by
+    accident is a much worse failure mode than leaving an orphaned
+    directory behind for an admin to clean up explicitly.
+    """
+    username = _require_username(args.get("username"))
+    conn = _connect_db()
+    try:
+        # Fetched before the row itself is deleted below -- _remove_virtual_mount
+        # needs the homedir to compute each mount's path, and it won't be
+        # recoverable from the users table anymore afterward.
+        row = conn.execute("SELECT homedir FROM users WHERE userid = ?", (username,)).fetchone()
+        mounts = conn.execute(
+            "SELECT virtual_name FROM virtual_mounts WHERE username = ?", (username,)
+        ).fetchall() if row else []
+
+        cursor = conn.execute("DELETE FROM users WHERE userid = ?", (username,))
+        if cursor.rowcount > 0:
+            for (virtual_name,) in mounts:
+                _remove_virtual_mount(conn, username, virtual_name, row[0])
+            _set_user_protocol(conn, username, "both")  # drops any group membership
+            _set_user_readonly(conn, username, False)  # drops any group membership
+            _set_user_quota(conn, username, None)  # drops any quotalimits row
+            conn.execute("DELETE FROM quotatallies WHERE name = ? AND quota_type = 'user'", (username,))
+            _set_user_key(conn, username, None)  # drops any stored SFTP public key
+            _set_user_rate_limit(conn, username, "unlimited")  # drops any group membership
+            _set_user_locked(conn, username, False)  # drops any group membership
+            # Named groups (v6): strip the departing username from
+            # *every* groups row's members, not just the ACL/vshare
+            # groups above -- a user nominally in a named group but
+            # with no active mounts under it right now (all removed
+            # already, above) would otherwise be left as a dangling
+            # member reference.
+            for (groupname,) in conn.execute("SELECT groupname FROM groups").fetchall():
+                if username in _acl_group_members(conn, groupname):
+                    _set_acl_group_membership(conn, groupname, username, is_member=False)
+        conn.commit()
+    finally:
+        conn.close()
+    if cursor.rowcount == 0:
+        raise HelperError(f"User '{username}' does not exist.")
+    return {"username": username}
+
+
+def cmd_expire_accounts(_args: dict) -> dict:
+    """Locks any account whose expires_at date has passed -- called
+    periodically by the cockpit-proftpd-expire.timer systemd unit (see
+    cmd_setup), not meant to be invoked interactively from the UI. Uses
+    the same "locked" ACL group _set_user_locked already uses, so an
+    expired account is blocked the same comprehensive way a manually
+    locked one is (both protocols, both password and SFTP-key auth).
+    """
+    conn = _connect_db()
+    try:
+        today = datetime.date.today().isoformat()
+        rows = conn.execute(
+            "SELECT userid FROM users WHERE expires_at IS NOT NULL AND expires_at <= ?", (today,)
+        ).fetchall()
+        newly_locked = [r[0] for r in rows if not _is_user_locked(conn, r[0])]
+        for username in newly_locked:
+            _set_user_locked(conn, username, True)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"locked": newly_locked}
+
+
+def cmd_open_firewall(_args: dict) -> dict:
+    """Opens the ports this module actually needs (plain FTP, SFTP, and
+    the fixed passive-port range) via firewalld -- a separate, explicit,
+    opt-in action, never done automatically by setup(). Some hosts
+    manage their firewall a different way entirely (nftables/iptables
+    directly, or a perimeter firewall) -- raising a clear, actionable
+    HelperError when firewalld itself isn't in the picture is more
+    honest than silently doing nothing or guessing at another tool.
+    """
+    if CONTAINER:
+        raise HelperError(
+            f"Not applicable in a container -- publish TCP ports 21, {SFTP_PORT}, and "
+            f"{PASSIVE_PORT_MIN}-{PASSIVE_PORT_MAX} from the container instead."
+        )
+    if shutil.which("firewall-cmd") is None:
+        raise HelperError(
+            "firewalld isn't installed -- open TCP ports 21, "
+            f"{SFTP_PORT}, and {PASSIVE_PORT_MIN}-{PASSIVE_PORT_MAX} manually."
+        )
+    result = subprocess.run(["systemctl", "is-active", "firewalld"], capture_output=True, text=True)
+    if result.stdout.strip() != "active":
+        raise HelperError(
+            "firewalld isn't running -- open TCP ports 21, "
+            f"{SFTP_PORT}, and {PASSIVE_PORT_MIN}-{PASSIVE_PORT_MAX} manually."
+        )
+
+    FIREWALLD_SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FIREWALLD_SERVICE_PATH.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        "<service>\n"
+        "  <short>Cockpit ProFTPD</short>\n"
+        "  <description>FTP and SFTP access managed by the cockpit-proftpd Cockpit module.</description>\n"
+        '  <port protocol="tcp" port="21"/>\n'
+        f'  <port protocol="tcp" port="{SFTP_PORT}"/>\n'
+        f'  <port protocol="tcp" port="{PASSIVE_PORT_MIN}-{PASSIVE_PORT_MAX}"/>\n'
+        "</service>\n"
+    )
+
+    # Best-effort cleanup of the raw --add-port rules an earlier version
+    # of this helper added directly -- --remove-port exits 0 even if the
+    # port was never added (confirmed for real), so always safe to run.
+    for port in ("21/tcp", f"{SFTP_PORT}/tcp", f"{PASSIVE_PORT_MIN}-{PASSIVE_PORT_MAX}/tcp"):
+        _run(["firewall-cmd", "--permanent", f"--remove-port={port}"])
+
+    # A reload is needed here too, not just at the end -- firewalld only
+    # recognizes a service name dropped into
+    # /etc/firewalld/services/*.xml (for the following --add-service
+    # call) after being told to reload, confirmed for real.
+    _run(["firewall-cmd", "--reload"])
+    _run(["firewall-cmd", "--permanent", f"--add-service={FIREWALLD_SERVICE_NAME}"])
+    _run(["firewall-cmd", "--reload"])
+    return {"opened": [f"{FIREWALLD_SERVICE_NAME} (21/tcp, {SFTP_PORT}/tcp, {PASSIVE_PORT_MIN}-{PASSIVE_PORT_MAX}/tcp)"]}
+
+
+def cmd_restore_mounts(_args: dict) -> dict:
+    """Container mode only: re-creates every bind mount recorded in
+    virtual_mounts. Called once by container/entrypoint.sh at startup,
+    since unlike systemd .mount units, nothing else re-mounts them
+    after the container restarts.
+    """
+    conn = _connect_db()
+    try:
+        rows = conn.execute(
+            "SELECT m.real_path, m.readonly, u.homedir, m.virtual_name FROM virtual_mounts m "
+            "JOIN users u ON u.userid = m.username"
+        ).fetchall()
+    finally:
+        conn.close()
+    restored, failed = [], []
+    for real_path, readonly, homedir, virtual_name in rows:
+        mountpoint = Path(homedir) / virtual_name
+        try:
+            _bind_mount(Path(real_path), mountpoint, bool(readonly))
+            restored.append(str(mountpoint))
+        except HelperError as e:
+            failed.append(f"{mountpoint}: {e}")
+    return {"restored": restored, "failed": failed}
+
+
+_SUBCOMMANDS = {
+    "restore-mounts": cmd_restore_mounts,
+    "status": cmd_status,
+    "setup": cmd_setup,
+    "open-firewall": cmd_open_firewall,
+    "expire-accounts": cmd_expire_accounts,
+    "list-users": cmd_list_users,
+    "list-transfers": cmd_list_transfers,
+    "add-virtual-mount": cmd_add_virtual_mount,
+    "remove-virtual-mount": cmd_remove_virtual_mount,
+    "list-virtual-mounts": cmd_list_virtual_mounts,
+    "create-group": cmd_create_group,
+    "delete-group": cmd_delete_group,
+    "list-groups": cmd_list_groups,
+    "add-group-member": cmd_add_group_member,
+    "remove-group-member": cmd_remove_group_member,
+    "add-group-mount": cmd_add_group_mount,
+    "remove-group-mount": cmd_remove_group_mount,
+    "create-user": cmd_create_user,
+    "update-user": cmd_update_user,
+    "set-permissions": cmd_set_permissions,
+    "delete-user": cmd_delete_user,
+}
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in _SUBCOMMANDS:
+        print(json.dumps({"error": f"usage: {sys.argv[0]} <{'|'.join(_SUBCOMMANDS)}>"}))
+        return 1
+
+    raw = sys.stdin.read()
+    try:
+        args = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError as e:
+        print(json.dumps({"error": f"invalid JSON on stdin: {e}"}))
+        return 1
+
+    try:
+        result = _SUBCOMMANDS[sys.argv[1]](args)
+    except HelperError as e:
+        result = {"error": str(e)}
+    except Exception as e:  # noqa: BLE001 - last resort; still needs to reach the UI as text
+        result = {"error": f"unexpected error: {e}"}
+
+    # Deliberately exit 0 even for an {"error": ...} result: this is an
+    # *application*-level outcome (bad input, duplicate user, etc.) that
+    # the frontend needs to display normally, not a process failure.
+    # cockpit.spawn's promise rejects on a non-zero exit, and its
+    # rejection can carry more than one value (exception *and* any
+    # stdout produced before the failure) -- a shape that doesn't map
+    # cleanly onto a single `catch` block with async/await (see
+    # https://github.com/cockpit-project/cockpit/issues/14682). Reserving
+    # a non-zero exit for the two cases above (bad subcommand, malformed
+    # JSON) sidesteps that entirely: those can only happen from a
+    # frontend/integration bug, never from something a user did, so
+    # there's nothing useful to show them anyway -- letting
+    # cockpit.spawn's own rejection path handle it is fine.
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
