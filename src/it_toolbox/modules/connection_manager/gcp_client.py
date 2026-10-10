@@ -25,7 +25,11 @@ from google.oauth2.credentials import Credentials
 
 from it_toolbox.modules.connection_manager.models import (
     GcpIamBinding,
+    GcpImageChoice,
+    GcpInstanceSpec,
+    GcpMachineType,
     GcpProject,
+    GcpSubnetwork,
     GcsBucket,
     GcsEntry,
     Instance,
@@ -51,6 +55,30 @@ WINDOWS_PASSWORD_SERIAL_PORT = 4
 WINDOWS_KEY_TTL = timedelta(minutes=5)
 WINDOWS_PASSWORD_TIMEOUT_SEC = 180
 WINDOWS_PASSWORD_POLL_INTERVAL_SEC = 3
+
+# VM creation (see create_instance): how long to wait for the insert
+# operation to finish, and how often to check on it.
+CREATE_INSTANCE_TIMEOUT_SEC = 300
+OPERATION_POLL_INTERVAL_SEC = 2
+
+# The public images CreateGcpVmDialog offers, as (label, image project,
+# image family). Families, not image names, so each always resolves to
+# its newest build; resolve_public_images drops any family that doesn't
+# resolve (retired, or not visible to this account) rather than offering
+# something instances.insert would reject.
+PUBLIC_IMAGE_FAMILIES = (
+    ("Debian 13", "debian-cloud", "debian-13"),
+    ("Debian 12", "debian-cloud", "debian-12"),
+    ("Ubuntu 24.04 LTS", "ubuntu-os-cloud", "ubuntu-2404-lts-amd64"),
+    ("Ubuntu 22.04 LTS", "ubuntu-os-cloud", "ubuntu-2204-lts"),
+    ("AlmaLinux 10", "almalinux-cloud", "almalinux-10"),
+    ("AlmaLinux 9", "almalinux-cloud", "almalinux-9"),
+    ("Rocky Linux 9", "rocky-linux-cloud", "rocky-linux-9"),
+    ("Red Hat Enterprise Linux 9", "rhel-cloud", "rhel-9"),
+    ("Windows Server 2025 Datacenter", "windows-cloud", "windows-2025"),
+    ("Windows Server 2022 Datacenter", "windows-cloud", "windows-2022"),
+    ("Windows Server 2019 Datacenter", "windows-cloud", "windows-2019"),
+)
 
 
 class GcpApiError(Exception):
@@ -241,6 +269,205 @@ def stop_instance(
         params=params,
         extra_headers={"X-Goog-User-Project": project_id},
     )
+
+
+def _list_all(url: str, token: str, project_id: str, params: dict | None = None) -> list[dict]:
+    """Every item of a paginated Compute Engine list call, billed to
+    `project_id` (see list_instances for why)."""
+    items: list[dict] = []
+    page_token = None
+    while True:
+        page_params = dict(params or {})
+        if page_token:
+            page_params["pageToken"] = page_token
+        data = _get(url, token, params=page_params, extra_headers={"X-Goog-User-Project": project_id})
+        items.extend(data.get("items", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            return items
+
+
+def list_zones(credentials: Credentials, project_id: str) -> list[str]:
+    """Short names of the zones this project can create VMs in."""
+    zones = _list_all(f"{COMPUTE_BASE}/projects/{project_id}/zones", credentials.token, project_id)
+    return sorted(z["name"] for z in zones if z.get("status", "UP") == "UP")
+
+
+def _machine_type_sort_key(machine_type: GcpMachineType) -> tuple:
+    # Group by series ("e2", "n2d", ...) and then smallest first, so the
+    # list reads e2-micro, e2-small, e2-medium, ... rather than A-Z.
+    return (machine_type.name.split("-", 1)[0], machine_type.guest_cpus, machine_type.memory_mb)
+
+
+def list_machine_types(credentials: Credentials, project_id: str, zone: str) -> list[GcpMachineType]:
+    items = _list_all(
+        f"{COMPUTE_BASE}/projects/{project_id}/zones/{zone}/machineTypes", credentials.token, project_id
+    )
+    machine_types = [
+        GcpMachineType(
+            name=item["name"],
+            guest_cpus=int(item.get("guestCpus", 0)),
+            memory_mb=int(item.get("memoryMb", 0)),
+        )
+        for item in items
+        if "deprecated" not in item
+    ]
+    return sorted(machine_types, key=_machine_type_sort_key)
+
+
+def region_of_zone(zone: str) -> str:
+    """"us-central1-a" -> "us-central1"."""
+    return zone.rsplit("-", 1)[0]
+
+
+def list_subnetworks(credentials: Credentials, project_id: str, region: str) -> list[GcpSubnetwork]:
+    """The project's own subnets in `region` -- a VM's NIC has to land on
+    one in its zone's region. (Shared-VPC subnets from a host project
+    aren't listed here.)"""
+    items = _list_all(
+        f"{COMPUTE_BASE}/projects/{project_id}/regions/{region}/subnetworks",
+        credentials.token,
+        project_id,
+    )
+    subnetworks = [
+        GcpSubnetwork(
+            name=item["name"],
+            network=item.get("network", "").rsplit("/", 1)[-1],
+            region=region,
+            ip_cidr_range=item.get("ipCidrRange", ""),
+        )
+        for item in items
+    ]
+    return sorted(subnetworks, key=lambda s: (s.network.lower(), s.name.lower()))
+
+
+def _image_os_hint(image: dict) -> str:
+    licenses = image.get("licenses", [])
+    if any("windows" in lic.lower() for lic in licenses):
+        return "windows"
+    return "linux"
+
+
+def _resolve_image_family(
+    token: str, project_id: str, label: str, image_project: str, family: str
+) -> GcpImageChoice | None:
+    path = f"projects/{image_project}/global/images/family/{family}"
+    try:
+        image = _get(f"{COMPUTE_BASE}/{path}", token, extra_headers={"X-Goog-User-Project": project_id})
+    except (GcpApiError, requests.RequestException):
+        return None
+    return GcpImageChoice(
+        label=label,
+        source_image=path,
+        min_disk_gb=int(image.get("diskSizeGb", 10)),
+        os_hint=_image_os_hint(image),
+    )
+
+
+def resolve_public_images(credentials: Credentials, project_id: str) -> list[GcpImageChoice]:
+    """PUBLIC_IMAGE_FAMILIES that currently resolve, in that order, each
+    with its real minimum disk size (Windows images need 50 GB, most Linux
+    ones 10 or 20). Never raises: a family that fails to resolve is just
+    left out."""
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        resolved = pool.map(
+            lambda entry: _resolve_image_family(credentials.token, project_id, *entry),
+            PUBLIC_IMAGE_FAMILIES,
+        )
+        return [image for image in resolved if image is not None]
+
+
+def list_project_images(credentials: Credentials, project_id: str) -> list[GcpImageChoice]:
+    """The project's own (custom) images that aren't deprecated."""
+    items = _list_all(
+        f"{COMPUTE_BASE}/projects/{project_id}/global/images", credentials.token, project_id
+    )
+    images = [
+        GcpImageChoice(
+            label=item["name"],
+            source_image=f"projects/{project_id}/global/images/{item['name']}",
+            min_disk_gb=int(item.get("diskSizeGb", 10)),
+            os_hint=_image_os_hint(item),
+        )
+        for item in items
+        if "deprecated" not in item
+    ]
+    return sorted(images, key=lambda i: i.label.lower())
+
+
+def _instance_body(spec: GcpInstanceSpec) -> dict:
+    access_configs = (
+        [{"type": "ONE_TO_ONE_NAT", "name": "External NAT"}] if spec.external_ip else []
+    )
+    return {
+        "name": spec.name,
+        "machineType": f"zones/{spec.zone}/machineTypes/{spec.machine_type}",
+        "disks": [
+            {
+                "boot": True,
+                "autoDelete": True,
+                "initializeParams": {
+                    "sourceImage": spec.source_image,
+                    "diskSizeGb": str(spec.disk_size_gb),
+                    "diskType": f"zones/{spec.zone}/diskTypes/{spec.disk_type}",
+                },
+            }
+        ],
+        "networkInterfaces": [
+            {
+                "subnetwork": (
+                    f"projects/{spec.project_id}/regions/{spec.subnetwork.region}"
+                    f"/subnetworks/{spec.subnetwork.name}"
+                ),
+                "accessConfigs": access_configs,
+            }
+        ],
+    }
+
+
+def _operation_error_message(operation: dict) -> str:
+    errors = operation.get("error", {}).get("errors", [])
+    messages = [e.get("message") or e.get("code", "") for e in errors]
+    return "; ".join(m for m in messages if m) or operation.get("httpErrorMessage", "unknown error")
+
+
+def create_instance(
+    credentials: Credentials,
+    spec: GcpInstanceSpec,
+    timeout: float = CREATE_INSTANCE_TIMEOUT_SEC,
+    poll_interval: float = OPERATION_POLL_INTERVAL_SEC,
+    _sleep: Callable[[float], None] = time.sleep,
+    _monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Creates and starts a VM (instances.insert) and waits for the insert
+    operation to finish. Most real failures -- quota, an image that won't
+    fit the disk, a disk type the machine series doesn't support -- only
+    show up on the finished operation, not the insert call itself, so
+    waiting is what lets the dialog show them. Blocking; call from a
+    background thread.
+
+    No service account is attached: that needs iam.serviceAccountUser on
+    top of instance-create rights, and nothing this app does with the VM
+    (IAP SSH/RDP, password reset, key upload) needs one.
+    """
+    headers = {"X-Goog-User-Project": spec.project_id}
+    zone_url = f"{COMPUTE_BASE}/projects/{spec.project_id}/zones/{spec.zone}"
+    operation = _post(
+        f"{zone_url}/instances", credentials.token, json_body=_instance_body(spec), extra_headers=headers
+    )
+    deadline = _monotonic() + timeout
+    while operation.get("status") != "DONE":
+        if _monotonic() >= deadline:
+            raise GcpApiError(
+                f"{spec.name} is still being created after {int(timeout)} seconds. "
+                "Refresh the project in a bit to see whether it finished."
+            )
+        _sleep(poll_interval)
+        operation = _get(
+            f"{zone_url}/operations/{operation['name']}", credentials.token, extra_headers=headers
+        )
+    if operation.get("error"):
+        raise GcpApiError(f"Couldn't create {spec.name}: {_operation_error_message(operation)}")
 
 
 def _b64_int(value: int) -> str:

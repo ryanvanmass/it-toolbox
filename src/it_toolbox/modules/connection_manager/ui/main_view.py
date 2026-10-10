@@ -53,6 +53,7 @@ from it_toolbox.modules.connection_manager.ui.active_sessions_dialog import (
 from it_toolbox.modules.connection_manager.ui.configure_vm_dialog import (
     ConfigureVmDialog,
 )
+from it_toolbox.modules.connection_manager.ui.create_gcp_vm_dialog import CreateGcpVmDialog
 from it_toolbox.modules.connection_manager.ui.create_vm_dialog import CreateVmDialog
 from it_toolbox.modules.connection_manager.ui.ftp_credentials_dialog import (
     FtpCredentialsDialog,
@@ -1061,6 +1062,17 @@ class ConnectionManagerView(QWidget):
             menu.addAction("Open in GCP Console").triggered.connect(
                 lambda: QDesktopServices.openUrl(QUrl(gcp_client.console_url(project_id)))
             )
+            menu.addAction("Create VM…").triggered.connect(lambda: self._on_create_gcp_vm_clicked(item))
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
+            return
+
+        # A project's "VMs" category node.
+        if item.data(0, CATEGORY_ROLE) == CATEGORY_VMS:
+            project_item = item.parent()
+            menu = QMenu(self)
+            menu.addAction("Create VM…").triggered.connect(
+                lambda: self._on_create_gcp_vm_clicked(project_item)
+            )
             menu.exec(self._tree.viewport().mapToGlobal(pos))
             return
 
@@ -1505,6 +1517,27 @@ class ConnectionManagerView(QWidget):
         # status (e.g. STOPPING) rather than leaving a stale one displayed.
         project_item = self._find_project_item(instance.project_id)
         if project_item is not None:
+            self._refresh_project(project_item)
+
+    @staticmethod
+    def _usual_zone(project_item: QTreeWidgetItem) -> str | None:
+        """The zone most of the project's already-loaded VMs live in -- a
+        better starting point for a new one than a fixed default."""
+        zones: dict[str, int] = {}
+        for i in range(project_item.childCount()):
+            category_item = project_item.child(i)
+            if category_item.data(0, CATEGORY_ROLE) != CATEGORY_VMS:
+                continue
+            for j in range(category_item.childCount()):
+                instance = category_item.child(j).data(0, INSTANCE_ROLE)
+                if instance is not None:
+                    zones[instance.zone] = zones.get(instance.zone, 0) + 1
+        return max(zones, key=zones.get) if zones else None
+
+    def _on_create_gcp_vm_clicked(self, project_item: QTreeWidgetItem) -> None:
+        project_id = project_item.data(0, PROJECT_ID_ROLE)
+        dialog = CreateGcpVmDialog(project_id, self._usual_zone(project_item), parent=self)
+        if dialog.exec() == CreateGcpVmDialog.DialogCode.Accepted and shiboken6.isValid(project_item):
             self._refresh_project(project_item)
 
     def _find_project_item(self, project_id: str) -> QTreeWidgetItem | None:
