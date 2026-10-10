@@ -61,20 +61,27 @@ class FakeSession:
                 raise OSError(errno.ENOTEMPTY, "rmdir failed")
             self._server.dirs.remove(path)
 
-    def upload_bytes(self, data, path):
+    def upload_fileobj(self, fileobj, path, size):
         time.sleep(0.0002)
+        data = b""
+        while chunk := fileobj.read(32768):
+            data += chunk
+        assert len(data) == size
         with self._server.lock:
             if posixpath.dirname(path) not in self._server.dirs:
                 raise self._missing(path)
             self._server.files[path] = data
 
-    def download_bytes(self, path):
+    def download_fileobj(self, path, fileobj):
         time.sleep(0.0002)
         with self._server.lock:
             if path not in self._server.files:
                 raise self._missing(path)
             data = self._server.files[path]
-        return data[:-1] + bytes([data[-1] ^ 0xFF]) if self._server.corrupt and data else data
+        if self._server.corrupt and data:
+            data = data[:-1] + bytes([data[-1] ^ 0xFF])
+        for start in range(0, len(data), 32768):
+            fileobj.write(data[start : start + 32768])
 
     def list_dir(self, path):
         time.sleep(0.0002)
@@ -185,6 +192,35 @@ def test_corrupted_downloads_are_reported_as_errors():
 
     assert snapshot.operations["download"].errors == snapshot.operations["download"].count > 0
     assert "doesn't match" in snapshot.errors[-1].message
+
+
+class EndlessUploadSession(FakeSession):
+    """Reads uploads forever without keeping them, like a huge file on a
+    slow link -- the transfer only ends when the test is stopped."""
+
+    def upload_fileobj(self, fileobj, path, size):
+        while fileobj.read(32768):
+            time.sleep(0.001)
+
+
+def test_stopping_cancels_a_large_transfer_without_counting_an_error():
+    server = FakeServer()
+    config = StressTestConfig(
+        host="sftp.test", username="tester", workers=2, min_file_size=10 * 1024**3, max_file_size=10 * 1024**3
+    )
+    test = StressTest(config, session_factory=lambda: EndlessUploadSession(server), seed=1)
+    test.prepare()
+    test.start()
+    time.sleep(0.2)
+    assert test.stats.snapshot().bytes_uploaded > 0  # counted as it streams, not at the end
+
+    started = time.monotonic()
+    test.stop()
+    test.join(timeout=5)
+
+    assert time.monotonic() - started < 1
+    assert not test.running
+    assert test.stats.snapshot().total_errors == 0
 
 
 def test_failing_connections_are_counted_and_retried(monkeypatch):

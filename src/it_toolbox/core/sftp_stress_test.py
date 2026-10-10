@@ -232,6 +232,8 @@ class _Worker:
                 started = time.perf_counter()
                 try:
                     getattr(self, f"_do_{operation}")()
+                except _Cancelled:
+                    break
                 except Exception as exc:  # noqa: BLE001 - every failure is a result to report
                     self._stats.record(operation, time.perf_counter() - started, _describe(exc), self.index)
                     if _is_connection_lost(exc):
@@ -288,24 +290,20 @@ class _Worker:
         parent = self._rng.choice([self._dir, *self._dirs])
         return posixpath.join(parent, f"{prefix}-{self._counter}")
 
-    def _random_payload(self) -> bytes:
-        size = self._rng.randint(self._config.min_file_size, self._config.max_file_size)
-        return os.urandom(size)
-
     # -- Operations --------------------------------------------------------
 
     def _do_upload(self) -> None:
-        data = self._random_payload()
+        size = self._rng.randint(self._config.min_file_size, self._config.max_file_size)
+        source = _RandomSource(size, self._stats, self._stop)
         path = self._new_path("file") + ".bin"
-        self._session.upload_bytes(data, path)
-        self._files[path] = hashlib.sha256(data).hexdigest()
-        self._stats.add_bytes(uploaded=len(data))
+        self._session.upload_fileobj(source, path, size)
+        self._files[path] = source.digest.hexdigest()
 
     def _do_download(self) -> None:
         path = self._rng.choice(list(self._files))
-        data = self._session.download_bytes(path)
-        self._stats.add_bytes(downloaded=len(data))
-        if hashlib.sha256(data).hexdigest() != self._files[path]:
+        sink = _HashingSink(self._stats, self._stop)
+        self._session.download_fileobj(path, sink)
+        if sink.digest.hexdigest() != self._files[path]:
             raise IntegrityError(f"{posixpath.basename(path)}: downloaded content doesn't match what was uploaded")
 
     def _do_list(self) -> None:
@@ -339,6 +337,51 @@ class _Worker:
 
 class IntegrityError(Exception):
     pass
+
+
+class _Cancelled(Exception):
+    """Raised from inside a transfer once the test is stopped, so a
+    multi-gigabyte upload or download doesn't hold up Stop. Not an error:
+    the half-written file is removed with the rest of the test folder."""
+
+
+class _RandomSource:
+    """A file-like object of `size` random bytes, generated as paramiko
+    reads it rather than held in memory (files can be gigabytes, times
+    every worker). Hashes what it hands out and counts it as uploaded."""
+
+    def __init__(self, size: int, stats: StressStats, stop: threading.Event) -> None:
+        self._remaining = size
+        self._stats = stats
+        self._stop = stop
+        self.digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        if self._stop.is_set():
+            raise _Cancelled()
+        if size < 0 or size > self._remaining:
+            size = self._remaining
+        chunk = os.urandom(size)
+        self._remaining -= size
+        self.digest.update(chunk)
+        self._stats.add_bytes(uploaded=size)
+        return chunk
+
+
+class _HashingSink:
+    """Write side of a download: hashes and counts, keeps nothing."""
+
+    def __init__(self, stats: StressStats, stop: threading.Event) -> None:
+        self._stats = stats
+        self._stop = stop
+        self.digest = hashlib.sha256()
+
+    def write(self, chunk: bytes) -> int:
+        if self._stop.is_set():
+            raise _Cancelled()
+        self.digest.update(chunk)
+        self._stats.add_bytes(downloaded=len(chunk))
+        return len(chunk)
 
 
 def _describe(exc: Exception) -> str:

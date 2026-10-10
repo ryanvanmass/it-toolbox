@@ -12,12 +12,14 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -47,6 +49,8 @@ POLL_INTERVAL_MS = 500
 #: seconds without jumping around on every poll.
 RATE_WINDOW_S = 5.0
 MAX_WORKERS = 64
+SIZE_UNITS = {"KB": 1024, "MB": 1024**2, "GB": 1024**3}
+MAX_SIZE_VALUE = 1024 * 1024
 
 IDLE, STARTING, RUNNING, STOPPING = "idle", "starting", "running", "stopping"
 
@@ -62,6 +66,57 @@ def _ms(seconds: float) -> str:
 def _duration(seconds: float) -> str:
     seconds = int(seconds)
     return f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+
+
+class _SizeInput(QWidget):
+    """A file size as a number plus a KB/MB/GB unit."""
+
+    changed = Signal()
+
+    def __init__(self, minimum: int, value: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.spin = QSpinBox()
+        self.spin.setRange(minimum, MAX_SIZE_VALUE)
+        self.spin.setValue(value)
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItems(list(SIZE_UNITS))
+        self.spin.valueChanged.connect(self.changed)
+        self.unit_combo.currentTextChanged.connect(self.changed)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.spin, 1)
+        layout.addWidget(self.unit_combo)
+
+    def size(self) -> tuple[int, str]:
+        return self.spin.value(), self.unit_combo.currentText()
+
+    def set_size(self, value: int, unit: str) -> None:
+        # One change, not two: the in-between value (new unit, old number)
+        # would otherwise push the other size field around.
+        if self.size() == (value, unit):
+            return
+        self.spin.blockSignals(True)
+        self.unit_combo.blockSignals(True)
+        if unit in SIZE_UNITS:
+            self.unit_combo.setCurrentText(unit)
+        self.spin.setValue(value)
+        self.spin.blockSignals(False)
+        self.unit_combo.blockSignals(False)
+        self.changed.emit()
+
+    def bytes(self) -> int:
+        return self.spin.value() * SIZE_UNITS[self.unit_combo.currentText()]
+
+
+class _SavedTestsCombo(QComboBox):
+    """Re-reads the saved tests each time it opens, so one saved from
+    another tab shows up without reopening this one."""
+
+    about_to_show = Signal()
+
+    def showPopup(self) -> None:  # noqa: N802 - Qt override
+        self.about_to_show.emit()
+        super().showPopup()
 
 
 class SftpServerTestWidget(QWidget):
@@ -81,6 +136,7 @@ class SftpServerTestWidget(QWidget):
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self._refresh_stats)
 
+        self._build_saved_row()
         self._build_form()
         self._build_stats()
 
@@ -109,6 +165,7 @@ class SftpServerTestWidget(QWidget):
         splitter.setSizes([260, 140])
 
         layout = QVBoxLayout(self)
+        layout.addLayout(self._saved_row)
         layout.addLayout(top)
         layout.addLayout(buttons)
         layout.addLayout(self._summary_grid)
@@ -118,6 +175,26 @@ class SftpServerTestWidget(QWidget):
         self._update_controls()
 
     # -- Layout -------------------------------------------------------------
+
+    def _build_saved_row(self) -> None:
+        self._saved_combo = _SavedTestsCombo()
+        self._saved_combo.setMinimumContentsLength(20)
+        self._saved_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._saved_combo.setToolTip("Load a saved test configuration into the form.")
+        self._saved_combo.about_to_show.connect(self._refresh_saved_tests)
+        self._saved_combo.activated.connect(self._on_saved_test_chosen)
+        self._save_config_button = QPushButton("Save…")
+        self._save_config_button.setToolTip("Save the form as a named test configuration (not the password).")
+        self._save_config_button.clicked.connect(self._save_test_config)
+        self._delete_config_button = QPushButton("Delete")
+        self._delete_config_button.clicked.connect(self._delete_test_config)
+        self._saved_row = QHBoxLayout()
+        self._saved_row.addWidget(QLabel("Saved tests:"))
+        self._saved_row.addWidget(self._saved_combo)
+        self._saved_row.addWidget(self._save_config_button)
+        self._saved_row.addWidget(self._delete_config_button)
+        self._saved_row.addStretch(1)
+        self._refresh_saved_tests()
 
     def _build_form(self) -> None:
         self._host_edit = QLineEdit()
@@ -152,20 +229,12 @@ class SftpServerTestWidget(QWidget):
         self._workers_spin.setRange(1, MAX_WORKERS)
         self._workers_spin.setValue(4)
         self._workers_spin.setToolTip("Each concurrent action runs on its own SFTP connection.")
-        self._min_size_spin = QSpinBox()
-        self._min_size_spin.setRange(0, 1024 * 1024)
-        self._min_size_spin.setSuffix(" KB")
-        self._min_size_spin.setValue(1)
-        self._max_size_spin = QSpinBox()
-        self._max_size_spin.setRange(1, 1024 * 1024)
-        self._max_size_spin.setSuffix(" KB")
-        self._max_size_spin.setValue(1024)
-        self._min_size_spin.valueChanged.connect(
-            lambda v: self._max_size_spin.setValue(max(v, self._max_size_spin.value()))
-        )
-        self._max_size_spin.valueChanged.connect(
-            lambda v: self._min_size_spin.setValue(min(v, self._min_size_spin.value()))
-        )
+        self._min_size = _SizeInput(0, 1)
+        self._max_size = _SizeInput(1, 1)
+        self._max_size.set_size(1, "MB")
+        # Keep min <= max: whichever one was just changed wins.
+        self._min_size.changed.connect(lambda: self._keep_sizes_ordered(self._min_size, self._max_size))
+        self._max_size.changed.connect(lambda: self._keep_sizes_ordered(self._max_size, self._min_size))
         self._cleanup_check = QCheckBox("Delete the test folder when finished")
         self._cleanup_check.setChecked(True)
         explanation = QLabel(
@@ -178,8 +247,8 @@ class SftpServerTestWidget(QWidget):
         self._test_box = QGroupBox("Test")
         test_form = QFormLayout(self._test_box)
         test_form.addRow("Concurrent actions:", self._workers_spin)
-        test_form.addRow("Min file size:", self._min_size_spin)
-        test_form.addRow("Max file size:", self._max_size_spin)
+        test_form.addRow("Min file size:", self._min_size)
+        test_form.addRow("Max file size:", self._max_size)
         test_form.addRow(self._cleanup_check)
         test_form.addRow(explanation)
 
@@ -233,37 +302,116 @@ class SftpServerTestWidget(QWidget):
         if path:
             self._key_edit.setText(path)
 
+    def _keep_sizes_ordered(self, changed: _SizeInput, other: _SizeInput) -> None:
+        too_big = changed is self._min_size and changed.bytes() > other.bytes()
+        too_small = changed is self._max_size and changed.bytes() < other.bytes()
+        if too_big or too_small:
+            other.set_size(*changed.size())
+
+    def form_values(self) -> dict:
+        """The form as saved for next time or as a named configuration --
+        everything except the password."""
+        min_size, min_unit = self._min_size.size()
+        max_size, max_unit = self._max_size.size()
+        return {
+            "host": self._host_edit.text().strip(),
+            "port": self._port_spin.value(),
+            "username": self._username_edit.text().strip(),
+            "key_path": self._key_edit.text().strip(),
+            "remote_dir": self._remote_dir_edit.text().strip(),
+            "workers": self._workers_spin.value(),
+            "min_size": min_size,
+            "min_unit": min_unit,
+            "max_size": max_size,
+            "max_unit": max_unit,
+            "cleanup": self._cleanup_check.isChecked(),
+        }
+
+    def apply_values(self, values: dict) -> None:
+        self._host_edit.setText(str(values.get("host", "")))
+        self._username_edit.setText(str(values.get("username", "")))
+        self._key_edit.setText(str(values.get("key_path", "")))
+        self._remote_dir_edit.setText(str(values.get("remote_dir", "")))
+        for spin, key in [(self._port_spin, "port"), (self._workers_spin, "workers")]:
+            if isinstance(values.get(key), int):
+                spin.setValue(values[key])
+        # Max first, so a saved min that's bigger than the current max
+        # doesn't drag the max along with it.
+        for size_input, prefix in [(self._max_size, "max"), (self._min_size, "min")]:
+            value, unit = values.get(f"{prefix}_size"), values.get(f"{prefix}_unit")
+            if isinstance(value, int) and unit in SIZE_UNITS:
+                size_input.set_size(value, unit)
+            elif isinstance(values.get(f"{prefix}_kb"), int):  # saved before units existed
+                size_input.set_size(values[f"{prefix}_kb"], "KB")
+        if isinstance(values.get("cleanup"), bool):
+            self._cleanup_check.setChecked(values["cleanup"])
+
     def _load_defaults(self) -> None:
-        defaults = settings.load_sftp_server_test_defaults()
-        self._host_edit.setText(str(defaults.get("host", "")))
-        self._username_edit.setText(str(defaults.get("username", "")))
-        self._key_edit.setText(str(defaults.get("key_path", "")))
-        self._remote_dir_edit.setText(str(defaults.get("remote_dir", "")))
-        for spin, key in [
-            (self._port_spin, "port"),
-            (self._workers_spin, "workers"),
-            (self._min_size_spin, "min_kb"),
-            (self._max_size_spin, "max_kb"),
-        ]:
-            if isinstance(defaults.get(key), int):
-                spin.setValue(defaults[key])
-        if isinstance(defaults.get("cleanup"), bool):
-            self._cleanup_check.setChecked(defaults["cleanup"])
+        self.apply_values(settings.load_sftp_server_test_defaults())
 
     def _save_defaults(self) -> None:
-        settings.save_sftp_server_test_defaults(
-            {
-                "host": self._host_edit.text().strip(),
-                "port": self._port_spin.value(),
-                "username": self._username_edit.text().strip(),
-                "key_path": self._key_edit.text().strip(),
-                "remote_dir": self._remote_dir_edit.text().strip(),
-                "workers": self._workers_spin.value(),
-                "min_kb": self._min_size_spin.value(),
-                "max_kb": self._max_size_spin.value(),
-                "cleanup": self._cleanup_check.isChecked(),
-            }
+        settings.save_sftp_server_test_defaults(self.form_values())
+
+    # -- Saved test configurations ------------------------------------------
+
+    def _refresh_saved_tests(self) -> None:
+        current = self._saved_combo.currentText() if self._saved_combo.currentIndex() > 0 else ""
+        names = sorted(settings.load_sftp_server_test_configs(), key=str.casefold)
+        self._saved_combo.blockSignals(True)
+        self._saved_combo.clear()
+        self._saved_combo.addItem("Choose a saved test…" if names else "No saved tests yet")
+        self._saved_combo.addItems(names)
+        self._saved_combo.setCurrentIndex(max(0, self._saved_combo.findText(current)))
+        self._saved_combo.blockSignals(False)
+        self._delete_config_button.setEnabled(self._state == IDLE and self._saved_combo.currentIndex() > 0)
+
+    def _on_saved_test_chosen(self, index: int) -> None:
+        self._delete_config_button.setEnabled(self._state == IDLE and index > 0)
+        if index <= 0:
+            return
+        name = self._saved_combo.itemText(index)
+        values = settings.load_sftp_server_test_configs().get(name)
+        if values is None:
+            self._refresh_saved_tests()
+            return
+        self.apply_values(values)
+        self._password_edit.clear()
+        self._status_label.setText(f"Loaded “{name}”.")
+
+    def _save_test_config(self) -> None:
+        suggested = self._saved_combo.currentText() if self._saved_combo.currentIndex() > 0 else ""
+        suggested = suggested or self._host_edit.text().strip()
+        name, ok = QInputDialog.getText(
+            self, "Save Test", "Name for this test configuration (the password isn't saved):", text=suggested
         )
+        name = name.strip()
+        if not ok or not name:
+            return
+        configs = settings.load_sftp_server_test_configs()
+        if name in configs and name != self._saved_combo.currentText():
+            answer = QMessageBox.question(self, "Save Test", f"Replace the saved test “{name}”?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        configs[name] = self.form_values()
+        settings.save_sftp_server_test_configs(configs)
+        self._refresh_saved_tests()
+        self._saved_combo.setCurrentIndex(self._saved_combo.findText(name))
+        self._delete_config_button.setEnabled(self._state == IDLE)
+        self._status_label.setText(f"Saved “{name}”.")
+
+    def _delete_test_config(self) -> None:
+        if self._saved_combo.currentIndex() <= 0:
+            return
+        name = self._saved_combo.currentText()
+        answer = QMessageBox.question(self, "Delete Saved Test", f"Delete the saved test “{name}”?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        configs = settings.load_sftp_server_test_configs()
+        configs.pop(name, None)
+        settings.save_sftp_server_test_configs(configs)
+        self._saved_combo.setCurrentIndex(0)
+        self._refresh_saved_tests()
+        self._status_label.setText(f"Deleted “{name}”.")
 
     def config(self) -> StressTestConfig:
         return StressTestConfig(
@@ -273,8 +421,8 @@ class SftpServerTestWidget(QWidget):
             password=self._password_edit.text() or None,
             key_path=self._key_edit.text().strip() or None,
             workers=self._workers_spin.value(),
-            min_file_size=self._min_size_spin.value() * 1024,
-            max_file_size=self._max_size_spin.value() * 1024,
+            min_file_size=self._min_size.bytes(),
+            max_file_size=self._max_size.bytes(),
             remote_dir=self._remote_dir_edit.text().strip(),
             cleanup=self._cleanup_check.isChecked(),
         )
@@ -290,6 +438,9 @@ class SftpServerTestWidget(QWidget):
         self._server_box.setEnabled(idle)
         self._test_box.setEnabled(idle)
         self._start_button.setEnabled(idle)
+        self._saved_combo.setEnabled(idle)
+        self._save_config_button.setEnabled(idle)
+        self._delete_config_button.setEnabled(idle and self._saved_combo.currentIndex() > 0)
         self._stop_button.setEnabled(self._state in (STARTING, RUNNING))
 
     # -- Running ------------------------------------------------------------

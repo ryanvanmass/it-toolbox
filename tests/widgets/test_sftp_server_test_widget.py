@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from it_toolbox.core import settings
 from it_toolbox.core.ftp_client import FtpClientError
@@ -70,8 +70,8 @@ def _make(qtbot):
 
 def test_config_reflects_the_form(qtbot):
     widget = _make(qtbot)
-    widget._min_size_spin.setValue(4)
-    widget._max_size_spin.setValue(64)
+    widget._min_size.set_size(4, "KB")
+    widget._max_size.set_size(64, "KB")
 
     config = widget.config()
 
@@ -86,12 +86,28 @@ def test_config_reflects_the_form(qtbot):
     assert config.cleanup is True
 
 
+def test_file_sizes_use_the_chosen_units(qtbot):
+    widget = _make(qtbot)
+    widget._max_size.set_size(2, "GB")
+    widget._min_size.set_size(500, "MB")
+
+    config = widget.config()
+
+    assert (config.min_file_size, config.max_file_size) == (500 * 1024**2, 2 * 1024**3)
+
+
 def test_file_size_range_stays_consistent(qtbot):
     widget = _make(qtbot)
-    widget._max_size_spin.setValue(10)
-    widget._min_size_spin.setValue(50)
+    widget._max_size.set_size(10, "KB")
+    widget._min_size.set_size(50, "KB")
+    assert widget._max_size.size() == (50, "KB")
 
-    assert widget._max_size_spin.value() == 50
+    widget._max_size.set_size(3, "MB")
+    widget._min_size.unit_combo.setCurrentText("GB")  # 50 GB > 3 MB
+    assert widget._max_size.size() == (50, "GB")
+
+    widget._max_size.unit_combo.setCurrentText("KB")  # 50 KB < 50 GB
+    assert widget._min_size.size() == (50, "KB")
 
 
 def test_start_requires_host_and_username(qtbot, monkeypatch):
@@ -177,6 +193,66 @@ def test_last_settings_are_remembered_without_the_password(qtbot):
     assert again._host_edit.text() == "sftp.example.com"
     assert again._port_spin.value() == 2222
     assert again._password_edit.text() == ""
+
+
+def test_settings_saved_before_units_existed_load_as_kb(qtbot):
+    settings.save_sftp_server_test_defaults({"host": "old.example.com", "min_kb": 8, "max_kb": 2048})
+
+    widget = SftpServerTestWidget()
+    qtbot.addWidget(widget)
+
+    assert widget._min_size.size() == (8, "KB")
+    assert widget._max_size.size() == (2048, "KB")
+
+
+def test_save_load_and_delete_test_configurations(qtbot, monkeypatch):
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Big files", True))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.StandardButton.Yes)
+    widget = _make(qtbot)
+    widget._max_size.set_size(4, "GB")
+    widget._min_size.set_size(1, "GB")
+    widget._cleanup_check.setChecked(False)
+
+    widget._save_test_config()
+
+    saved = settings.load_sftp_server_test_configs()
+    assert list(saved) == ["Big files"]
+    assert saved["Big files"]["host"] == "sftp.example.com"
+    assert (saved["Big files"]["max_size"], saved["Big files"]["max_unit"]) == (4, "GB")
+    assert "hunter2" not in str(saved)
+    assert widget._saved_combo.currentText() == "Big files"
+
+    other = SftpServerTestWidget()
+    qtbot.addWidget(other)
+    other._host_edit.setText("elsewhere")
+    other._password_edit.setText("secret")
+    index = other._saved_combo.findText("Big files")
+    other._saved_combo.setCurrentIndex(index)
+    other._saved_combo.activated.emit(index)
+
+    assert other._host_edit.text() == "sftp.example.com"
+    assert other._port_spin.value() == 2222
+    assert other._workers_spin.value() == 8
+    assert other._min_size.size() == (1, "GB")
+    assert other._max_size.size() == (4, "GB")
+    assert not other._cleanup_check.isChecked()
+    assert other._password_edit.text() == ""
+
+    other._delete_test_config()
+
+    assert settings.load_sftp_server_test_configs() == {}
+    assert other._saved_combo.count() == 1
+    assert not other._delete_config_button.isEnabled()
+
+
+def test_saved_tests_are_locked_while_a_test_runs(qtbot):
+    widget = _make(qtbot)
+    widget.start()
+    qtbot.waitUntil(lambda: widget.state == RUNNING, timeout=3000)
+
+    assert not widget._saved_combo.isEnabled()
+    assert not widget._save_config_button.isEnabled()
+    widget.close_session()
 
 
 def test_closing_a_running_tab_stops_and_cleans_up(qtbot):

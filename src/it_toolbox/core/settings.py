@@ -808,3 +808,27 @@ def load_sftp_server_test_defaults() -> dict:
 
 def save_sftp_server_test_defaults(defaults: dict) -> None:
     sftp_server_test_defaults_path().write_text(json.dumps(defaults))
+
+
+def sftp_server_test_configs_path() -> Path:
+    return data_dir() / "sftp_server_test_configs.json"
+
+
+def load_sftp_server_test_configs() -> dict[str, dict]:
+    """Named SFTP Server Test configurations the user saved, name -> the
+    same fields as load_sftp_server_test_defaults(). Never includes
+    passwords."""
+    path = sftp_server_test_configs_path()
+    if not path.is_file():
+        return {}
+    try:
+        configs = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(configs, dict):
+        return {}
+    return {name: values for name, values in configs.items() if isinstance(values, dict)}
+
+
+def save_sftp_server_test_configs(configs: dict[str, dict]) -> None:
+    sftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
