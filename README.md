@@ -50,6 +50,13 @@ connection manager for RDP, SSH, and Cloud Storage.
     FileZilla-Server-style **Live Traffic** view: connected sessions
     (with Disconnect) and every FTP/SFTP command and response as it
     happens, from an extra ProFTPD log it can turn on and off.
+  - **SFTP Server Test** — load-tests an SFTP server: set the host, port,
+    username, password or key, and how many concurrent actions to run;
+    each one opens its own connection and keeps uploading, downloading
+    (checking the contents), listing, renaming, creating and deleting
+    files at random inside a fresh `it-toolbox-sftp-test-…` folder until
+    you stop it, with live operations/sec, errors and latency per
+    operation. The folder is removed afterwards unless you untick that.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools

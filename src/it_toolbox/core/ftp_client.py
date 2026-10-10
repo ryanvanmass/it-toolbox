@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import ftplib
 import hashlib
+import io
 import os
 import posixpath
 import stat as stat_module
@@ -240,6 +241,17 @@ class SftpSession:
 
     def upload(self, local_path: str, remote_path: str, progress: ProgressCallback | None = None) -> None:
         self._sftp.put(local_path, remote_path, callback=progress)
+
+    def upload_bytes(self, data: bytes, remote_path: str) -> None:
+        self._sftp.putfo(io.BytesIO(data), remote_path, file_size=len(data))
+
+    def download_bytes(self, remote_path: str) -> bytes:
+        buffer = io.BytesIO()
+        self._sftp.getfo(remote_path, buffer)
+        return buffer.getvalue()
+
+    def stat(self, path: str) -> paramiko.SFTPAttributes:
+        return self._sftp.stat(path)
 
     def mkdir(self, path: str) -> None:
         self._sftp.mkdir(path)

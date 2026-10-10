@@ -11,13 +11,14 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.modules.general_tools.ui.mbox_tool import MboxTool
 from it_toolbox.modules.general_tools.ui.proftpd_tool import ProftpdTool
+from it_toolbox.modules.general_tools.ui.sftp_test_tool import SftpTestTool
 
 
 class GeneralToolsView(QWidget):
     """Home for small standalone utilities that don't belong to a
-    connection family (the Mbox Browser and the ProFTPD Manager). Each tool is a
-    top-level node in the sidebar tree with its own entries beneath it,
-    and opens its tabs in the shared session-tab pane.
+    connection family (the Mbox Browser, the ProFTPD Manager and the SFTP
+    Server Test). Each tool is a top-level node in the sidebar tree with
+    its own entries beneath it, and opens its tabs in the shared session-tab pane.
 
     A tool is an object with `name`, `item` (its sidebar node),
     `activate(item)`, `add_category_actions(menu)`,
@@ -42,7 +43,8 @@ class GeneralToolsView(QWidget):
 
         self.mbox = MboxTool(self, self._tabs)
         self.proftpd = ProftpdTool(self, self._tabs)
-        self._tools = [self.mbox, self.proftpd]
+        self.sftp_test = SftpTestTool(self, self._tabs)
+        self._tools = [self.mbox, self.proftpd, self.sftp_test]
 
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Tools"])

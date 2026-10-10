@@ -810,3 +810,25 @@ def load_proftpd_servers() -> list[dict]:
 
 def save_proftpd_servers(servers: list[dict]) -> None:
     proftpd_servers_path().write_text(json.dumps(servers))
+
+
+def sftp_server_test_defaults_path() -> Path:
+    return data_dir() / "sftp_server_test.json"
+
+
+def load_sftp_server_test_defaults() -> dict:
+    """The SFTP Server Test form as last started (host, port, username,
+    key path, worker count, ...), to prefill the next test tab. Never
+    includes the password."""
+    path = sftp_server_test_defaults_path()
+    if not path.is_file():
+        return {}
+    try:
+        defaults = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return defaults if isinstance(defaults, dict) else {}
+
+
+def save_sftp_server_test_defaults(defaults: dict) -> None:
+    sftp_server_test_defaults_path().write_text(json.dumps(defaults))
