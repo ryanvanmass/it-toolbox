@@ -61,7 +61,7 @@ connection manager for RDP, SSH, and Cloud Storage.
     Cockpit module over SSH, through that module's own helper, so both
     can be used side by side: sites (static, PHP, reverse proxy,
     Node.js, Python, container) with domains, PHP settings, app
-    start/stop and custom nginx directives, HTTPS (Let's Encrypt over
+    start/stop and custom nginx directives, SSL (Let's Encrypt over
     HTTP or DNS, or your own certificate), databases, cron jobs, SFTP
     access, logs, WordPress/Nextcloud deployment, malware scanning, and
     installing the server stack.

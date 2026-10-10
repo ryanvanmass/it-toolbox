@@ -1,7 +1,7 @@
 """One Hosting Manager tab (General Tools): manages a web server set up by
 the user's cockpit-hosting Cockpit module over SSH, with the same features
 as that module's page -- sites (static, PHP, reverse proxy, Node.js,
-Python, container), HTTPS, databases, cron jobs, SFTP, logs, WordPress and
+Python, container), SSL, databases, cron jobs, SFTP, logs, WordPress and
 Nextcloud deployment, malware scanning, and installing the server stack.
 See core/hosting_manager.py for how it talks to the server.
 """
@@ -135,7 +135,7 @@ class SiteDetail(QWidget):
         self.heading.setFont(font)
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_settings_tab(), "Settings")
-        self.tabs.addTab(self._build_https_tab(), "HTTPS")
+        self.tabs.addTab(self._build_https_tab(), "SSL")
         self.databases_index = self.tabs.addTab(self._build_databases_tab(), "Databases")
         self.cron_index = self.tabs.addTab(self._build_cron_tab(), "Cron Jobs")
         self.sftp_index = self.tabs.addTab(self._build_sftp_tab(), "SFTP")
@@ -416,7 +416,7 @@ class SiteDetail(QWidget):
         self.busy(f"Deploying {label} to {name}…", lambda: self.connection.app_deploy(name, deploy_input), done,
                   f"{label} deployed")
 
-    # -- HTTPS ----------------------------------------------------------------
+    # -- SSL ------------------------------------------------------------------
 
     def _build_https_tab(self) -> QWidget:
         page = QWidget()
@@ -428,7 +428,7 @@ class SiteDetail(QWidget):
         http = _button("Get Certificate (HTTP Challenge)", lambda: self._issue("http"))
         dns = _button("Get Certificate (DNS Challenge)", lambda: self._issue("dns"))
         custom = _button("Upload Certificate…", self._custom_certificate)
-        self.remove_cert = _button("Remove HTTPS", self._remove_certificate)
+        self.remove_cert = _button("Remove SSL", self._remove_certificate)
         note = QLabel(
             "Let's Encrypt over HTTP needs every domain pointing at this server on port 80. "
             "The DNS challenge needs the provider's API credentials (Server tab) and also covers "
@@ -444,7 +444,7 @@ class SiteDetail(QWidget):
 
     def _show_https(self, site: dict) -> None:
         mode = site.get("ssl_mode") or "none"
-        text = f"HTTPS: {hm.SSL_MODE_LABELS.get(mode, mode)}"
+        text = f"SSL: {hm.SSL_MODE_LABELS.get(mode, mode)}"
         cert = site.get("certificate")
         if cert:
             text += f"\nIssuer: {cert.get('issuer', '')}\nExpires: {when_label(cert.get('expires'))}"
@@ -476,9 +476,9 @@ class SiteDetail(QWidget):
 
     def _remove_certificate(self) -> None:
         name = self.name
-        if _confirm(self, "Remove HTTPS", f"Remove {name}'s certificate and serve it over HTTP only?"):
-            self.busy(f"Removing HTTPS from {name}…", lambda: self.connection.ssl_remove(name), self.show_site,
-                      "HTTPS removed")
+        if _confirm(self, "Remove SSL", f"Remove {name}'s certificate and serve it over HTTP only?"):
+            self.busy(f"Removing SSL from {name}…", lambda: self.connection.ssl_remove(name), self.show_site,
+                      "SSL removed")
 
     # -- Databases --------------------------------------------------------------
 
@@ -737,7 +737,7 @@ class HostingManagerWidget(RemoteHelperTab):
     page explaining that cockpit-hosting isn't installed."""
 
     TOOL_NAME = TITLE
-    SITE_COLUMNS = ("Domain", "Type", "Site user", "HTTPS", "App")
+    SITE_COLUMNS = ("Domain", "Type", "Site user", "SSL", "App")
 
     def __init__(self, server: hm.HostingServer, connection_factory=hm.HostingConnection,
                  parent: QWidget | None = None) -> None:
