@@ -4,7 +4,9 @@ tag pushed by hand, never by the app itself).
 """
 
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +40,7 @@ class ReleaseInfo:
     version: str
     html_url: str
     windows_installer_url: str | None = None
+    macos_dmg_url: str | None = None
 
 
 class UpdateInstallError(Exception):
@@ -108,11 +111,40 @@ def get_latest_release(include_prerelease: bool = False) -> ReleaseInfo | None:
         ),
         None,
     )
+    dmg_assets = [asset for asset in data.get("assets", []) if asset["name"].endswith(".dmg")]
+    # The .dmg is arm64-only today (packaging/macos/build.sh); preferring an
+    # explicitly "-arm64" one keeps this right if other architectures ever
+    # get their own .dmg alongside it.
+    macos_dmg = next(
+        (asset for asset in dmg_assets if asset["name"].endswith("-arm64.dmg")),
+        dmg_assets[0] if dmg_assets else None,
+    )
     return ReleaseInfo(
         version=version,
         html_url=data["html_url"],
         windows_installer_url=windows_installer_url,
+        macos_dmg_url=macos_dmg["browser_download_url"] if macos_dmg else None,
     )
+
+
+def _download(url: str, suffix: str, on_progress: Callable[[int, int], None] | None) -> Path:
+    """Streams url to a new temp file and returns its path -- see
+    download_and_install_windows_update's docstring for on_progress's
+    contract."""
+    with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_SEC, stream=True) as response:
+        response.raise_for_status()
+        # Only created once the response is confirmed good -- a failed
+        # request (404, network error) shouldn't leak an empty temp file.
+        fd, path_str = tempfile.mkstemp(suffix=suffix)
+        total = int(response.headers.get("Content-Length") or 0)
+        downloaded = 0
+        with os.fdopen(fd, "wb") as f:
+            for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if on_progress is not None:
+                    on_progress(downloaded, total)
+    return Path(path_str)
 
 
 def download_and_install_windows_update(
@@ -165,20 +197,7 @@ def download_and_install_windows_update(
     happens during or after the actual install -- this process is gone
     long before that, by design.
     """
-    with requests.get(installer_url, timeout=_DOWNLOAD_TIMEOUT_SEC, stream=True) as response:
-        response.raise_for_status()
-        # Only created once the response is confirmed good -- a failed
-        # request (404, network error) shouldn't leak an empty temp file.
-        fd, installer_path_str = tempfile.mkstemp(suffix=".exe")
-        installer_path = Path(installer_path_str)
-        total = int(response.headers.get("Content-Length") or 0)
-        downloaded = 0
-        with os.fdopen(fd, "wb") as f:
-            for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK_SIZE):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if on_progress is not None:
-                    on_progress(downloaded, total)
+    installer_path = _download(installer_url, ".exe", on_progress)
 
     # Not cleaned up afterward -- this process doesn't wait around to
     # learn when the installer is done with it, and Windows won't allow
@@ -199,6 +218,121 @@ def download_and_install_windows_update(
         subprocess.Popen([str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
     except OSError as e:
         raise UpdateInstallError(f"Failed to launch installer at {installer_path}: {e}") from e
+
+
+def running_app_bundle() -> Path | None:
+    """The .app bundle this process runs from (packaging/macos/build.sh's
+    IT Toolbox.app), or None for a source/pip install -- only a bundle can
+    be replaced by download_and_install_macos_update."""
+    for parent in Path(sys.executable).absolute().parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def _macos_install_target(running_bundle: Path) -> Path:
+    """Replaces the running bundle in place when its folder is writable
+    (the normal drag-to-/Applications install); otherwise -- e.g. run
+    straight off the mounted .dmg -- installs into /Applications, or
+    ~/Applications for a user who can't write there."""
+    if os.access(running_bundle.parent, os.W_OK):
+        return running_bundle
+    if os.access("/Applications", os.W_OK):
+        return Path("/Applications") / running_bundle.name
+    user_apps = Path.home() / "Applications"
+    user_apps.mkdir(exist_ok=True)
+    return user_apps / running_bundle.name
+
+
+# Run detached by download_and_install_macos_update: waits for the app
+# ($1 = its PID) to quit, swaps the staged bundle ($2) into place ($3),
+# restoring the old one if the move fails, then relaunches whichever
+# version ended up there and removes the staging dir ($4).
+_MACOS_SWAP_SCRIPT = """
+pid=$1 staged=$2 target=$3 workdir=$4
+i=0
+while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 120 ]; do sleep 0.5; i=$((i + 1)); done
+rm -rf "$target.old"
+if [ -e "$target" ] && ! mv "$target" "$target.old"; then
+    open "$target"; rm -rf "$workdir"; exit 1
+fi
+if mv "$staged" "$target"; then
+    rm -rf "$target.old"
+else
+    rm -rf "$target"
+    [ -e "$target.old" ] && mv "$target.old" "$target"
+fi
+open "$target"
+rm -rf "$workdir"
+"""
+
+
+def download_and_install_macos_update(
+    dmg_url: str, on_progress: Callable[[int, int], None] | None = None
+) -> None:
+    """Downloads the macOS .dmg, copies the new IT Toolbox.app out of it
+    into a staging dir, and hands off to a detached shell helper that
+    replaces the running bundle once this process quits, then relaunches
+    it -- macOS-only, and only from inside a bundle (the caller gates on
+    running_app_bundle(), same convention as the Windows updater).
+
+    Same shape as download_and_install_windows_update, for the same
+    reason: this process's own interpreter and libraries live inside the
+    bundle being replaced, so the helper (not this process) does the swap
+    and the relaunch, and the caller quits right after this returns.
+
+    No Gatekeeper prompt for the new version even though it's only
+    ad-hoc signed: files fetched by requests carry no quarantine
+    attribute, unlike a browser download.
+
+    Raises UpdateInstallError if this isn't a bundle install, the .dmg
+    can't be mounted or holds no .app, or the helper fails to start.
+    """
+    running_bundle = running_app_bundle()
+    if running_bundle is None:
+        raise UpdateInstallError("In-app updates are only available for the IT Toolbox.app install.")
+    target = _macos_install_target(running_bundle)
+
+    dmg_path = _download(dmg_url, ".dmg", on_progress)
+    workdir = Path(tempfile.mkdtemp(prefix="it-toolbox-update-"))
+    mountpoint = workdir / "mnt"
+    try:
+        subprocess.run(
+            ["hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", str(mountpoint), str(dmg_path)],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            apps = sorted(mountpoint.glob("*.app"))
+            if not apps:
+                raise UpdateInstallError("The downloaded update doesn't contain an app bundle.")
+            staged = workdir / apps[0].name
+            # ditto, not shutil.copytree: preserves the bundle's symlinks,
+            # extended attributes and code signatures exactly.
+            subprocess.run(["ditto", str(apps[0]), str(staged)], check=True, capture_output=True)
+        finally:
+            subprocess.run(["hdiutil", "detach", "-quiet", str(mountpoint)], check=False, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        detail = (e.stderr or b"").decode(errors="replace").strip()
+        raise UpdateInstallError(f"Failed to unpack the update: {detail or e}") from e
+    except UpdateInstallError:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    finally:
+        dmg_path.unlink(missing_ok=True)
+
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", _MACOS_SWAP_SCRIPT, "it-toolbox-update", str(os.getpid()), str(staged), str(target), str(workdir)],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise UpdateInstallError(f"Failed to start the update helper: {e}") from e
 
 
 def is_update_available(installed_version: str, latest_version: str) -> bool:
