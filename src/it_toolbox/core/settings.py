@@ -880,3 +880,26 @@ def load_hosting_servers() -> list[dict]:
 
 def save_hosting_servers(servers: list[dict]) -> None:
     hosting_servers_path().write_text(json.dumps(servers))
+
+
+def scheduler_servers_path() -> Path:
+    return data_dir() / "scheduler_servers.json"
+
+
+def load_scheduler_servers() -> list[dict]:
+    """Servers saved in the Scheduler Manager (General Tools), as raw
+    dicts (see core/remote_helper.RemoteServer.to_dict). No passwords."""
+    path = scheduler_servers_path()
+    if not path.is_file():
+        return []
+    try:
+        servers = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(servers, list):
+        return []
+    return [s for s in servers if isinstance(s, dict)]
+
+
+def save_scheduler_servers(servers: list[dict]) -> None:
+    scheduler_servers_path().write_text(json.dumps(servers))
