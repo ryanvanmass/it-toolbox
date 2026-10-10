@@ -38,6 +38,9 @@ class _FakeRunner:
     def send_resize(self, width, height):
         self.inputs.append(("resize", width, height))
 
+    def send_clipboard_text(self, text):
+        self.inputs.append(("clipboard", text))
+
 
 class _FakeTunnel:
     def __init__(self, uri, port):
@@ -90,6 +93,8 @@ def test_spice_service_tunnels_streams_frames_and_forwards_input(monkeypatch):
     app.send(proto.MOUSE_WHEEL, proto.WHEEL.pack(-3))
     app.send(proto.KEY_SCANCODE, proto.KEY.pack(0x1C, True, False))
     app.send(proto.RESIZE, proto.SIZE.pack(1280, 720))
+    app.send(proto.CLIPBOARD_TEXT, "héllo".encode())
+    app.send(proto.CLIPBOARD_TEXT, b"")
     app.send(transport.MSG_STOP)
     service.join(5)
 
@@ -104,6 +109,8 @@ def test_spice_service_tunnels_streams_frames_and_forwards_input(monkeypatch):
         ("wheel", -3),
         ("key", 0x1C, True, False),
         ("resize", 1280, 720),
+        ("clipboard", "héllo"),
+        ("clipboard", None),
     ]
     assert runner.stopped
     assert app.recv() == (proto.DISCONNECTED, b"")

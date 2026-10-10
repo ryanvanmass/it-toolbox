@@ -159,6 +159,12 @@ class SpiceSessionRunner:
         settled), so calls here are already infrequent."""
         GLib.idle_add(self._session.request_resize, width, height)
 
+    def send_clipboard_text(self, text: str | None) -> None:
+        """Hands the host clipboard's current text (None if it holds no
+        text) to the guest -- call whenever the host clipboard changes.
+        See SpiceSession.announce_clipboard_text()."""
+        GLib.idle_add(self._session.announce_clipboard_text, text)
+
     def _run(self) -> None:
         self._loop = GLib.MainLoop()
         self._session.on_frame = self._on_frame

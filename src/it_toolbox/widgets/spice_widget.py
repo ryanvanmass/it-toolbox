@@ -33,6 +33,12 @@ up (confirmed live) -- _on_agent_connected re-sends the current size as
 soon as that happens, since a resize attempted before then would
 otherwise silently do nothing and never get retried.
 
+Host-to-guest clipboard (text only): every host copy is offered to the
+guest's spice-vdagent, mirroring RdpWidget's clipboard handling --
+including its known v1 behavior of broadcasting to every open session
+tab, not just the focused one. Guest-to-host is out of scope. See
+SpiceSession.announce_clipboard_text.
+
 Unlike RDP, SPICE's InputsChannel has no unicode-text fast path — every
 key goes through core/rdp/scancodes.SCANCODES (reused as-is; same PC/AT
 Set 1 table), and a character with no entry there (e.g. non-US-layout
@@ -44,7 +50,7 @@ import math
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.scancodes import SCANCODES
 
@@ -118,8 +124,18 @@ class SpiceWidget(QWidget):
         self._worker.signals.disconnected.connect(self._on_disconnected)
         self._worker.start()
 
+        # QApplication.clipboard() is a process-wide singleton, not scoped
+        # to this widget/tab -- same accepted v1 behavior as RdpWidget: with
+        # multiple session tabs open, every host copy goes to all of them.
+        QApplication.clipboard().dataChanged.connect(self._on_local_clipboard_changed)
+
     def _on_connected(self) -> None:
         self._status_label.hide()
+        # Push whatever's already on the host clipboard once, so text
+        # copied before connecting can be pasted without a fresh copy.
+        # SpiceSession caches it and only offers it to the guest once the
+        # agent is actually connected.
+        self._worker.send_clipboard_text(QApplication.clipboard().text() or None)
         # This widget is typically constructed *before* being added to its
         # tab (see main_view.py's _embed_spice), so it may still be sitting
         # at whatever default size a brand-new unparented QWidget has when
@@ -128,6 +144,9 @@ class SpiceWidget(QWidget):
         # last, the widget's real tab layout or this connection completing,
         # is what actually gets requested once both are ready.
         self._resize_debounce_timer.start(_RESIZE_DEBOUNCE_MS)
+
+    def _on_local_clipboard_changed(self) -> None:
+        self._worker.send_clipboard_text(QApplication.clipboard().text() or None)
 
     def _on_agent_connected(self) -> None:
         # The guest's agent (spice-vdagent or equivalent) finishing its own
@@ -288,6 +307,13 @@ class SpiceWidget(QWidget):
         """Matches the close_session() convention main_view uses to tear
         down any session tab (terminal, RDP, ...) uniformly."""
         self._closing = True
+        # QApplication.clipboard() outlives this widget -- a dangling
+        # connection would call into a half-destroyed widget on the next
+        # host copy. Same cleanup as RdpWidget.close_session().
+        try:
+            QApplication.clipboard().dataChanged.disconnect(self._on_local_clipboard_changed)
+        except (TypeError, RuntimeError):
+            pass
         self._worker.stop()
 
     # --- input: widget-space -> remote desktop-space, then forwarded ----

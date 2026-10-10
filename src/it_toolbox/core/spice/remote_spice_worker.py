@@ -80,6 +80,9 @@ class RemoteSpiceWorker:
     def send_resize(self, width: int, height: int) -> None:
         self._send(proto.RESIZE, proto.SIZE.pack(width, height))
 
+    def send_clipboard_text(self, text: str | None) -> None:
+        self._send(proto.CLIPBOARD_TEXT, (text or "").encode())
+
     # --- reader thread ----------------------------------------------------
 
     def _run(self) -> None:

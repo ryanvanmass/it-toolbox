@@ -62,13 +62,17 @@ def test_remote_worker_mirrors_helper_messages_as_signals(qtbot, monkeypatch):
     worker.send_key_scancode(0x2A, False, True)
     worker.send_resize(800, 600)
     worker.send_mouse_wheel(2)
-    received = [helper.helper_conn.recv() for _ in range(5)]
+    worker.send_clipboard_text("héllo")
+    worker.send_clipboard_text(None)
+    received = [helper.helper_conn.recv() for _ in range(7)]
     assert received == [
         (proto.MOUSE_MOVE, proto.POINT.pack(4, 5)),
         (proto.MOUSE_BUTTON, proto.BUTTON.pack(False) + b"right"),
         (proto.KEY_SCANCODE, proto.KEY.pack(0x2A, False, True)),
         (proto.RESIZE, proto.SIZE.pack(800, 600)),
         (proto.MOUSE_WHEEL, proto.WHEEL.pack(2)),
+        (proto.CLIPBOARD_TEXT, "héllo".encode()),
+        (proto.CLIPBOARD_TEXT, b""),
     ]
 
     helper.helper_conn.send(proto.DISCONNECTED)
