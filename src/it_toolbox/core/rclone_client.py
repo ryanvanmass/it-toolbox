@@ -19,6 +19,7 @@ import platform
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
 
@@ -42,6 +43,8 @@ RCLONE_TIMEOUT_SEC = 15
 RCLONE_CONFIG_TIMEOUT_SEC = 120
 RCLONE_TRANSFER_TIMEOUT_SEC = 300
 _DOWNLOAD_TIMEOUT_SEC = 60
+# How often a transfer with a progress callback reports how far it's got.
+_PROGRESS_INTERVAL = "500ms"
 
 # rclone's documented "always latest stable" download URL — see
 # https://rclone.org/downloads/. <os>/<arch> match the tokens rclone itself
@@ -196,8 +199,84 @@ def list_directory(remote_name: str, path: str = "") -> list[RcloneEntry]:
     ]
 
 
-def download(remote_name: str, path: str, dest: str) -> None:
-    _run("copyto", f"{remote_name}:{path}", dest, timeout=RCLONE_TRANSFER_TIMEOUT_SEC)
+def _parse_progress(line: str) -> int | None:
+    """The percentage done from one line of rclone's --use-json-log output,
+    or None for anything that isn't a stats line with a known total
+    (startup notices, errors, or a remote that doesn't report sizes).
+    """
+    try:
+        stats = json.loads(line).get("stats")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(stats, dict):
+        return None
+    total = stats.get("totalBytes") or 0
+    if total <= 0:
+        return None
+    return max(0, min(100, int(stats.get("bytes", 0) * 100 / total)))
+
+
+def _log_error_message(line: str) -> str:
+    """The text of an error-level JSON log line ("" for anything else), so
+    a failed transfer reports rclone's own message rather than raw JSON."""
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return line.strip()
+    if not isinstance(entry, dict) or entry.get("level") not in ("error", "critical"):
+        return ""
+    return str(entry.get("msg", "")).strip()
+
+
+def _run_with_progress(*args: str, on_progress: Callable[[int], None]) -> None:
+    """Runs an rclone transfer, calling on_progress(percent) as rclone
+    reports it. Stats come from rclone's JSON log on stderr, every
+    _PROGRESS_INTERVAL. No wall-clock timeout, unlike _run: a big
+    download can legitimately take hours, and rclone's own --timeout
+    (5 minutes of no data by default) already ends a stalled transfer.
+    """
+    if not is_available():
+        raise RcloneApiError(
+            f"rclone CLI not found. Install it from {INSTALL_URL}, or set its location "
+            "from the Cloud Storage sidebar entry's right-click menu, and relaunch."
+        )
+    process = subprocess.Popen(
+        [
+            rclone_executable(),
+            *args,
+            "--use-json-log",
+            f"--stats={_PROGRESS_INTERVAL}",
+            "--stats-log-level=NOTICE",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **no_window_kwargs(),
+    )
+    errors: list[str] = []
+    for line in process.stderr:
+        percent = _parse_progress(line)
+        if percent is not None:
+            on_progress(percent)
+        elif message := _log_error_message(line):
+            errors.append(message)
+    process.stderr.close()
+    if process.wait() != 0:
+        raise RcloneApiError(errors[-1] if errors else f"rclone {' '.join(args)} failed")
+    on_progress(100)
+
+
+def download(
+    remote_name: str, path: str, dest: str, on_progress: Callable[[int], None] | None = None
+) -> None:
+    """Copies one remote file to dest. With on_progress, it's called with
+    the percentage done (0-100) as the transfer runs, from this thread."""
+    if on_progress is None:
+        _run("copyto", f"{remote_name}:{path}", dest, timeout=RCLONE_TRANSFER_TIMEOUT_SEC)
+        return
+    _run_with_progress("copyto", f"{remote_name}:{path}", dest, on_progress=on_progress)
 
 
 def upload(remote_name: str, local_path: str, dest_path: str) -> None:
