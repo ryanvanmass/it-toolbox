@@ -108,19 +108,10 @@ class _SizeInput(QWidget):
         return self.spin.value() * SIZE_UNITS[self.unit_combo.currentText()]
 
 
-class _SavedTestsCombo(QComboBox):
-    """Re-reads the saved tests each time it opens, so one saved from
-    another tab shows up without reopening this one."""
-
-    about_to_show = Signal()
-
-    def showPopup(self) -> None:  # noqa: N802 - Qt override
-        self.about_to_show.emit()
-        super().showPopup()
-
-
 class SftpServerTestWidget(QWidget):
     title_changed = Signal(str)
+    #: A test configuration was saved; the sidebar lists them.
+    saved_tests_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -131,12 +122,13 @@ class SftpServerTestWidget(QWidget):
         # (elapsed, per-operation counts) samples for the trailing rate window.
         self._samples: deque[tuple[float, dict[str, int]]] = deque()
         self._last_error_seq = 0
+        # The saved test this tab was opened from or last saved as.
+        self.saved_name: str | None = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_INTERVAL_MS)
         self._timer.timeout.connect(self._refresh_stats)
 
-        self._build_saved_row()
         self._build_form()
         self._build_stats()
 
@@ -144,12 +136,18 @@ class SftpServerTestWidget(QWidget):
         self._start_button.clicked.connect(self.start)
         self._stop_button = QPushButton("Stop")
         self._stop_button.clicked.connect(self.stop)
+        self._save_config_button = QPushButton("Save Test…")
+        self._save_config_button.setToolTip(
+            "Save these settings (not the password) under a name in the sidebar, to open again later."
+        )
+        self._save_config_button.clicked.connect(self.save_test_config)
         self._status_label = QLabel("Fill in the server details and start the test.")
         self._status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._status_label.setWordWrap(True)
         buttons = QHBoxLayout()
         buttons.addWidget(self._start_button)
         buttons.addWidget(self._stop_button)
+        buttons.addWidget(self._save_config_button)
         buttons.addWidget(self._status_label, 1)
 
         top = QHBoxLayout()
@@ -165,7 +163,6 @@ class SftpServerTestWidget(QWidget):
         splitter.setSizes([260, 140])
 
         layout = QVBoxLayout(self)
-        layout.addLayout(self._saved_row)
         layout.addLayout(top)
         layout.addLayout(buttons)
         layout.addLayout(self._summary_grid)
@@ -175,26 +172,6 @@ class SftpServerTestWidget(QWidget):
         self._update_controls()
 
     # -- Layout -------------------------------------------------------------
-
-    def _build_saved_row(self) -> None:
-        self._saved_combo = _SavedTestsCombo()
-        self._saved_combo.setMinimumContentsLength(20)
-        self._saved_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._saved_combo.setToolTip("Load a saved test configuration into the form.")
-        self._saved_combo.about_to_show.connect(self._refresh_saved_tests)
-        self._saved_combo.activated.connect(self._on_saved_test_chosen)
-        self._save_config_button = QPushButton("Save…")
-        self._save_config_button.setToolTip("Save the form as a named test configuration (not the password).")
-        self._save_config_button.clicked.connect(self._save_test_config)
-        self._delete_config_button = QPushButton("Delete")
-        self._delete_config_button.clicked.connect(self._delete_test_config)
-        self._saved_row = QHBoxLayout()
-        self._saved_row.addWidget(QLabel("Saved tests:"))
-        self._saved_row.addWidget(self._saved_combo)
-        self._saved_row.addWidget(self._save_config_button)
-        self._saved_row.addWidget(self._delete_config_button)
-        self._saved_row.addStretch(1)
-        self._refresh_saved_tests()
 
     def _build_form(self) -> None:
         self._host_edit = QLineEdit()
@@ -354,64 +331,38 @@ class SftpServerTestWidget(QWidget):
 
     # -- Saved test configurations ------------------------------------------
 
-    def _refresh_saved_tests(self) -> None:
-        current = self._saved_combo.currentText() if self._saved_combo.currentIndex() > 0 else ""
-        names = sorted(settings.load_sftp_server_test_configs(), key=str.casefold)
-        self._saved_combo.blockSignals(True)
-        self._saved_combo.clear()
-        self._saved_combo.addItem("Choose a saved test…" if names else "No saved tests yet")
-        self._saved_combo.addItems(names)
-        self._saved_combo.setCurrentIndex(max(0, self._saved_combo.findText(current)))
-        self._saved_combo.blockSignals(False)
-        self._delete_config_button.setEnabled(self._state == IDLE and self._saved_combo.currentIndex() > 0)
-
-    def _on_saved_test_chosen(self, index: int) -> None:
-        self._delete_config_button.setEnabled(self._state == IDLE and index > 0)
-        if index <= 0:
-            return
-        name = self._saved_combo.itemText(index)
+    def load_saved_test(self, name: str) -> bool:
+        """Fills the form from the saved test `name`; False if it's gone."""
         values = settings.load_sftp_server_test_configs().get(name)
         if values is None:
-            self._refresh_saved_tests()
-            return
+            return False
         self.apply_values(values)
         self._password_edit.clear()
+        self.saved_name = name
+        self.title_changed.emit(f"SFTP Test: {name}")
         self._status_label.setText(f"Loaded “{name}”.")
+        return True
 
-    def _save_test_config(self) -> None:
-        suggested = self._saved_combo.currentText() if self._saved_combo.currentIndex() > 0 else ""
-        suggested = suggested or self._host_edit.text().strip()
+    def save_test_config(self) -> None:
         name, ok = QInputDialog.getText(
-            self, "Save Test", "Name for this test configuration (the password isn't saved):", text=suggested
+            self,
+            "Save Test",
+            "Name for this test (the password isn't saved):",
+            text=self.saved_name or self._host_edit.text().strip(),
         )
         name = name.strip()
         if not ok or not name:
             return
         configs = settings.load_sftp_server_test_configs()
-        if name in configs and name != self._saved_combo.currentText():
+        if name in configs and name != self.saved_name:
             answer = QMessageBox.question(self, "Save Test", f"Replace the saved test “{name}”?")
             if answer != QMessageBox.StandardButton.Yes:
                 return
         configs[name] = self.form_values()
         settings.save_sftp_server_test_configs(configs)
-        self._refresh_saved_tests()
-        self._saved_combo.setCurrentIndex(self._saved_combo.findText(name))
-        self._delete_config_button.setEnabled(self._state == IDLE)
+        self.saved_name = name
         self._status_label.setText(f"Saved “{name}”.")
-
-    def _delete_test_config(self) -> None:
-        if self._saved_combo.currentIndex() <= 0:
-            return
-        name = self._saved_combo.currentText()
-        answer = QMessageBox.question(self, "Delete Saved Test", f"Delete the saved test “{name}”?")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        configs = settings.load_sftp_server_test_configs()
-        configs.pop(name, None)
-        settings.save_sftp_server_test_configs(configs)
-        self._saved_combo.setCurrentIndex(0)
-        self._refresh_saved_tests()
-        self._status_label.setText(f"Deleted “{name}”.")
+        self.saved_tests_changed.emit()
 
     def config(self) -> StressTestConfig:
         return StressTestConfig(
@@ -438,9 +389,7 @@ class SftpServerTestWidget(QWidget):
         self._server_box.setEnabled(idle)
         self._test_box.setEnabled(idle)
         self._start_button.setEnabled(idle)
-        self._saved_combo.setEnabled(idle)
         self._save_config_button.setEnabled(idle)
-        self._delete_config_button.setEnabled(idle and self._saved_combo.currentIndex() > 0)
         self._stop_button.setEnabled(self._state in (STARTING, RUNNING))
 
     # -- Running ------------------------------------------------------------
