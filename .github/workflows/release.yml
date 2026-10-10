@@ -15,8 +15,11 @@ jobs:
   package-windows:
     uses: ./.github/workflows/package-windows.yml
 
+  package-macos:
+    uses: ./.github/workflows/package-macos.yml
+
   release:
-    needs: [package-linux, package-windows]
+    needs: [package-linux, package-windows, package-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +33,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: windows-installer
+          path: dist/packages
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
           path: dist/packages
 
       - name: Create GitHub Release
@@ -47,3 +55,4 @@ jobs:
             dist/packages/*.deb
             dist/packages/*.rpm
             dist/packages/*.exe
+            dist/packages/*.dmg

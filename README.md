@@ -15,8 +15,8 @@ connection manager for RDP, SSH, and Cloud Storage.
     dynamic resolution resizing (resize the window, the remote desktop
     resizes with it). See `docs/embedded-rdp-status.md` for its current
     verification status.
-  - Falls back to launching the OS's own client (`mstsc.exe`/`xfreerdp`)
-    where the embedded path isn't available.
+  - Where FreeRDP's libraries aren't installed, RDP reports itself as
+    unavailable (Settings shows how to install them).
 - **SSH**, tunneled over IAP, with an embedded terminal (`pyte` +
   `pywinpty`/`ptyprocess`).
 - **GCS bucket browsing** per project, rclone-browser style.
@@ -40,6 +40,13 @@ connection manager for RDP, SSH, and Cloud Storage.
     subject/sender/recipients/date (optionally message bodies too), a
     message preview, opening attachments in their default app
     (double-click), and saving attachments or single messages as `.eml`.
+  - **SFTP Server Test** — load-tests an SFTP server: set the host, port,
+    username, password or key, and how many concurrent actions to run;
+    each one opens its own connection and keeps uploading, downloading
+    (checking the contents), listing, renaming, creating and deleting
+    files at random inside a fresh `it-toolbox-sftp-test-…` folder until
+    you stop it, with live operations/sec, errors and latency per
+    operation. The folder is removed afterwards unless you untick that.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools
@@ -66,6 +73,8 @@ connection manager for RDP, SSH, and Cloud Storage.
   (via vcpkg) and made available to the app — see
   `docs/windows-freerdp-setup.md` for the full walkthrough. Everything
   else (GCP browsing, SSH, GCS) works without this.
+- **macOS only, for embedded RDP**: FreeRDP3 from Homebrew (`brew
+  install freerdp`); relaunch the app after installing it.
 - **Cloud Storage module**: needs the `rclone` CLI on PATH — see
   [rclone.org/downloads](https://rclone.org/downloads/). Every other
   module works without it.
@@ -99,6 +108,14 @@ Fedora 44's 3.14 for the `.rpm`) and won't install on a distro release
 with a different one. See `docs/releasing.md` for how
 these are built.
 
+**macOS (Apple Silicon)**: download `IT-Toolbox-<version>-arm64.dmg`
+from the [latest release](https://github.com/ryanvanmass/it-toolbox/releases/latest),
+open it and drag **IT Toolbox** into Applications. The app is only
+ad-hoc signed, so the first launch needs right-click > Open (or `xattr
+-dr com.apple.quarantine "/Applications/IT Toolbox.app"`); later updates
+install from Settings > App Updates. See `docs/macos-status.md` for what
+has and hasn't been verified on a real Mac yet.
+
 Otherwise, from a git checkout on any platform:
 
 ```powershell
@@ -127,7 +144,8 @@ Project layout:
   registered with the app shell in `modules/registry.py`.
 
 See `docs/` for deeper write-ups of specific subsystems (currently:
-the embedded RDP client's status and the Windows FreeRDP build steps).
+the embedded RDP client's status, the Windows FreeRDP build steps,
+and macOS support status).
 
 ## License
 

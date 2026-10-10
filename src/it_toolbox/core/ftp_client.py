@@ -29,6 +29,7 @@ import stat as stat_module
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 import paramiko
 
@@ -240,6 +241,17 @@ class SftpSession:
 
     def upload(self, local_path: str, remote_path: str, progress: ProgressCallback | None = None) -> None:
         self._sftp.put(local_path, remote_path, callback=progress)
+
+    def upload_fileobj(self, fileobj: BinaryIO, remote_path: str, size: int) -> None:
+        """Streams `fileobj` (read in chunks until EOF) to `remote_path`."""
+        self._sftp.putfo(fileobj, remote_path, file_size=size)
+
+    def download_fileobj(self, remote_path: str, fileobj: BinaryIO) -> None:
+        """Streams `remote_path` into `fileobj` chunk by chunk."""
+        self._sftp.getfo(remote_path, fileobj)
+
+    def stat(self, path: str) -> paramiko.SFTPAttributes:
+        return self._sftp.stat(path)
 
     def mkdir(self, path: str) -> None:
         self._sftp.mkdir(path)

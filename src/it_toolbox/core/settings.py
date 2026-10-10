@@ -786,3 +786,49 @@ def load_recent_mbox_files() -> list[str]:
 
 def save_recent_mbox_files(files: list[str]) -> None:
     recent_mbox_files_path().write_text(json.dumps(files[:RECENT_MBOX_FILES_LIMIT]))
+
+
+def sftp_server_test_defaults_path() -> Path:
+    return data_dir() / "sftp_server_test.json"
+
+
+def load_sftp_server_test_defaults() -> dict:
+    """The SFTP Server Test form as last started (host, port, username,
+    key path, worker count, ...), to prefill the next test tab. Never
+    includes the password."""
+    path = sftp_server_test_defaults_path()
+    if not path.is_file():
+        return {}
+    try:
+        defaults = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return defaults if isinstance(defaults, dict) else {}
+
+
+def save_sftp_server_test_defaults(defaults: dict) -> None:
+    sftp_server_test_defaults_path().write_text(json.dumps(defaults))
+
+
+def sftp_server_test_configs_path() -> Path:
+    return data_dir() / "sftp_server_test_configs.json"
+
+
+def load_sftp_server_test_configs() -> dict[str, dict]:
+    """Named SFTP Server Test configurations the user saved, name -> the
+    same fields as load_sftp_server_test_defaults(). Never includes
+    passwords."""
+    path = sftp_server_test_configs_path()
+    if not path.is_file():
+        return {}
+    try:
+        configs = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(configs, dict):
+        return {}
+    return {name: values for name, values in configs.items() if isinstance(values, dict)}
+
+
+def save_sftp_server_test_configs(configs: dict[str, dict]) -> None:
+    sftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
