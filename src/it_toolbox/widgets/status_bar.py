@@ -9,15 +9,22 @@ no_window_kwargs change) still shows that something is happening.
 Several operations can be in flight at once (an upload in one tab, a
 listing in another): the bar shows the most recently started one still
 running, and only falls back to a finish message or "Ready" once nothing
-is left. Every call is a no-op where there's no main window (standalone
+is left. A task that knows how far it's got can also drive a progress
+bar with a percentage at the bar's right edge:
+
+    task.set_progress(42)
+
+The bar follows the most recently started running task that has
+reported progress, and hides once none has. Every call is a no-op where there's no main window (standalone
 widgets, most tests).
 """
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QMainWindow, QStatusBar, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QProgressBar, QStatusBar, QWidget
 
 IDLE_MESSAGE = "Ready"
 FINISH_MESSAGE_MS = 5000
+PROGRESS_BAR_NAME = "itToolboxStatusProgress"
 
 
 def _find_status_bar(widget: QWidget) -> QStatusBar | None:
@@ -42,7 +49,19 @@ class StatusTask:
     def __init__(self, status_bar: QStatusBar | None, message: str) -> None:
         self._status_bar = status_bar
         self.message = message
+        self.progress: int | None = None
         self._finished = False
+
+    def set_progress(self, percent: int) -> None:
+        """Shows this task's progress (0-100) in the status bar's progress
+        bar. Safe to call after finish() or after the window is gone."""
+        if self._finished or self._status_bar is None:
+            return
+        self.progress = max(0, min(100, int(percent)))
+        try:
+            _update_progress_bar(self._status_bar)
+        except RuntimeError:
+            pass  # window torn down before the operation finished
 
     def finish(self, message: str = "") -> None:
         """Takes this task off the bar, showing `message` for a few seconds
@@ -56,6 +75,7 @@ class StatusTask:
             running = _running(status_bar)
             if self in running:
                 running.remove(self)
+            _update_progress_bar(status_bar)
             if running:
                 status_bar.showMessage(running[-1].message)
                 return
@@ -66,6 +86,33 @@ class StatusTask:
             QTimer.singleShot(
                 FINISH_MESSAGE_MS, status_bar, lambda: _reset_if_idle(status_bar, message)
             )
+
+
+def _progress_bar(status_bar: QStatusBar) -> QProgressBar:
+    bar = status_bar.findChild(QProgressBar, PROGRESS_BAR_NAME)
+    if bar is None:
+        bar = QProgressBar()
+        bar.setObjectName(PROGRESS_BAR_NAME)
+        bar.setRange(0, 100)
+        bar.setFormat("%p%")
+        bar.setMaximumWidth(200)
+        bar.hide()
+        # Permanent (right-hand) rather than a normal widget, which
+        # showMessage() would cover up.
+        status_bar.addPermanentWidget(bar)
+    return bar
+
+
+def _update_progress_bar(status_bar: QStatusBar) -> None:
+    with_progress = [task for task in _running(status_bar) if task.progress is not None]
+    bar = _progress_bar(status_bar)
+    if not with_progress:
+        bar.hide()
+        return
+    task = with_progress[-1]
+    bar.setValue(task.progress)
+    bar.setToolTip(task.message)
+    bar.show()
 
 
 def _reset_if_idle(status_bar: QStatusBar, message: str) -> None:

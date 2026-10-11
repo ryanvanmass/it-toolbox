@@ -1,8 +1,9 @@
 # Cutting a release
 
-it-toolbox is distributed as source (`pip install` from a git checkout)
-on Windows/macOS, plus a `.deb`/`.rpm` on Linux (amd64 only — see
-"Linux packages" below). A "release" here is a version bump plus a
+it-toolbox is distributed as a `.deb`/`.rpm` on Linux (amd64 only — see
+"Linux packages" below), a `setup.exe` on Windows, and a `.dmg` on macOS
+(Apple Silicon only — see "macOS packages" below), plus as source (`pip
+install` from a git checkout) anywhere. A "release" here is a version bump plus a
 GitHub Release, which exists so the app's Settings page (App Updates
 section) has something to compare the installed version against.
 
@@ -26,9 +27,10 @@ section) has something to compare the installed version against.
    ```
 
    Pushing the tag triggers `.github/workflows/release.yml`, which builds
-   the Linux `.deb`/`.rpm` (via `.github/workflows/package-linux.yml`)
-   and the Windows installer (via `.github/workflows/package-windows.yml`)
-   and publishes a GitHub Release for `vX.Y.Z` with auto-generated
+   the Linux `.deb`/`.rpm` (via `.github/workflows/package-linux.yml`),
+   the Windows installer (via `.github/workflows/package-windows.yml`)
+   and the macOS `.dmg` (via `.github/workflows/package-macos.yml`), and
+   publishes a GitHub Release for `vX.Y.Z` with auto-generated
    release notes (from commits since the previous tag) plus those
    packages attached as downloadable assets.
 
@@ -96,6 +98,61 @@ can also be triggered manually (`workflow_dispatch`, no release side
 effect) to test packaging changes before they touch a real release. It's
 wired into `release.yml` and has shipped real installers since v0.2.6,
 confirmed working against a real Windows environment.
+
+## macOS packages
+
+`packaging/macos/build.sh` builds an Apple Silicon (arm64) `IT
+Toolbox.app` inside a drag-to-Applications `.dmg`, on the same
+philosophy as the Windows installer: a plain, unmodified interpreter
+(a pinned, checksummed
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+CPython — relocatable, which a venv symlinking a system Python is not)
+with it-toolbox and its dependencies `pip install`'d into it at build
+time, inside `Contents/Resources/python/`. `Contents/MacOS/it-toolbox`
+(`packaging/macos/launcher.sh`) borrows the login shell's `PATH` — a
+Finder/Dock launch otherwise only sees `/usr/bin:/bin:/usr/sbin:/sbin`,
+hiding Homebrew's `gcloud`/`rclone`/FreeRDP — and execs the interpreter
+through a `Contents/MacOS/python` symlink, so macOS associates the
+process with the bundle (Dock name and icon) rather than a bare
+"python". Bump the Python version deliberately (`PY_VERSION`,
+`PBS_RELEASE` and `PBS_SHA256` at the top of the script, from that
+release's `SHA256SUMS`), in step with `build.ps1`'s `$PyVersion`.
+
+FreeRDP is not bundled: embedded RDP needs `brew install freerdp`.
+Without it the app still starts, and Connection Manager reports "RDP
+unavailable" when you try to connect, the same as on any platform when
+the libraries are missing. Settings > Remote Desktop > FreeRDP (macOS)
+shows whether they were found.
+
+The bundle is **ad-hoc signed only** (`codesign --sign -` — Apple
+Silicon won't run unsigned arm64 code at all), not Developer ID signed or
+notarized. So a `.dmg` downloaded with a browser is quarantined and
+Gatekeeper blocks the first launch with an "unidentified developer" /
+"damaged" message; open it once with right-click > Open (on macOS 15+,
+System Settings > Privacy & Security > Open Anyway), or clear the
+quarantine flag:
+
+```
+xattr -dr com.apple.quarantine "/Applications/IT Toolbox.app"
+```
+
+Updates installed in-app (Settings > App Updates > Download & Install)
+don't hit this: `core/update_checker.py` downloads the `.dmg` itself, so
+it carries no quarantine flag. That path mounts the `.dmg`, stages the
+new bundle, and leaves a detached helper to swap it in once the app
+quits and relaunch it — the same "get out of the installer's way" shape
+as the Windows updater. It's only offered when running from the `.app`
+(never from a source install).
+
+`.github/workflows/package-macos.yml` runs the script on a `macos-14`
+(arm64) runner followed by `packaging/macos/smoke_test.sh`, which
+verifies the signature, imports every native-extension dependency
+through the bundled interpreter and launches the app headless
+(`QT_QPA_PLATFORM=offscreen`), so a bundle that can't start fails CI. It
+also runs on PRs touching `packaging/macos/`, and can be triggered
+manually (`workflow_dispatch`). None of that proves real RDP or update
+behaviour — see `docs/macos-status.md` for what still needs a
+person on a Mac.
 
 ## Linux packages
 

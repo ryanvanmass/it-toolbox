@@ -136,6 +136,43 @@ def _part_text(part: EmailMessage) -> str:
     return content if isinstance(content, str) else ""
 
 
+def message_detail(message: EmailMessage, key: int = 0) -> MessageDetail:
+    """The headers, first text/plain and text/html bodies, and attachment
+    list of a parsed message. Shared by the Mbox Browser and EML Viewer."""
+    headers = [
+        (name, decode_header_value(message.get(name)))
+        for name in _SHOWN_HEADERS
+        if message.get(name)
+    ]
+    text_body = html_body = None
+    attachments = []
+    for part in message.walk():
+        if part.is_multipart():
+            continue
+        if _is_attachment(part):
+            payload = part.get_payload(decode=True) or b""
+            attachments.append(
+                Attachment(
+                    index=len(attachments),
+                    filename=part.get_filename() or f"attachment-{len(attachments) + 1}",
+                    content_type=part.get_content_type(),
+                    size=len(payload),
+                )
+            )
+        elif part.get_content_type() == "text/plain" and text_body is None:
+            text_body = _part_text(part)
+        elif part.get_content_type() == "text/html" and html_body is None:
+            html_body = _part_text(part)
+    return MessageDetail(key, headers, text_body, html_body, attachments)
+
+
+def attachment_bytes(message: EmailMessage, index: int) -> bytes:
+    """Decoded content of the message's `index`th attachment, numbered as
+    in message_detail()."""
+    parts = [p for p in message.walk() if _is_attachment(p)]
+    return parts[index].get_payload(decode=True) or b""
+
+
 #: index() progress callback: (phase, done, total). Phase is SCANNING
 #: (done/total in bytes) and then READING (done/total in messages).
 ProgressCallback = Callable[[str, int, int], None]
@@ -246,36 +283,10 @@ class MboxReader:
         return summaries
 
     def load(self, key: int) -> MessageDetail:
-        message = self._message(key)
-        headers = [
-            (name, decode_header_value(message.get(name)))
-            for name in _SHOWN_HEADERS
-            if message.get(name)
-        ]
-        text_body = html_body = None
-        attachments = []
-        for part in message.walk():
-            if part.is_multipart():
-                continue
-            if _is_attachment(part):
-                payload = part.get_payload(decode=True) or b""
-                attachments.append(
-                    Attachment(
-                        index=len(attachments),
-                        filename=part.get_filename() or f"attachment-{len(attachments) + 1}",
-                        content_type=part.get_content_type(),
-                        size=len(payload),
-                    )
-                )
-            elif part.get_content_type() == "text/plain" and text_body is None:
-                text_body = _part_text(part)
-            elif part.get_content_type() == "text/html" and html_body is None:
-                html_body = _part_text(part)
-        return MessageDetail(key, headers, text_body, html_body, attachments)
+        return message_detail(self._message(key), key)
 
     def attachment_bytes(self, key: int, index: int) -> bytes:
-        parts = [p for p in self._message(key).walk() if _is_attachment(p)]
-        return parts[index].get_payload(decode=True) or b""
+        return attachment_bytes(self._message(key), index)
 
     def body_text(self, key: int) -> str:
         """All text/plain and text/html content of a message, flattened
