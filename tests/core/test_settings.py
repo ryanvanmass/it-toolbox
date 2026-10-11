@@ -627,3 +627,32 @@ def test_corrupt_automations_file_falls_back_to_empty(monkeypatch, tmp_path):
     settings.automations_path().write_text("{not json")
 
     assert settings.load_automations() == []
+
+
+def test_rdp_shared_folder_defaults_to_downloads_when_never_set(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(settings.Path, "home", lambda: tmp_path)
+    (tmp_path / "Downloads").mkdir()
+    assert settings.load_rdp_shared_folder() == str(tmp_path / "Downloads")
+
+
+def test_rdp_shared_folder_is_none_when_default_downloads_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(settings.Path, "home", lambda: tmp_path)
+    assert settings.load_rdp_shared_folder() is None
+
+
+def test_save_and_load_rdp_shared_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", lambda: tmp_path)
+    shared = tmp_path / "transfer"
+    shared.mkdir()
+    settings.save_rdp_shared_folder(str(shared))
+    assert settings.load_rdp_shared_folder() == str(shared)
+
+
+def test_rdp_shared_folder_turned_off_stays_off(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(settings.Path, "home", lambda: tmp_path)
+    (tmp_path / "Downloads").mkdir()
+    settings.save_rdp_shared_folder(None)
+    assert settings.load_rdp_shared_folder() is None
