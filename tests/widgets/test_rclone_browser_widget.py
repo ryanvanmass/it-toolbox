@@ -413,3 +413,46 @@ def test_upload_reports_progress_in_the_main_window_status_bar(qtbot, monkeypatc
         lambda: window.statusBar().currentMessage() in ("Uploaded local.txt", "Ready"),
         timeout=2000,
     )
+
+
+def test_download_shows_progress_bar_with_percentage(qtbot, monkeypatch):
+    import threading
+
+    from PySide6.QtWidgets import QMainWindow, QProgressBar
+
+    import it_toolbox.widgets.rclone_browser_widget as module
+    from it_toolbox.widgets import status_bar
+
+    window = QMainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(module.rclone_client, "list_directory", lambda remote, path: [])
+    browser = RcloneBrowserWidget("myRemote")
+    window.setCentralWidget(browser)
+    window.show()
+
+    monkeypatch.setattr(
+        module.QFileDialog, "getSaveFileName", lambda *a, **k: ("/tmp/big.iso", "")
+    )
+    reached_half = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_download(remote, path, dest, on_progress):
+        calls.append((remote, path, dest))
+        on_progress(50)
+        reached_half.set()
+        release.wait(2)
+        on_progress(100)
+
+    monkeypatch.setattr(module.rclone_client, "download", fake_download)
+
+    browser._download(RcloneEntry(name="big.iso", path="big.iso", is_dir=False, size=100))
+    bar = window.statusBar().findChild(QProgressBar, status_bar.PROGRESS_BAR_NAME)
+    assert bar.isVisible()
+    qtbot.waitUntil(lambda: bar.value() == 50, timeout=2000)
+    assert bar.text() == "50%"
+
+    release.set()
+    qtbot.waitUntil(lambda: not bar.isVisible(), timeout=2000)
+    assert window.statusBar().currentMessage() == "Downloaded big.iso"
+    assert calls == [("myRemote", "big.iso", "/tmp/big.iso")]

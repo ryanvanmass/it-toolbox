@@ -343,6 +343,107 @@ def test_download_invokes_copyto(monkeypatch):
     assert captured["cmd"] == ["rclone", "copyto", "myRemote:path/to/file.txt", "/tmp/dest.txt"]
 
 
+class _FakePopen:
+    def __init__(self, stderr_lines, returncode=0):
+        self.stderr = iter(stderr_lines)
+        self._returncode = returncode
+
+    def wait(self):
+        return self._returncode
+
+
+def _fake_stderr(lines):
+    class _Stream(list):
+        def close(self):
+            pass
+
+    return _Stream(lines)
+
+
+def _stats_line(done, total):
+    return json.dumps({"level": "notice", "msg": "", "stats": {"bytes": done, "totalBytes": total}})
+
+
+def test_download_with_progress_reports_percentages_from_json_stats(monkeypatch):
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        process = _FakePopen([])
+        process.stderr = _fake_stderr(
+            [
+                json.dumps({"level": "notice", "msg": "Config file not found"}) + "\n",
+                _stats_line(250, 1000) + "\n",
+                _stats_line(700, 1000) + "\n",
+            ]
+        )
+        return process
+
+    monkeypatch.setattr(rclone_client.subprocess, "Popen", fake_popen)
+    reported = []
+
+    rclone_client.download("myRemote", "a/big.iso", "/tmp/big.iso", on_progress=reported.append)
+
+    assert reported == [25, 70, 100]
+    assert captured["cmd"][:4] == ["rclone", "copyto", "myRemote:a/big.iso", "/tmp/big.iso"]
+    assert "--use-json-log" in captured["cmd"]
+    assert captured["kwargs"]["stdout"] is subprocess.DEVNULL
+
+
+def test_download_with_progress_routes_through_no_window_kwargs(monkeypatch):
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+        process = _FakePopen([])
+        process.stderr = _fake_stderr([])
+        return process
+
+    monkeypatch.setattr(rclone_client, "no_window_kwargs", lambda: {"creationflags": 0x08000000})
+    monkeypatch.setattr(rclone_client.subprocess, "Popen", fake_popen)
+
+    rclone_client.download("r", "f", "/tmp/f", on_progress=lambda _: None)
+
+    assert captured["creationflags"] == 0x08000000
+
+
+def test_download_with_progress_raises_rclone_error_message_on_failure(monkeypatch):
+    def fake_popen(cmd, **kwargs):
+        process = _FakePopen([], returncode=1)
+        process.stderr = _fake_stderr(
+            [json.dumps({"level": "error", "msg": "object not found"}) + "\n"]
+        )
+        return process
+
+    monkeypatch.setattr(rclone_client.subprocess, "Popen", fake_popen)
+    reported = []
+
+    with pytest.raises(rclone_client.RcloneApiError, match="object not found"):
+        rclone_client.download("r", "missing", "/tmp/x", on_progress=reported.append)
+    assert reported == []
+
+
+def test_download_with_progress_raises_when_rclone_missing(monkeypatch):
+    monkeypatch.setattr(rclone_client.shutil, "which", lambda name: None)
+    with pytest.raises(rclone_client.RcloneApiError, match="not found"):
+        rclone_client.download("r", "f", "/tmp/f", on_progress=lambda _: None)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        (_stats_line(1, 3), 33),
+        (_stats_line(5, 0), None),  # remote that doesn't report sizes
+        (json.dumps({"level": "notice", "msg": "hi"}), None),
+        ("not json at all", None),
+        ("[1, 2]", None),
+    ],
+)
+def test_parse_progress(line, expected):
+    assert rclone_client._parse_progress(line) == expected
+
+
 def test_upload_invokes_copyto_local_to_remote(monkeypatch):
     captured = {}
 

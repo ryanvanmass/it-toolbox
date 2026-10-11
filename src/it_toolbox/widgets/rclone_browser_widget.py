@@ -205,8 +205,12 @@ class RcloneBrowserWidget(QWidget):
         if not dest:
             return
         task = status_bar.begin(self, f"Downloading {entry.name} from {self._remote_name}…")
-        async_utils.run_in_background(
-            lambda: rclone_client.download(self._remote_name, full_path, dest),
+        task.set_progress(0)
+        async_utils.run_in_background_with_progress(
+            lambda report: rclone_client.download(
+                self._remote_name, full_path, dest, on_progress=report
+            ),
+            on_progress=task.set_progress,
             on_result=lambda _: task.finish(f"Downloaded {entry.name}"),
             on_error=lambda error: self._on_error(error, task, f"Download of {entry.name} failed"),
         )
