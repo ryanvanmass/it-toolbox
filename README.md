@@ -56,6 +56,15 @@ connection manager for RDP, SSH, and Cloud Storage.
     FileZilla-Server-style **Live Traffic** view: connected sessions
     (with Disconnect) and every FTP/SFTP command and response as it
     happens, from an extra ProFTPD log it can turn on and off.
+  - **Hosting Manager** — manages a web server set up by the
+    [cockpit-hosting](https://git.bonkcloud.lol/RyanVanMass/cockpit-hosting)
+    Cockpit module over SSH, through that module's own helper, so both
+    can be used side by side: sites (static, PHP, reverse proxy,
+    Node.js, Python, container) with domains, PHP settings, app
+    start/stop and custom nginx directives, SSL (Let's Encrypt over
+    HTTP or DNS, or your own certificate), databases, cron jobs, SFTP
+    access, logs, WordPress/Nextcloud deployment, malware scanning, and
+    installing the server stack.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools
