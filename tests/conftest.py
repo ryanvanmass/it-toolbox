@@ -114,3 +114,16 @@ def sample_mbox(tmp_path):
         return path
 
     return make
+
+
+@pytest.fixture
+def sample_eml(tmp_path):
+    """Factory writing the "Invoice" sample message (plain text body plus
+    an invoice.pdf attachment) as an .eml file and returning its path."""
+
+    def make(name="invoice.eml"):
+        path = tmp_path / name
+        path.write_bytes(_sample_messages()[1].as_bytes())
+        return path
+
+    return make
