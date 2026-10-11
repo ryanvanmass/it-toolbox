@@ -65,6 +65,17 @@ connection manager for RDP, SSH, and Cloud Storage.
     HTTP or DNS, or your own certificate), databases, cron jobs, SFTP
     access, logs, WordPress/Nextcloud deployment, malware scanning, and
     installing the server stack.
+  - **Scheduler Manager** — manages the automated tasks of a server
+    running the [cockpit-scheduler](https://github.com/ryanvanmass/cockpit-scheduler)
+    Cockpit module over SSH, through that module's own helper, so both
+    can be used side by side: tasks (an inline script or an existing
+    program, on an hourly/daily/weekly/monthly or custom systemd
+    calendar schedule, checked by systemd with a preview of the next
+    runs) with run as, timeout, environment, retries and a follow-up
+    task; run now, enable/disable, run history and per-run logs; alert
+    channels (webhook, Google Chat, Healthchecks.io) with test alerts;
+    and configuration export/import with a preview, scheduled backups
+    and restore.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools
