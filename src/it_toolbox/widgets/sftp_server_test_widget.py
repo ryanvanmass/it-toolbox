@@ -109,6 +109,17 @@ class _SizeInput(QWidget):
 
 
 class SftpServerTestWidget(QWidget):
+    """Also the base of FtpServerTestWidget, which swaps in FTP through
+    the hooks below (the class attributes, _add_credential_rows,
+    _credential_values/_apply_credential_values, config, _make_test and
+    the settings load/save methods)."""
+
+    tool_name = "SFTP Server Test"
+    protocol = "SFTP"
+    default_port = 22
+    host_placeholder = "sftp.example.com"
+    folder_prefix = StressTest.folder_prefix
+
     title_changed = Signal(str)
     #: A test configuration was saved; the sidebar lists them.
     saved_tests_changed = Signal()
@@ -175,21 +186,13 @@ class SftpServerTestWidget(QWidget):
 
     def _build_form(self) -> None:
         self._host_edit = QLineEdit()
-        self._host_edit.setPlaceholderText("sftp.example.com")
+        self._host_edit.setPlaceholderText(self.host_placeholder)
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1, 65535)
-        self._port_spin.setValue(22)
+        self._port_spin.setValue(self.default_port)
         self._username_edit = QLineEdit()
         self._password_edit = QLineEdit()
         self._password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._password_edit.setPlaceholderText("Leave empty to use a key or the SSH agent")
-        self._key_edit = QLineEdit()
-        self._key_edit.setPlaceholderText("Optional private key file")
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(self._browse_key)
-        key_row = QHBoxLayout()
-        key_row.addWidget(self._key_edit, 1)
-        key_row.addWidget(browse)
         self._remote_dir_edit = QLineEdit()
         self._remote_dir_edit.setPlaceholderText("Home directory")
 
@@ -199,13 +202,13 @@ class SftpServerTestWidget(QWidget):
         form.addRow("Port:", self._port_spin)
         form.addRow("Username:", self._username_edit)
         form.addRow("Password:", self._password_edit)
-        form.addRow("Private key:", key_row)
+        self._add_credential_rows(form)
         form.addRow("Test in folder:", self._remote_dir_edit)
 
         self._workers_spin = QSpinBox()
         self._workers_spin.setRange(1, MAX_WORKERS)
         self._workers_spin.setValue(4)
-        self._workers_spin.setToolTip("Each concurrent action runs on its own SFTP connection.")
+        self._workers_spin.setToolTip(f"Each concurrent action runs on its own {self.protocol} connection.")
         self._min_size = _SizeInput(0, 1)
         self._max_size = _SizeInput(1, 1)
         self._max_size.set_size(1, "MB")
@@ -216,7 +219,7 @@ class SftpServerTestWidget(QWidget):
         self._cleanup_check.setChecked(True)
         explanation = QLabel(
             "Workers upload, download (checking contents), list, stat, rename, create and delete "
-            "files at random inside a new it-toolbox-sftp-test-… folder. Nothing outside it is touched."
+            f"files at random inside a new {self.folder_prefix}-… folder. Nothing outside it is touched."
         )
         explanation.setWordWrap(True)
         explanation.setEnabled(False)
@@ -273,6 +276,24 @@ class SftpServerTestWidget(QWidget):
 
     # -- Form ---------------------------------------------------------------
 
+    def _add_credential_rows(self, form: QFormLayout) -> None:
+        """Rows after Password: for SFTP, the private key."""
+        self._password_edit.setPlaceholderText("Leave empty to use a key or the SSH agent")
+        self._key_edit = QLineEdit()
+        self._key_edit.setPlaceholderText("Optional private key file")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_key)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self._key_edit, 1)
+        key_row.addWidget(browse)
+        form.addRow("Private key:", key_row)
+
+    def _credential_values(self) -> dict:
+        return {"key_path": self._key_edit.text().strip()}
+
+    def _apply_credential_values(self, values: dict) -> None:
+        self._key_edit.setText(str(values.get("key_path", "")))
+
     def _browse_key(self) -> None:
         start = self._key_edit.text() or str(Path.home() / ".ssh")
         path, _ = QFileDialog.getOpenFileName(self, "Choose Private Key", start)
@@ -294,7 +315,7 @@ class SftpServerTestWidget(QWidget):
             "host": self._host_edit.text().strip(),
             "port": self._port_spin.value(),
             "username": self._username_edit.text().strip(),
-            "key_path": self._key_edit.text().strip(),
+            **self._credential_values(),
             "remote_dir": self._remote_dir_edit.text().strip(),
             "workers": self._workers_spin.value(),
             "min_size": min_size,
@@ -307,7 +328,7 @@ class SftpServerTestWidget(QWidget):
     def apply_values(self, values: dict) -> None:
         self._host_edit.setText(str(values.get("host", "")))
         self._username_edit.setText(str(values.get("username", "")))
-        self._key_edit.setText(str(values.get("key_path", "")))
+        self._apply_credential_values(values)
         self._remote_dir_edit.setText(str(values.get("remote_dir", "")))
         for spin, key in [(self._port_spin, "port"), (self._workers_spin, "workers")]:
             if isinstance(values.get(key), int):
@@ -329,17 +350,23 @@ class SftpServerTestWidget(QWidget):
     def _save_defaults(self) -> None:
         settings.save_sftp_server_test_defaults(self.form_values())
 
+    def _load_configs(self) -> dict[str, dict]:
+        return settings.load_sftp_server_test_configs()
+
+    def _save_configs(self, configs: dict[str, dict]) -> None:
+        settings.save_sftp_server_test_configs(configs)
+
     # -- Saved test configurations ------------------------------------------
 
     def load_saved_test(self, name: str) -> bool:
         """Fills the form from the saved test `name`; False if it's gone."""
-        values = settings.load_sftp_server_test_configs().get(name)
+        values = self._load_configs().get(name)
         if values is None:
             return False
         self.apply_values(values)
         self._password_edit.clear()
         self.saved_name = name
-        self.title_changed.emit(f"SFTP Test: {name}")
+        self.title_changed.emit(f"{self.protocol} Test: {name}")
         self._status_label.setText(f"Loaded “{name}”.")
         return True
 
@@ -353,13 +380,13 @@ class SftpServerTestWidget(QWidget):
         name = name.strip()
         if not ok or not name:
             return
-        configs = settings.load_sftp_server_test_configs()
+        configs = self._load_configs()
         if name in configs and name != self.saved_name:
             answer = QMessageBox.question(self, "Save Test", f"Replace the saved test “{name}”?")
             if answer != QMessageBox.StandardButton.Yes:
                 return
         configs[name] = self.form_values()
-        settings.save_sftp_server_test_configs(configs)
+        self._save_configs(configs)
         self.saved_name = name
         self._status_label.setText(f"Saved “{name}”.")
         self.saved_tests_changed.emit()
@@ -377,6 +404,9 @@ class SftpServerTestWidget(QWidget):
             remote_dir=self._remote_dir_edit.text().strip(),
             cleanup=self._cleanup_check.isChecked(),
         )
+
+    def _make_test(self, config) -> StressTest:
+        return StressTest(config)
 
     def _set_state(self, state: str, message: str | None = None) -> None:
         self._state = state
@@ -399,13 +429,13 @@ class SftpServerTestWidget(QWidget):
             return
         config = self.config()
         if not config.host or not config.username:
-            QMessageBox.warning(self, "SFTP Server Test", "Enter a host and a username first.")
+            QMessageBox.warning(self, self.tool_name, "Enter a host and a username first.")
             return
         self._save_defaults()
-        self.title_changed.emit(f"SFTP Test: {config.host}")
-        self._test = StressTest(config)
+        self.title_changed.emit(f"{self.protocol} Test: {config.host}")
+        self._test = self._make_test(config)
         self._set_state(STARTING, f"Connecting to {config.username}@{config.host}:{config.port}…")
-        self._task = status_bar.begin(self, f"SFTP test: connecting to {config.host}…")
+        self._task = status_bar.begin(self, f"{self.protocol} test: connecting to {config.host}…")
         self._prepare(self._test)
 
     def _prepare(self, test: StressTest) -> None:
@@ -438,7 +468,7 @@ class SftpServerTestWidget(QWidget):
         )
         if self._task is not None:
             self._task.finish()
-        self._task = status_bar.begin(self, f"SFTP test running against {test.config.host}…")
+        self._task = status_bar.begin(self, f"{self.protocol} test running against {test.config.host}…")
         self._refresh_stats()
 
     def _on_prepare_error(self, test: StressTest, error: Exception) -> None:
@@ -461,7 +491,7 @@ class SftpServerTestWidget(QWidget):
         else:
             error_text = str(error) or type(error).__name__
         self._test = None
-        self._end_task("SFTP test couldn't start")
+        self._end_task(f"{self.protocol} test couldn't start")
         self._set_state(IDLE, f"Couldn't start the test: {error_text}")
 
     def stop(self) -> None:

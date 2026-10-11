@@ -20,13 +20,14 @@ QThreadPool.globalInstance().setMaxThreadCount(16)
 class _WorkerSignals(QObject):
     result = Signal(object)
     error = Signal(Exception)
+    progress = Signal(object)
 
 
 class _FunctionRunnable(QRunnable):
-    def __init__(self, fn: Callable[[], Any]) -> None:
+    def __init__(self, fn: Callable[[], Any], signals: _WorkerSignals | None = None) -> None:
         super().__init__()
         self.fn = fn
-        self.signals = _WorkerSignals()
+        self.signals = signals or _WorkerSignals()
         # QThreadPool's default autoDelete() destroys this QRunnable itself
         # right after run() returns — from the worker thread. That's fine
         # for the QRunnable, but self.signals is a QObject whose thread
@@ -46,18 +47,19 @@ class _FunctionRunnable(QRunnable):
         try:
             result = self.fn()
         except Exception as exc:  # noqa: BLE001 - reported to caller, not swallowed
-            self._emit_safely(self.signals.error, exc)
+            _emit_safely(self.signals.error, exc)
         else:
-            self._emit_safely(self.signals.result, result)
+            _emit_safely(self.signals.result, result)
 
-    def _emit_safely(self, signal: Signal, value: Any) -> None:
-        # The receiving widget (or the whole app) can be torn down while this
-        # was still running in the background — that's not an error case for
-        # the caller, just a delivery that no longer has anywhere to go.
-        try:
-            signal.emit(value)
-        except RuntimeError:
-            pass
+
+def _emit_safely(signal: Signal, value: Any) -> None:
+    # The receiving widget (or the whole app) can be torn down while this
+    # was still running in the background — that's not an error case for
+    # the caller, just a delivery that no longer has anywhere to go.
+    try:
+        signal.emit(value)
+    except RuntimeError:
+        pass
 
 
 def run_in_background(
@@ -68,8 +70,37 @@ def run_in_background(
     """Run `fn` on a Qt thread-pool thread; deliver the outcome back on the
     calling (Qt main) thread via queued signal connections.
     """
-    runnable = _FunctionRunnable(fn)
+    _start(_FunctionRunnable(fn), on_result, on_error)
 
+
+def run_in_background_with_progress(
+    fn: Callable[[Callable[[Any], None]], Any],
+    on_progress: Callable[[Any], None],
+    on_result: Callable[[Any], None] | None = None,
+    on_error: Callable[[Exception], None] | None = None,
+) -> None:
+    """Like run_in_background, but `fn` is passed a `report(value)` callable
+    it can call from the worker thread as it goes. Each value reaches
+    `on_progress` on the main thread, in order and before the result.
+    """
+    signals = _WorkerSignals()
+
+    def report(value: Any) -> None:
+        # Captures signals rather than the runnable, so there's no
+        # runnable -> fn -> report -> runnable cycle for the garbage
+        # collector to break later, from whichever thread it happens on.
+        _emit_safely(signals.progress, value)
+
+    runnable = _FunctionRunnable(lambda: fn(report), signals)
+    signals.progress.connect(on_progress)
+    _start(runnable, on_result, on_error)
+
+
+def _start(
+    runnable: _FunctionRunnable,
+    on_result: Callable[[Any], None] | None,
+    on_error: Callable[[Exception], None] | None,
+) -> None:
     def cleanup_and_call(callback: Callable[[Any], None] | None, value: Any) -> None:
         # Runs on the main thread — see _FunctionRunnable.__init__.
         _active_runnables.discard(runnable)

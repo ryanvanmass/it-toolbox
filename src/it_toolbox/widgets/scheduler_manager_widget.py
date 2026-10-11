@@ -1,4 +1,4 @@
-"""One Scheduler Manager tab (General Tools): manages the automated tasks of
+"""One Scheduler Manager tab (Cockpit module): manages the automated tasks of
 a server running the user's cockpit-scheduler Cockpit module over SSH,
 with the same features as that module's page -- tasks (inline scripts or
 existing programs on a systemd-timer schedule) with run now, enable and
@@ -181,8 +181,8 @@ class SchedulerManagerWidget(RemoteHelperTab):
     BACKUP_COLUMNS = ("Created", "Kind", "Tasks", "Channels", "Size", "File")
 
     def __init__(self, server: sm.SchedulerServer, connection_factory=sm.SchedulerConnection,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(server, connection_factory, parent)
+                 parent: QWidget | None = None, credentials: dict | None = None) -> None:
+        super().__init__(server, connection_factory, parent, credentials)
         self.tasks: list[dict] = []
         self.channels: list[dict] = []
         self.backups: list[dict] = []

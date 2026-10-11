@@ -1,4 +1,4 @@
-"""One ProFTPD Manager tab (General Tools): manages a server set up by the
+"""One ProFTPD Manager tab (Cockpit module): manages a server set up by the
 cockpit-proftpd Cockpit module over SSH, with the same features as that
 module's page (setup, users, groups, virtual directories, firewall,
 recent transfers) plus a FileZilla-Server-style Live Traffic view. See
@@ -781,11 +781,13 @@ class ProftpdManagerWidget(QWidget):
         server: pm.ProftpdServer,
         connection_factory=pm.ProftpdConnection,
         parent: QWidget | None = None,
+        credentials: dict | None = None,
     ) -> None:
         super().__init__(parent)
         self.server = server
         self._connection_factory = connection_factory
-        self._credentials: dict = {}
+        # Shared with the Cockpit machine tree -- see RemoteHelperTab.
+        self._credentials: dict = credentials if credentials is not None else {}
         self.connection: pm.ProftpdConnection | None = None
         self.users: list[dict] = []
         self._closed = False

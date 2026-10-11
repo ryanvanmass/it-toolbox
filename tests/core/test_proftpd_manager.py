@@ -342,3 +342,15 @@ def test_connect_maps_auth_failures(monkeypatch):
     monkeypatch.setattr(paramiko.SSHClient, "connect", fake_connect_key)
     with pytest.raises(pm.KeyPassphraseRequired):
         pm.ProftpdConnection(_server(key_path="/k")).connect()
+
+
+def test_connect_asks_for_a_password_when_there_is_no_key_to_try(monkeypatch):
+    def fake_connect(self, *args, **kwargs):
+        raise paramiko.SSHException("No authentication methods available")
+
+    monkeypatch.setattr(paramiko.SSHClient, "connect", fake_connect)
+    with pytest.raises(pm.LoginPasswordRequired):
+        pm.ProftpdConnection(_server()).connect()
+    with pytest.raises(pm.ProftpdError) as raised:
+        pm.ProftpdConnection(_server(), password="pw").connect()
+    assert not isinstance(raised.value, pm.LoginPasswordRequired)

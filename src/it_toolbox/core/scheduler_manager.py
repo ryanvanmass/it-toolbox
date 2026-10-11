@@ -1,5 +1,5 @@
 """Remote management of the automated tasks of the user's cockpit-scheduler
-Cockpit module, for the General Tools Scheduler Manager.
+Cockpit module, for the Cockpit Scheduler Manager.
 
 Everything is done by the module's own privileged helper
 (`cockpit-scheduler-helper <subcommand>`, JSON in, one JSON object out),

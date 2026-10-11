@@ -763,16 +763,10 @@ def save_disabled_modules(module_ids: set[str]) -> None:
         path.unlink(missing_ok=True)
 
 
-RECENT_MBOX_FILES_LIMIT = 10
+RECENT_FILES_LIMIT = 10
 
 
-def recent_mbox_files_path() -> Path:
-    return data_dir() / "recent_mbox_files.json"
-
-
-def load_recent_mbox_files() -> list[str]:
-    """Mbox files the Mbox Browser has opened, most recent first."""
-    path = recent_mbox_files_path()
+def _load_recent_files(path: Path) -> list[str]:
     if not path.is_file():
         return []
     try:
@@ -781,11 +775,37 @@ def load_recent_mbox_files() -> list[str]:
         return []
     if not isinstance(files, list):
         return []
-    return [f for f in files if isinstance(f, str)][:RECENT_MBOX_FILES_LIMIT]
+    return [f for f in files if isinstance(f, str)][:RECENT_FILES_LIMIT]
+
+
+def _save_recent_files(path: Path, files: list[str]) -> None:
+    path.write_text(json.dumps(files[:RECENT_FILES_LIMIT]))
+
+
+def recent_mbox_files_path() -> Path:
+    return data_dir() / "recent_mbox_files.json"
+
+
+def load_recent_mbox_files() -> list[str]:
+    """Mbox files the Mbox Browser has opened, most recent first."""
+    return _load_recent_files(recent_mbox_files_path())
 
 
 def save_recent_mbox_files(files: list[str]) -> None:
-    recent_mbox_files_path().write_text(json.dumps(files[:RECENT_MBOX_FILES_LIMIT]))
+    _save_recent_files(recent_mbox_files_path(), files)
+
+
+def recent_eml_files_path() -> Path:
+    return data_dir() / "recent_eml_files.json"
+
+
+def load_recent_eml_files() -> list[str]:
+    """.eml files the EML Viewer has opened, most recent first."""
+    return _load_recent_files(recent_eml_files_path())
+
+
+def save_recent_eml_files(files: list[str]) -> None:
+    _save_recent_files(recent_eml_files_path(), files)
 
 
 def sftp_server_test_defaults_path() -> Path:
@@ -834,12 +854,57 @@ def save_sftp_server_test_configs(configs: dict[str, dict]) -> None:
     sftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
 
 
+def ftp_server_test_defaults_path() -> Path:
+    return data_dir() / "ftp_server_test.json"
+
+
+def load_ftp_server_test_defaults() -> dict:
+    """The FTP Server Test form as last started, like
+    load_sftp_server_test_defaults(). Never includes the password."""
+    path = ftp_server_test_defaults_path()
+    if not path.is_file():
+        return {}
+    try:
+        defaults = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return defaults if isinstance(defaults, dict) else {}
+
+
+def save_ftp_server_test_defaults(defaults: dict) -> None:
+    ftp_server_test_defaults_path().write_text(json.dumps(defaults))
+
+
+def ftp_server_test_configs_path() -> Path:
+    return data_dir() / "ftp_server_test_configs.json"
+
+
+def load_ftp_server_test_configs() -> dict[str, dict]:
+    """Named FTP Server Test configurations, like
+    load_sftp_server_test_configs(). Never includes passwords."""
+    path = ftp_server_test_configs_path()
+    if not path.is_file():
+        return {}
+    try:
+        configs = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(configs, dict):
+        return {}
+    return {name: values for name, values in configs.items() if isinstance(values, dict)}
+
+
+def save_ftp_server_test_configs(configs: dict[str, dict]) -> None:
+    ftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
+
+
 def proftpd_servers_path() -> Path:
     return data_dir() / "proftpd_servers.json"
 
 
 def load_proftpd_servers() -> list[dict]:
-    """Servers saved in the ProFTPD Manager (General Tools), as raw dicts
+    """Servers saved in the ProFTPD Manager back when it lived under General Tools;
+    now only read once, to migrate them into load_cockpit_machines(). As raw dicts
     (see core/proftpd_manager.ProftpdServer.to_dict). No passwords: SSH
     and sudo passwords are only ever prompted for."""
     path = proftpd_servers_path()
@@ -863,7 +928,8 @@ def hosting_servers_path() -> Path:
 
 
 def load_hosting_servers() -> list[dict]:
-    """Servers saved in the Hosting Manager (General Tools), as raw dicts
+    """Servers saved in the Hosting Manager back when it lived under General Tools;
+    now only read once, to migrate them into load_cockpit_machines(). As raw dicts
     (see core/remote_helper.RemoteServer.to_dict). No passwords: SSH
     and sudo passwords are only ever prompted for."""
     path = hosting_servers_path()
@@ -887,7 +953,8 @@ def scheduler_servers_path() -> Path:
 
 
 def load_scheduler_servers() -> list[dict]:
-    """Servers saved in the Scheduler Manager (General Tools), as raw
+    """Servers saved in the Scheduler Manager back when it lived under General Tools;
+    now only read once, to migrate them into load_cockpit_machines(). As raw
     dicts (see core/remote_helper.RemoteServer.to_dict). No passwords."""
     path = scheduler_servers_path()
     if not path.is_file():
@@ -903,3 +970,28 @@ def load_scheduler_servers() -> list[dict]:
 
 def save_scheduler_servers(servers: list[dict]) -> None:
     scheduler_servers_path().write_text(json.dumps(servers))
+
+
+def cockpit_machines_path() -> Path:
+    return data_dir() / "cockpit_machines.json"
+
+
+def load_cockpit_machines() -> list[dict] | None:
+    """Machines saved in the Cockpit module, as raw dicts (see
+    core/cockpit_machines.CockpitMachine.to_dict). None when the list has
+    never been saved -- the caller then migrates the per-tool server lists
+    above, which the managers used before they moved under Cockpit."""
+    path = cockpit_machines_path()
+    if not path.is_file():
+        return None
+    try:
+        machines = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(machines, list):
+        return []
+    return [m for m in machines if isinstance(m, dict)]
+
+
+def save_cockpit_machines(machines: list[dict]) -> None:
+    cockpit_machines_path().write_text(json.dumps(machines))
