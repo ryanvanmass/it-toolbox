@@ -1,6 +1,7 @@
 import json
 import shlex
 
+import paramiko
 import pytest
 
 from it_toolbox.core import remote_helper as rh
@@ -124,3 +125,16 @@ def test_call_without_helper_names_the_module():
     conn = _Scripted(_server(username="root"), [])
     with pytest.raises(rh.RemoteHelperError, match="cockpit-mod helper isn't installed"):
         conn.call("status")
+
+
+def test_connect_asks_for_a_password_when_there_is_no_key_to_try(monkeypatch):
+    def fake_connect(self, *args, **kwargs):
+        raise paramiko.SSHException("No authentication methods available")
+
+    monkeypatch.setattr(paramiko.SSHClient, "connect", fake_connect)
+    server = rh.RemoteServer(name="web", host="web.lan", username="admin")
+    with pytest.raises(rh.LoginPasswordRequired):
+        rh.RemoteHelperConnection(server).connect()
+    with pytest.raises(rh.RemoteHelperError) as raised:
+        rh.RemoteHelperConnection(server, password="pw").connect()
+    assert not isinstance(raised.value, rh.LoginPasswordRequired)

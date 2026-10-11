@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QTabWidget
 from it_toolbox.core import settings
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.cloud_storage.module import CloudStorageModule
+from it_toolbox.modules.cockpit.module import CockpitModule
 from it_toolbox.modules.connection_manager.module import ConnectionManagerModule
 from it_toolbox.modules.general_tools.module import GeneralToolsModule
 from it_toolbox.modules.identity_management.module import IdentityManagementModule
@@ -19,6 +20,7 @@ OPTIONAL_MODULES: list[type[ToolModule]] = [
     ShellLauncherModule,
     CloudStorageModule,
     GeneralToolsModule,
+    CockpitModule,
     IdentityManagementModule,
 ]
 
@@ -44,6 +46,7 @@ def load_modules(tabs: QTabWidget) -> list[ToolModule]:
         (ShellLauncherModule, lambda: ShellLauncherModule(tabs)),
         (CloudStorageModule, lambda: CloudStorageModule(tabs)),
         (GeneralToolsModule, lambda: GeneralToolsModule(tabs)),
+        (CockpitModule, lambda: CockpitModule(tabs)),
         (IdentityManagementModule, IdentityManagementModule),
     ]
     modules = [create() for module_class, create in candidates if module_class.id not in disabled]
