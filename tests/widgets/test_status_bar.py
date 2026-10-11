@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QWidget
+from PySide6.QtWidgets import QMainWindow, QProgressBar, QWidget
 
 from it_toolbox.widgets import status_bar
 
@@ -67,3 +67,56 @@ def test_no_main_window_is_a_noop(qtbot):
 
     task = status_bar.begin(widget, "Loading…")
     task.finish("Done")
+
+
+def _progress_bar(window):
+    return window.statusBar().findChild(QProgressBar, status_bar.PROGRESS_BAR_NAME)
+
+
+def test_set_progress_shows_bar_with_percentage_until_finished(qtbot):
+    window, child = _window_with_child(qtbot)
+    window.show()
+
+    task = status_bar.begin(child, "Downloading big.iso…")
+    task.set_progress(42)
+    bar = _progress_bar(window)
+    assert bar.isVisible()
+    assert bar.value() == 42
+    assert bar.text() == "42%"
+
+    task.finish("Downloaded big.iso")
+    assert not bar.isVisible()
+
+
+def test_progress_bar_follows_latest_task_with_progress(qtbot):
+    window, child = _window_with_child(qtbot)
+    window.show()
+
+    first = status_bar.begin(child, "Downloading a…")
+    first.set_progress(10)
+    second = status_bar.begin(child, "Downloading b…")
+    second.set_progress(80)
+    status_bar.begin(child, "Loading gdrive:…")  # no progress; bar keeps b
+    bar = _progress_bar(window)
+    assert bar.value() == 80
+
+    second.finish()
+    assert bar.isVisible() and bar.value() == 10
+
+
+def test_set_progress_after_finish_is_ignored(qtbot):
+    window, child = _window_with_child(qtbot)
+    window.show()
+
+    task = status_bar.begin(child, "Downloading a…")
+    task.finish()
+    task.set_progress(50)
+
+    bar = _progress_bar(window)
+    assert bar is None or not bar.isVisible()
+
+
+def test_set_progress_without_main_window_is_a_noop(qtbot):
+    widget = QWidget()
+    qtbot.addWidget(widget)
+    status_bar.begin(widget, "Downloading a…").set_progress(50)

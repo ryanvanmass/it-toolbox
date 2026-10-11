@@ -49,3 +49,21 @@ def test_many_concurrent_background_calls_all_complete_without_crashing(qtbot):
 
     assert sorted(completed) == [i * 2 for i in range(N)]
     assert async_utils._active_runnables == set()
+
+
+def test_run_in_background_with_progress_delivers_progress_before_result(qtbot):
+    events = []
+
+    def call(report):
+        for percent in (10, 50, 90):
+            report(percent)
+        return "done"
+
+    async_utils.run_in_background_with_progress(
+        call,
+        on_progress=lambda value: events.append(("progress", value)),
+        on_result=lambda value: events.append(("result", value)),
+    )
+    qtbot.waitUntil(lambda: ("result", "done") in events, timeout=2000)
+
+    assert events == [("progress", 10), ("progress", 50), ("progress", 90), ("result", "done")]
