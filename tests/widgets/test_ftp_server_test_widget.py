@@ -132,3 +132,35 @@ def test_saved_tests_go_to_the_ftp_list(qtbot, monkeypatch):
     qtbot.addWidget(other)
     assert other.load_saved_test("NAS")
     assert other._host_edit.text() == "ftp.example.com"
+
+
+def test_implicit_ftps_and_active_mode(qtbot):
+    widget = _make(qtbot)
+
+    widget._security_combo.setCurrentIndex(widget._security_combo.findData("implicit_tls"))
+    widget._passive_check.setChecked(False)
+    config = widget.config()
+
+    assert (config.implicit_tls, config.use_tls, config.passive) == (True, False, False)
+    assert config.port == 990  # followed the mode from the default 21
+    widget._security_combo.setCurrentIndex(widget._security_combo.findData("none"))
+    assert widget._port_spin.value() == 21
+
+
+def test_a_custom_port_is_kept_when_switching_modes(qtbot):
+    widget = _make(qtbot)
+    widget._port_spin.setValue(2121)
+
+    widget._security_combo.setCurrentIndex(widget._security_combo.findData("implicit_tls"))
+
+    assert widget._port_spin.value() == 2121
+
+
+def test_saved_mode_and_port_are_restored(qtbot):
+    widget = _make(qtbot)
+
+    widget.apply_values({"security": "implicit_tls", "port": 9990, "passive": False})
+
+    assert widget._security_combo.currentData() == "implicit_tls"
+    assert widget._port_spin.value() == 9990
+    assert widget._passive_check.isChecked() is False

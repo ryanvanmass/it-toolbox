@@ -520,3 +520,14 @@ def test_parse_list_line_handles_dos_style():
         "My Files", True
     )
     assert ftp_client._parse_list_line("10-10-26  12:00PM                  42 a.txt").size == 42
+
+
+def test_ftp_session_active_mode(monkeypatch):
+    fake = _FakeFtp()
+    modes = []
+    fake.set_pasv = modes.append
+    monkeypatch.setattr(ftplib, "FTP", lambda: fake)
+
+    ftp_client.FtpSession("example.com", 21, "alice", passive=False).connect()
+
+    assert modes == [False]

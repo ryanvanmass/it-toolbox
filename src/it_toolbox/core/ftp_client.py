@@ -25,6 +25,7 @@ import ftplib
 import hashlib
 import os
 import posixpath
+import socket
 import stat as stat_module
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -341,6 +342,28 @@ class _FtpTlsWithSessionReuse(ftplib.FTP_TLS):
         return conn, size
 
 
+class _ImplicitFtpTls(_FtpTlsWithSessionReuse):
+    """Implicit FTPS (usually port 990): TLS from the first byte, instead
+    of plain FTP upgraded with AUTH TLS. login() then skips AUTH, since
+    the socket is already wrapped."""
+
+    def connect(self, host="", port=0, timeout=-999, source_address=None):
+        if host:
+            self.host = host
+        if port > 0:
+            self.port = port
+        if timeout != -999:
+            self.timeout = timeout
+        if source_address is not None:
+            self.source_address = source_address
+        sock = socket.create_connection((self.host, self.port), self.timeout, source_address=self.source_address)
+        self.af = sock.family
+        self.sock = self.context.wrap_socket(sock, server_hostname=self.host)
+        self.file = self.sock.makefile("r", encoding=self.encoding)
+        self.welcome = self.getresp()
+        return self.welcome
+
+
 class FtpSession:
     """One plain-FTP (or FTPS, if use_tls) connection via the stdlib
     ftplib. Directory listing uses MLSD (RFC 3659), falling back to
@@ -356,23 +379,35 @@ class FtpSession:
         username: str,
         password: str = "",
         use_tls: bool = False,
+        implicit_tls: bool = False,
+        passive: bool = True,
     ) -> None:
         self._host = host
         self._port = port
         self._username = username or "anonymous"
         self._password = password
-        self._use_tls = use_tls
+        # implicit_tls implies TLS; use_tls alone is explicit (AUTH TLS).
+        self._use_tls = use_tls or implicit_tls
+        self._implicit_tls = implicit_tls
+        # Active mode has the server connect back to us for every
+        # transfer, which only works without a NAT/firewall in between.
+        self._passive = passive
         self._ftp: ftplib.FTP | None = None
         self._has_mlsd = True
 
     def connect(self) -> None:
-        ftp = _FtpTlsWithSessionReuse() if self._use_tls else ftplib.FTP()
+        if self._implicit_tls:
+            ftp = _ImplicitFtpTls()
+        elif self._use_tls:
+            ftp = _FtpTlsWithSessionReuse()
+        else:
+            ftp = ftplib.FTP()
         try:
             ftp.connect(self._host, self._port, timeout=15)
             ftp.login(self._username, self._password)
             if self._use_tls:
                 ftp.prot_p()
-            ftp.set_pasv(True)
+            ftp.set_pasv(self._passive)
         except ftplib.all_errors as exc:
             raise FtpClientError(f"Couldn't connect to {self._host}:{self._port} — {exc}") from exc
         self._ftp = ftp

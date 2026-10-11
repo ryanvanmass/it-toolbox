@@ -21,6 +21,8 @@ class FtpStressTestConfig:
     username: str = ""
     password: str | None = None
     use_tls: bool = False  # explicit FTPS (AUTH TLS) for control and data
+    implicit_tls: bool = False  # implicit FTPS (TLS from the start, port 990)
+    passive: bool = True
     workers: int = 4
     min_file_size: int = 1024
     max_file_size: int = 1024 * 1024
@@ -28,7 +30,15 @@ class FtpStressTestConfig:
     cleanup: bool = True
 
     def session(self) -> FtpSession:
-        return FtpSession(self.host, self.port, self.username, password=self.password or "", use_tls=self.use_tls)
+        return FtpSession(
+            self.host,
+            self.port,
+            self.username,
+            password=self.password or "",
+            use_tls=self.use_tls,
+            implicit_tls=self.implicit_tls,
+            passive=self.passive,
+        )
 
 
 def is_ftp_connection_lost(exc: Exception) -> bool:

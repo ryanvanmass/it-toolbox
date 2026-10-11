@@ -61,3 +61,9 @@ def test_runs_the_shared_engine_in_an_ftp_test_folder():
     assert snapshot.total_ops >= 200
     assert snapshot.total_errors == 0
     assert not any(p.startswith(root) for p in (*server.files, *server.dirs))
+
+
+def test_config_passes_implicit_tls_and_active_mode():
+    session = FtpStressTestConfig("h", 990, "u", implicit_tls=True, passive=False).session()
+
+    assert (session._use_tls, session._implicit_tls, session._passive) == (True, True, False)

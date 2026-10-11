@@ -48,7 +48,8 @@ connection manager for RDP, SSH, and Cloud Storage.
     you stop it, with live operations/sec, errors and latency per
     operation. The folder is removed afterwards unless you untick that.
   - **FTP Server Test** — the same load test for FTP servers, over plain
-    FTP or explicit FTPS (AUTH TLS, with encrypted transfers), in a fresh
+    FTP, explicit FTPS (AUTH TLS) or implicit FTPS (port 990), with
+    encrypted transfers and passive or active mode, in a fresh
     `it-toolbox-ftp-test-…` folder. Works with servers that lack MLSD
     (vsftpd, IIS) too.
   - **ProFTPD Manager** — manages a server set up by the
