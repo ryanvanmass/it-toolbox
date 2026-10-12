@@ -1,7 +1,7 @@
 import pytest
 
 from it_toolbox.core import settings
-from it_toolbox.modules.general_tools.ui import mbox_tool
+from it_toolbox.modules.general_tools.ui import recent_files_tool
 from it_toolbox.modules.general_tools.ui.main_view import GeneralToolsView
 from it_toolbox.modules.general_tools.ui.mbox_tool import IS_OPEN_ITEM_ROLE, PATH_ROLE
 
@@ -23,11 +23,13 @@ def _make_view(qtbot):
 def test_each_tool_is_a_top_level_category(qtbot):
     view = _make_view(qtbot)
 
-    assert view._tree.topLevelItemCount() == 5
-    assert view._tree.topLevelItem(1).text(0) == "SFTP Server Test"
-    assert view._tree.topLevelItem(2).text(0) == "ProFTPD Manager"
-    assert view._tree.topLevelItem(3).text(0) == "Hosting Manager"
-    assert view._tree.topLevelItem(4).text(0) == "Scheduler Manager"
+    assert view._tree.topLevelItemCount() == 7
+    assert view._tree.topLevelItem(1).text(0) == "EML Viewer"
+    assert view._tree.topLevelItem(2).text(0) == "SFTP Server Test"
+    assert view._tree.topLevelItem(3).text(0) == "FTP Server Test"
+    assert view._tree.topLevelItem(4).text(0) == "ProFTPD Manager"
+    assert view._tree.topLevelItem(5).text(0) == "Hosting Manager"
+    assert view._tree.topLevelItem(6).text(0) == "Scheduler Manager"
     mbox_item = view._tree.topLevelItem(0)
     assert mbox_item.text(0) == "Mbox Browser"
     assert mbox_item.isExpanded()
@@ -43,7 +45,10 @@ def test_module_context_menu_offers_tool_actions(qtbot):
     assert [a.text() for a in menu.actions()] == [
         "Open Mbox File…",
         "Clear Recent Mbox Files",
+        "Open EML File…",
+        "Clear Recent EML Files",
         "New SFTP Server Test…",
+        "New FTP Server Test…",
         "Add ProFTPD Server…",
         "Add Hosting Server…",
         "Add Scheduler Server…",
@@ -112,7 +117,7 @@ def test_prompt_open_file(qtbot, sample_mbox, monkeypatch):
     view = _make_view(qtbot)
     path = sample_mbox("a.mbox")
     monkeypatch.setattr(
-        mbox_tool.QFileDialog, "getOpenFileName", lambda *args, **kwargs: (str(path), "")
+        recent_files_tool.QFileDialog, "getOpenFileName", lambda *args, **kwargs: (str(path), "")
     )
 
     view.mbox.prompt_open_file()
@@ -122,4 +127,28 @@ def test_prompt_open_file(qtbot, sample_mbox, monkeypatch):
 
 def test_recent_files_are_capped():
     settings.save_recent_mbox_files([f"/x/{i}.mbox" for i in range(20)])
-    assert len(settings.load_recent_mbox_files()) == settings.RECENT_MBOX_FILES_LIMIT
+    assert len(settings.load_recent_mbox_files()) == settings.RECENT_FILES_LIMIT
+
+
+def test_opening_an_eml_file_adds_a_viewer_tab(qtbot, sample_eml):
+    view = _make_view(qtbot)
+    path = sample_eml()
+
+    viewer = view.eml.open_file(str(path))
+    qtbot.waitSignal(viewer.loaded, timeout=5000).wait()
+
+    assert view._tabs.count() == 1
+    assert view._tabs.tabText(0) == "invoice.eml"
+    assert settings.load_recent_eml_files() == [str(path.resolve())]
+    assert settings.load_recent_mbox_files() == []
+    assert view.eml.item.child(1).data(0, PATH_ROLE) == str(path.resolve())
+    assert "Subject: Invoice" in viewer._view._headers_label.text()
+
+
+def test_closing_an_eml_tab_is_handled_by_its_tool(qtbot, sample_eml):
+    view = _make_view(qtbot)
+    viewer = view.eml.open_file(str(sample_eml()))
+
+    assert view.try_close_tab(viewer)
+    assert view._tabs.count() == 0
+    assert viewer._closed

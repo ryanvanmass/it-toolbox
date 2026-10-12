@@ -47,6 +47,11 @@ connection manager for RDP, SSH, and Cloud Storage.
     files at random inside a fresh `it-toolbox-sftp-test-…` folder until
     you stop it, with live operations/sec, errors and latency per
     operation. The folder is removed afterwards unless you untick that.
+  - **FTP Server Test** — the same load test for FTP servers, over plain
+    FTP, explicit FTPS (AUTH TLS) or implicit FTPS (port 990), with
+    encrypted transfers and passive or active mode, in a fresh
+    `it-toolbox-ftp-test-…` folder. Works with servers that lack MLSD
+    (vsftpd, IIS) too.
   - **ProFTPD Manager** — manages a server set up by the
     [cockpit-proftpd](https://github.com/ryanvanmass/cockpit-proftpd)
     Cockpit module over SSH, through that module's own helper, so both

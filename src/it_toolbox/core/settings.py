@@ -351,6 +351,31 @@ def save_rdp_keyboard_layout(layout: int) -> None:
     rdp_keyboard_layout_path().write_text(hex(layout))
 
 
+def rdp_shared_folder_path() -> Path:
+    return data_dir() / "rdp_shared_folder.txt"
+
+
+def load_rdp_shared_folder() -> str | None:
+    """The local folder shared into embedded RDP sessions as a drive (how
+    files get onto a Windows VM, which usually has no SSH/SFTP server --
+    see core/rdp/freerdp_client.py's _add_shared_drive). Defaults to
+    ~/Downloads when nothing has been chosen yet; None means sharing was
+    turned off (stored as an empty file), or the folder no longer exists.
+    """
+    path = rdp_shared_folder_path()
+    if path.is_file():
+        folder = path.read_text().strip()
+    else:
+        folder = str(Path.home() / "Downloads")
+    if not folder or not Path(folder).is_dir():
+        return None
+    return folder
+
+
+def save_rdp_shared_folder(folder: str | None) -> None:
+    rdp_shared_folder_path().write_text(folder or "")
+
+
 def default_double_click_action_path() -> Path:
     return data_dir() / "default_double_click_action.txt"
 
@@ -763,16 +788,10 @@ def save_disabled_modules(module_ids: set[str]) -> None:
         path.unlink(missing_ok=True)
 
 
-RECENT_MBOX_FILES_LIMIT = 10
+RECENT_FILES_LIMIT = 10
 
 
-def recent_mbox_files_path() -> Path:
-    return data_dir() / "recent_mbox_files.json"
-
-
-def load_recent_mbox_files() -> list[str]:
-    """Mbox files the Mbox Browser has opened, most recent first."""
-    path = recent_mbox_files_path()
+def _load_recent_files(path: Path) -> list[str]:
     if not path.is_file():
         return []
     try:
@@ -781,11 +800,37 @@ def load_recent_mbox_files() -> list[str]:
         return []
     if not isinstance(files, list):
         return []
-    return [f for f in files if isinstance(f, str)][:RECENT_MBOX_FILES_LIMIT]
+    return [f for f in files if isinstance(f, str)][:RECENT_FILES_LIMIT]
+
+
+def _save_recent_files(path: Path, files: list[str]) -> None:
+    path.write_text(json.dumps(files[:RECENT_FILES_LIMIT]))
+
+
+def recent_mbox_files_path() -> Path:
+    return data_dir() / "recent_mbox_files.json"
+
+
+def load_recent_mbox_files() -> list[str]:
+    """Mbox files the Mbox Browser has opened, most recent first."""
+    return _load_recent_files(recent_mbox_files_path())
 
 
 def save_recent_mbox_files(files: list[str]) -> None:
-    recent_mbox_files_path().write_text(json.dumps(files[:RECENT_MBOX_FILES_LIMIT]))
+    _save_recent_files(recent_mbox_files_path(), files)
+
+
+def recent_eml_files_path() -> Path:
+    return data_dir() / "recent_eml_files.json"
+
+
+def load_recent_eml_files() -> list[str]:
+    """.eml files the EML Viewer has opened, most recent first."""
+    return _load_recent_files(recent_eml_files_path())
+
+
+def save_recent_eml_files(files: list[str]) -> None:
+    _save_recent_files(recent_eml_files_path(), files)
 
 
 def sftp_server_test_defaults_path() -> Path:
@@ -832,6 +877,50 @@ def load_sftp_server_test_configs() -> dict[str, dict]:
 
 def save_sftp_server_test_configs(configs: dict[str, dict]) -> None:
     sftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
+
+
+def ftp_server_test_defaults_path() -> Path:
+    return data_dir() / "ftp_server_test.json"
+
+
+def load_ftp_server_test_defaults() -> dict:
+    """The FTP Server Test form as last started, like
+    load_sftp_server_test_defaults(). Never includes the password."""
+    path = ftp_server_test_defaults_path()
+    if not path.is_file():
+        return {}
+    try:
+        defaults = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return defaults if isinstance(defaults, dict) else {}
+
+
+def save_ftp_server_test_defaults(defaults: dict) -> None:
+    ftp_server_test_defaults_path().write_text(json.dumps(defaults))
+
+
+def ftp_server_test_configs_path() -> Path:
+    return data_dir() / "ftp_server_test_configs.json"
+
+
+def load_ftp_server_test_configs() -> dict[str, dict]:
+    """Named FTP Server Test configurations, like
+    load_sftp_server_test_configs(). Never includes passwords."""
+    path = ftp_server_test_configs_path()
+    if not path.is_file():
+        return {}
+    try:
+        configs = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(configs, dict):
+        return {}
+    return {name: values for name, values in configs.items() if isinstance(values, dict)}
+
+
+def save_ftp_server_test_configs(configs: dict[str, dict]) -> None:
+    ftp_server_test_configs_path().write_text(json.dumps(configs, indent=2))
 
 
 def proftpd_servers_path() -> Path:
