@@ -3,6 +3,7 @@ import subprocess
 from it_toolbox.core import cockpit_machines as cm
 from it_toolbox.core import hosting_manager as hm
 from it_toolbox.core import proftpd_manager as pm
+from it_toolbox.core import restic_manager as rm
 from it_toolbox.core import scheduler_manager as sm
 from it_toolbox.core.cockpit_machines import CockpitMachine
 
@@ -26,11 +27,12 @@ def test_server_for_builds_each_managers_server():
     assert isinstance(proftpd, pm.ProftpdServer) and proftpd.docker_container == "ftp"
     assert machine.server_for(cm.HOSTING) == hm.HostingServer(name="nas", host="nas.lan", username="admin")
     assert isinstance(machine.server_for(cm.SCHEDULER), sm.SchedulerServer)
+    assert isinstance(machine.server_for(cm.RESTIC), rm.ResticServer)
     assert machine.cockpit_url == "https://nas.lan:9090/"
 
 
 def test_parse_detected_keeps_sidebar_order():
-    assert cm.parse_detected("scheduler\nhosting\nproftpd\n") == ["proftpd", "hosting", "scheduler"]
+    assert cm.parse_detected("restic\nscheduler\nhosting\nproftpd\n") == ["proftpd", "hosting", "scheduler", "restic"]
     assert cm.parse_detected("proftpd-no-helper\n") == ["proftpd-no-helper"]
     assert cm.parse_detected("") == []
 
@@ -39,7 +41,7 @@ def _run_detect(tmp_path, machine, present):
     """Runs the detection script locally with the helper paths mapped into
     tmp_path, so the real shell logic is exercised."""
     script = cm.detect_script(machine)
-    for path in (pm.COCKPIT_HELPER_PATH, pm.BUNDLED_HELPER_PATH, hm.HELPER_PATH, sm.HELPER_PATH):
+    for path in (pm.COCKPIT_HELPER_PATH, pm.BUNDLED_HELPER_PATH, hm.HELPER_PATH, sm.HELPER_PATH, rm.HELPER_PATH):
         script = script.replace(path, str(tmp_path / path.lstrip("/")))
     for path in present:
         target = tmp_path / path.lstrip("/")
@@ -54,6 +56,7 @@ def _run_detect(tmp_path, machine, present):
 def test_detect_script_finds_installed_helpers(tmp_path):
     assert _run_detect(tmp_path, WEB, []) == []
     assert _run_detect(tmp_path, WEB, [pm.BUNDLED_HELPER_PATH, sm.HELPER_PATH]) == ["proftpd", "scheduler"]
+    assert _run_detect(tmp_path / "other", WEB, [rm.HELPER_PATH]) == ["restic"]
 
 
 def test_detect_script_checks_proftpd_inside_its_container():

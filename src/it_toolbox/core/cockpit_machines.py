@@ -3,13 +3,13 @@ Cockpit modules each one has.
 
 A machine is one saved SSH login. The Cockpit sidebar lists, under each
 machine, a child for every manager whose module helper was found there
-(ProFTPD, Hosting, Scheduler), the way Connection Manager lists a GCP
-project's VMs and buckets. Detection is one SSH login plus one root shell
+(ProFTPD, Hosting, Scheduler, Restic), the way Connection Manager lists a
+GCP project's VMs and buckets. Detection is one SSH login plus one root shell
 script that tests each helper path, so a machine with several modules
 needs only one connection (and at most one set of password prompts).
 
 The managers themselves still take their own server dataclasses (see
-core/proftpd_manager, hosting_manager, scheduler_manager);
+core/proftpd_manager, hosting_manager, scheduler_manager, restic_manager);
 CockpitMachine.server_for() builds the right one.
 """
 
@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from it_toolbox.core import hosting_manager as hm
 from it_toolbox.core import proftpd_manager as pm
+from it_toolbox.core import restic_manager as rm
 from it_toolbox.core import scheduler_manager as sm
 from it_toolbox.core.remote_helper import SSH_PORT, RemoteHelperConnection, RemoteHelperError, RemoteServer
 
@@ -28,12 +29,14 @@ COCKPIT_PORT = 9090
 PROFTPD = "proftpd"
 HOSTING = "hosting"
 SCHEDULER = "scheduler"
+RESTIC = "restic"
 #: Sidebar order of the tools under a machine.
-TOOL_IDS = (PROFTPD, HOSTING, SCHEDULER)
+TOOL_IDS = (PROFTPD, HOSTING, SCHEDULER, RESTIC)
 TOOL_NAMES = {
     PROFTPD: "ProFTPD Manager",
     HOSTING: "Hosting Manager",
     SCHEDULER: "Scheduler Manager",
+    RESTIC: "Restic Manager",
 }
 #: Detection result for ProFTPD itself installed without any helper: the
 #: ProFTPD Manager can install its bundled helper (see
@@ -95,6 +98,8 @@ class CockpitMachine(RemoteServer):
             return hm.HostingServer(**common)
         if tool == SCHEDULER:
             return sm.SchedulerServer(**common)
+        if tool == RESTIC:
+            return rm.ResticServer(**common)
         raise ValueError(f"Unknown Cockpit tool {tool!r}")
 
 
@@ -114,6 +119,7 @@ def detect_script(machine: CockpitMachine) -> str:
             f"elif {proftpd_installed}; then echo {PROFTPD_NO_HELPER}; fi",
             f"[ -x {hm.HELPER_PATH} ] && echo {HOSTING}",
             f"[ -x {sm.HELPER_PATH} ] && echo {SCHEDULER}",
+            f"[ -x {rm.HELPER_PATH} ] && echo {RESTIC}",
             "true",
         ]
     )
