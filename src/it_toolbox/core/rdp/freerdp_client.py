@@ -259,11 +259,17 @@ _core_lib.gdi_resize.argtypes = [ctypes.POINTER(RdpGdi), ctypes.c_uint32, ctypes
 _core_lib.gdi_resize.restype = ctypes.c_int32
 
 # int PubSub_Subscribe(wPubSub* pubSub, const char* EventName, ...);
-# Declared variadic in winpr/collections.h, but every real call site (via
-# the DEFINE_EVENT_SUBSCRIBE macro) passes exactly one further argument, a
-# specific event-handler function pointer — fixed 3-arg ctypes argtypes
-# below match that actual calling pattern.
-_winpr_lib.PubSub_Subscribe.argtypes = [ctypes.POINTER(WPubSub), ctypes.c_char_p, ctypes.c_void_p]
+# Declared variadic in winpr/collections.h; every real call site (via the
+# DEFINE_EVENT_SUBSCRIBE macro) passes exactly one further argument, the
+# event-handler function pointer. Only the two fixed parameters go in
+# argtypes: ctypes treats any argument past argtypes as variadic
+# (ffi_prep_cif_var), which matters on Apple Silicon, where variadic
+# arguments are passed on the stack, not in registers. Listing the handler
+# here made it a register argument, so on macOS PubSub_Subscribe read a
+# garbage handler pointer off the stack (issue #115). Callers must pass the
+# handler as a ctypes.c_void_p instance, since untyped extras get no
+# conversion.
+_winpr_lib.PubSub_Subscribe.argtypes = [ctypes.POINTER(WPubSub), ctypes.c_char_p]
 _winpr_lib.PubSub_Subscribe.restype = ctypes.c_int32
 
 # rdpInput is treated as opaque here — every call below only ever passes the
