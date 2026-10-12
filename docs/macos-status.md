@@ -75,15 +75,19 @@ rather than a regression:
   stub as `CFBundleExecutable`.
 - gcloud/rclone installed via Homebrew are found when launched from
   Finder (the launcher's login-shell `PATH`).
-- With `brew install freerdp`, embedded RDP connects, renders, and takes
-  keyboard/mouse input. The Qt scancode mapping (`core/rdp/scancodes.py`)
-  was written without macOS key events in mind, so the Cmd/Option keys
-  are the most likely to need mapping.
 - Embedded SSH and Shell Launcher (zsh/bash from `/etc/shells`,
   `ptyprocess`) work.
 
 Still not exercised on a Mac:
 
+- [ ] **Embedded RDP** (with `brew install freerdp`). It wasn't part of
+      the beta.3 test. The first real attempt (issue #115) failed with
+      "Timeout waiting for activation" and then crashed, because
+      `PubSub_Subscribe` was called with its variadic handler argument
+      typed as a fixed one, which Apple Silicon passes differently. Once
+      it connects, check keyboard/mouse input: the Qt scancode mapping
+      (`core/rdp/scancodes.py`) was written without macOS key events in
+      mind, so Cmd/Option are the most likely to need mapping.
 - [ ] **In-app update from one `.dmg` build to a newer one** (quit,
       bundle swap, relaunch, no Gatekeeper prompt). It needs two
       published builds, so the first chance is the next release after
