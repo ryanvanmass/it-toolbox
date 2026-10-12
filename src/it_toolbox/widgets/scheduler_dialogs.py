@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QRadioButton,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -843,23 +843,21 @@ class BackupSettingsBox(QGroupBox):
         self.retention = QSpinBox()
         self.retention.setRange(1, sm.MAX_BACKUP_RETENTION)
         self.retention.setValue(14)
-        self.retention.setMaximumWidth(120)
+        self.retention.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.retention.setMinimumWidth(80)
         self.schedule = SchedulePicker("*-*-* 02:00:00", validate)
-        self.grid = QGridLayout(self)
-        self.grid.addWidget(self.enabled, 0, 0, 1, 2)
-        self.grid.addWidget(QLabel("Schedule:"), 1, 0, Qt.AlignmentFlag.AlignTop)
-        self.grid.addWidget(self.schedule, 1, 1)
-        self.grid.addWidget(QLabel("Backups to keep:"), 2, 0)
-        self.grid.addWidget(self.retention, 2, 1)
-        self.grid.addWidget(QLabel("Directory:"), 3, 0)
-        self.grid.addWidget(self.directory, 3, 1)
+        self.form = _form(self)
+        self.form.addRow(self.enabled)
+        self.form.addRow("Schedule:", self.schedule)
+        self.form.addRow("Backups to keep:", self.retention)
+        self.form.addRow("Directory:", self.directory)
 
     def set_settings(self, settings: dict) -> None:
         self.enabled.setChecked(bool(settings.get("enabled")))
         self.directory.setText(settings.get("directory") or sm.DEFAULT_BACKUP_DIR)
         self.retention.setValue(int(settings.get("retention") or 14))
         replacement = SchedulePicker(settings.get("schedule") or "*-*-* 02:00:00", self._validate)
-        self.grid.replaceWidget(self.schedule, replacement)
+        self.form.replaceWidget(self.schedule, replacement)
         self.schedule.deleteLater()
         self.schedule = replacement
 
