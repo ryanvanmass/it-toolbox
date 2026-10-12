@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -525,22 +526,35 @@ class SchedulerManagerWidget(RemoteHelperTab):
         self.backup_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.backup_table.customContextMenuRequested.connect(self._backups_menu)
 
-        layout = QVBoxLayout(page)
-        layout.addWidget(intro)
-        layout.addLayout(_row(_button("Export Configuration…", self.export_config),
-                              _button("Import Configuration…", self.import_config)))
-        layout.addWidget(self.backup_settings)
-        layout.addLayout(_row(_button("Save Settings", self.save_backup_settings),
-                              _button("Back Up Now", self.backup_now)))
-        layout.addWidget(self.backup_status)
-        layout.addLayout(_row(
-            QLabel("Backups on the server:"),
+        # Two columns: settings and status on the left, the backups list on
+        # the right with the full height of the tab.
+        left = QVBoxLayout()
+        left.addWidget(self.backup_settings)
+        left.addLayout(_row(_button("Save Settings", self.save_backup_settings),
+                            _button("Back Up Now", self.backup_now)))
+        left.addWidget(self.backup_status)
+        left.addStretch(1)
+
+        backups_box = QGroupBox("Backups on the server")
+        right = QVBoxLayout(backups_box)
+        right.addLayout(_row(
             _button("Download…", lambda: self.download_backup(selected_data(self.backup_table))),
             _button("Restore…", lambda: self.restore_backup(selected_data(self.backup_table))),
             _button("Delete", lambda: self.delete_backup(selected_data(self.backup_table))),
             _button("Refresh", self.refresh_backups),
         ))
-        layout.addWidget(self.backup_table, 1)
+        right.addWidget(self.backup_table, 1)
+
+        columns = QHBoxLayout()
+        columns.addLayout(left, 2)
+        columns.addWidget(backups_box, 3)
+
+        layout = QVBoxLayout(page)
+        layout.addWidget(intro)
+        layout.addLayout(_row(_button("Export Configuration…", self.export_config),
+                              _button("Import Configuration…", self.import_config)))
+        layout.addSpacing(6)
+        layout.addLayout(columns, 1)
         return page
 
     def refresh_backups(self) -> None:
