@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QRadioButton,
     QSpinBox,
-    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -45,6 +44,24 @@ def _buttons(dialog: QDialog, accept, ok_text: str | None = None) -> QDialogButt
     buttons.accepted.connect(accept)
     buttons.rejected.connect(dialog.reject)
     return buttons
+
+
+def _form(parent=None) -> QFormLayout:
+    """A form whose fields fill the width with the labels in one column on
+    every platform (macOS's style otherwise keeps fields at their size hint
+    and centres the form)."""
+    form = QFormLayout(parent) if parent is not None else QFormLayout()
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+    return form
+
+
+class TwoDigitSpinBox(QSpinBox):
+    """Hours and minutes shown as 04:05, not 4:5."""
+
+    def textFromValue(self, value: int) -> str:
+        return f"{value:02d}"
 
 
 def _note(text: str) -> QLabel:
@@ -91,8 +108,8 @@ class SchedulePicker(QWidget):
         for kind in sm.SCHEDULE_KINDS:
             self.kind.addItem(sm.SCHEDULE_KIND_LABELS[kind], kind)
         self.hours = self._spin(2, 23, spec.hours)
-        self.hour = self._spin(0, 23, spec.hour)
-        self.minute = self._spin(0, 59, spec.minute)
+        self.hour = self._spin(0, 23, spec.hour, TwoDigitSpinBox)
+        self.minute = self._spin(0, 59, spec.minute, TwoDigitSpinBox)
         self.day = self._spin(1, 28, spec.day)
         self.days = {day: QCheckBox(day) for day in sm.WEEKDAYS}
         for day, box in self.days.items():
@@ -102,7 +119,6 @@ class SchedulePicker(QWidget):
         self.expression.setPlaceholderText("e.g. Mon..Fri *-*-* 09:00:00  or  *:0/15")
         self.expression.textChanged.connect(self._changed)
         self.preview = QLabel()
-        self.preview.setWordWrap(True)
         self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         self._every_row = self._labelled("Every", self.hours, "hours")
@@ -134,8 +150,8 @@ class SchedulePicker(QWidget):
         self._show_rows()
         self._changed()
 
-    def _spin(self, low: int, high: int, value: int) -> QSpinBox:
-        spin = QSpinBox()
+    def _spin(self, low: int, high: int, value: int, spin_class=QSpinBox) -> QSpinBox:
+        spin = spin_class()
         spin.setRange(low, high)
         spin.setValue(value)
         spin.valueChanged.connect(self._changed)
@@ -144,7 +160,7 @@ class SchedulePicker(QWidget):
     def minute_only(self) -> QSpinBox:
         # "Hourly" and "Every N hours" have their own minute box, kept in
         # step with the time-of-day one so switching presets keeps it.
-        self.minute_alone = self._spin(0, 59, self.minute.value())
+        self.minute_alone = self._spin(0, 59, self.minute.value(), TwoDigitSpinBox)
         self.minute_alone.valueChanged.connect(self.minute.setValue)
         self.minute.valueChanged.connect(self.minute_alone.setValue)
         return self.minute_alone
@@ -195,17 +211,25 @@ class SchedulePicker(QWidget):
     def schedule(self) -> str:
         return sm.serialize_schedule(self._spec(self.current_kind()))
 
+    def _set_preview(self, text: str, wrap: bool = True) -> None:
+        """Wrapped text inside a form row can be given less height than it
+        needs, so the label's minimum height is set from its text."""
+        self.preview.setWordWrap(wrap)
+        self.preview.setText(text)
+        width = max(self.preview.width(), self.width(), 400)
+        self.preview.setMinimumHeight(self.preview.heightForWidth(width) if wrap else 0)
+
     def _changed(self) -> None:
         self.valid = None
         if not self.schedule():
-            self.preview.setText("Choose at least one day." if self.current_kind() == "weekly"
+            self._set_preview("Choose at least one day." if self.current_kind() == "weekly"
                                  else "Enter a systemd calendar expression.")
             self.valid = False
             return
         if self._validate is None:
-            self.preview.setText("")
+            self._set_preview("")
             return
-        self.preview.setText("Checking…")
+        self._set_preview("Checking…")
         self._timer.start()
 
     def _check(self) -> None:
@@ -218,14 +242,15 @@ class SchedulePicker(QWidget):
                 return
             self.valid = True
             upcoming = result.get("next") or []
-            self.preview.setText(f"Next runs (server time): {'; '.join(upcoming[:2])}" if upcoming
-                                 else "Valid schedule.")
+            # one run per line, unwrapped: always laid out at its full height
+            self._set_preview("\n".join(["Next runs (server time):", *upcoming[:3]]) if upcoming
+                              else "Valid schedule.", wrap=False)
 
         def failed(error: Exception) -> None:
             if generation != self._generation:
                 return
             self.valid = False
-            self.preview.setText(f"Invalid schedule: {error}")
+            self._set_preview(f"Invalid schedule: {error}")
 
         async_utils.run_in_background(lambda: self._validate(expression), on_result=ok, on_error=failed)
 
@@ -278,13 +303,8 @@ class TaskDialog(QDialog):
         self.script_shell = QComboBox()
         self.script_shell.currentIndexChanged.connect(self._script_shell_chosen)
         self.script.textChanged.connect(self._sync_script_shell)
-        inline_page = QWidget()
-        inline_form = QFormLayout(inline_page)
-        inline_form.setContentsMargins(0, 0, 0, 0)
-        inline_form.addRow("Shell:", self.script_shell)
-        inline_form.addRow("Script:", self.script)
-        inline_form.addRow("", _note("The first line (#!) names the interpreter; the Shell menu sets it. "
-                                     "Saved as a root-owned file that only the run-as user can read."))
+        self.script_note = _note("The first line (#!) names the interpreter; the Shell menu sets it. "
+                                 "Saved as a root-owned file that only the run-as user can read.")
 
         interpreter, program, args = sm.split_command(task.get("command_path") or "",
                                                       task.get("command_args") or "", self.shells)
@@ -296,21 +316,8 @@ class TaskDialog(QDialog):
         self.program = QLineEdit(program)
         self.program.setPlaceholderText("e.g. /usr/local/bin/backup  or  /home/user/backup.sh")
         self.arguments = QLineEdit(args)
-        path_page = QWidget()
-        path_form = QFormLayout(path_page)
-        path_form.setContentsMargins(0, 0, 0, 0)
-        path_form.addRow("Shell:", self.command_shell)
-        path_form.addRow("Program:", self.program)
-        path_form.addRow("Arguments:", self.arguments)
-        path_form.addRow("", _note("Split like a shell would (quotes group words), but never run through a "
-                                   "shell: $VARIABLES, pipes and redirects are not expanded."))
-
-        self.what = QStackedWidget()
-        self.what.addWidget(inline_page)
-        self.what.addWidget(path_page)
-        self.inline_radio.toggled.connect(lambda on: self.what.setCurrentIndex(0 if on else 1))
-        (self.path_radio if task.get("kind") == "path" else self.inline_radio).setChecked(True)
-        self.what.setCurrentIndex(1 if task.get("kind") == "path" else 0)
+        self.command_note = _note("Split like a shell would (quotes group words), but never run through a "
+                                  "shell: $VARIABLES, pipes and redirects are not expanded.")
 
         self.schedule = SchedulePicker(task.get("schedule") or "*-*-* 03:00:00", validate)
         self.run_as = QComboBox()
@@ -321,16 +328,39 @@ class TaskDialog(QDialog):
         self.enabled = QCheckBox("Enabled (runs on the schedule)")
         self.enabled.setChecked(task.get("enabled", True))
 
-        form = QFormLayout(page)
+        # The script and program fields are rows of the one form, shown or
+        # hidden by the radio buttons, so their labels line up with the rest.
+        form = _form()
+        self.general_form = form
         form.addRow("Name:", self.name)
         form.addRow("Description:", self.description)
         form.addRow("What to run:", kind_row)
-        form.addRow(self.what)
+        form.addRow("Shell:", self.script_shell)
+        form.addRow("Script:", self.script)
+        form.addRow("", self.script_note)
+        form.addRow("Shell:", self.command_shell)
+        form.addRow("Program:", self.program)
+        form.addRow("Arguments:", self.arguments)
+        form.addRow("", self.command_note)
         form.addRow("Schedule:", self.schedule)
         form.addRow("Run as:", self.run_as)
         form.addRow("", self.enabled)
+        layout = QVBoxLayout(page)
+        layout.addLayout(form)
+        layout.addStretch(1)
+
+        self.inline_radio.toggled.connect(self._show_kind)
+        (self.path_radio if task.get("kind") == "path" else self.inline_radio).setChecked(True)
+        self._show_kind()
         self._sync_script_shell()
         return page
+
+    def _show_kind(self) -> None:
+        inline = self.inline_radio.isChecked()
+        for widget in (self.script_shell, self.script, self.script_note):
+            self.general_form.setRowVisible(widget, inline)
+        for widget in (self.command_shell, self.program, self.arguments, self.command_note):
+            self.general_form.setRowVisible(widget, not inline)
 
     def _sync_script_shell(self) -> None:
         """The Shell menu reflects the script's #! line (shebang.ts)."""
@@ -384,7 +414,7 @@ class TaskDialog(QDialog):
             self.on_failure.addItem(other["name"], other["id"])
         self.on_failure.setCurrentIndex(max(0, self.on_failure.findData(task.get("on_failure_task_id") or "")))
 
-        form = QFormLayout(page)
+        form = _form(page)
         form.addRow("Timeout (seconds):", self.timeout)
         form.addRow("", _note("Covers the whole run, including any retries."))
         form.addRow("Working directory:", self.working_dir)
@@ -569,7 +599,7 @@ class ChannelDialog(QDialog):
         self.headers.setMaximumHeight(110)
         self.headers_note = _note("For example an Authorization header, one per line. Values are never shown "
                                   "again; leave one blank to keep it.")
-        form = QFormLayout()
+        form = _form()
         form.addRow("Name:", self.name)
         form.addRow("Type:", self.type)
         form.addRow("URL:", self.url)
@@ -674,14 +704,14 @@ class ImportDialog(QDialog):
 
         self.summary = _note("Checking what would change…")
         self.urls_box = QGroupBox("Channels without a URL in the file")
-        self.urls_layout = QFormLayout(self.urls_box)
+        self.urls_layout = _form(self.urls_box)
         self.url_fields: dict[str, QLineEdit] = {}
         self.urls_box.setVisible(False)
         self.plan_view = QPlainTextEdit()
         self.plan_view.setReadOnly(True)
         self.plan_view.setFont(monospace())
 
-        form = QFormLayout()
+        form = _form()
         form.addRow("Source:", QLabel(source_label))
         form.addRow("If a task or channel with the same name already exists:", self.mode)
         form.addRow("", self.paused)
