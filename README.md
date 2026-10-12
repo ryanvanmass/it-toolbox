@@ -90,6 +90,18 @@ connection manager for RDP, SSH, and Cloud Storage.
     channels (webhook, Google Chat, Healthchecks.io) with test alerts;
     and configuration export/import with a preview, scheduled backups
     and restore.
+  - **Restic Manager** — manages the restic backups of a server
+    running the [cockpit-restic](https://git.bonkcloud.lol/RyanVanMass/cockpit-restic)
+    Cockpit module over SSH, through that module's own helper, so both
+    can be used side by side: installing restic, repositories (local
+    path, or SFTP with a generated key) with scheduled `restic check`
+    health checks, check history, healthcheck pings and stale-lock
+    removal; snapshots with size and count, restore of everything or
+    of files and folders picked from a lazily loaded folder tree (with
+    name search), and delete; and backup jobs (source paths, excludes,
+    pre/post commands, schedule, retention) with run now and run
+    history. Failure banners name what failed and offer to remove a
+    stale lock when that was the cause.
 - **Settings** — a single page consolidating app-update checks (against
   GitHub Releases — see `docs/releasing.md`) and status/setup for
   rclone, gcloud, QEMU/libvirt, FreeRDP, and (Windows) the Linux tools

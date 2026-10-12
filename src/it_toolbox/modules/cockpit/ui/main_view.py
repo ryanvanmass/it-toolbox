@@ -22,6 +22,7 @@ from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.hosting_manager_widget import HostingManagerWidget
 from it_toolbox.widgets.proftpd_manager_widget import ProftpdManagerWidget
 from it_toolbox.widgets.remote_helper_widget import ServerDialog, prompt_to_retry
+from it_toolbox.widgets.restic_manager_widget import ResticManagerWidget
 from it_toolbox.widgets.scheduler_manager_widget import SchedulerManagerWidget
 
 MACHINE_KEY_ROLE = Qt.ItemDataRole.UserRole + 60
@@ -29,7 +30,7 @@ TOOL_ROLE = Qt.ItemDataRole.UserRole + 61
 IS_ADD_ITEM_ROLE = Qt.ItemDataRole.UserRole + 62
 
 #: Tab-title prefix per tool, e.g. "Hosting: web".
-TAB_PREFIXES = {cm.PROFTPD: "ProFTPD", cm.HOSTING: "Hosting", cm.SCHEDULER: "Scheduler"}
+TAB_PREFIXES = {cm.PROFTPD: "ProFTPD", cm.HOSTING: "Hosting", cm.SCHEDULER: "Scheduler", cm.RESTIC: "Restic"}
 
 
 def manager_widget_class(tool: str):
@@ -38,6 +39,7 @@ def manager_widget_class(tool: str):
         cm.PROFTPD: ProftpdManagerWidget,
         cm.HOSTING: HostingManagerWidget,
         cm.SCHEDULER: SchedulerManagerWidget,
+        cm.RESTIC: ResticManagerWidget,
     }[tool]
 
 
