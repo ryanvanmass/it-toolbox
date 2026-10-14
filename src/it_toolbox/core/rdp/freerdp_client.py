@@ -100,7 +100,7 @@ if _IS_WINDOWS:
     _freerdp_dir = os.environ.get(_FREERDP_DIR_ENV)
     if _freerdp_dir:
         # add_dll_directory is what actually matters for *dependency*
-        # resolution (e.g. freerdp3.dll pulling in winpr3.dll) — ctypes.WinDLL
+        # resolution (e.g. freerdp3.dll pulling in winpr3.dll) — ctypes.CDLL
         # loading freerdp3.dll by an absolute path does not, on its own, add
         # that DLL's own folder to the search path Windows uses to resolve
         # its dependencies (a deliberate post-3.7 hardening against DLL
@@ -120,7 +120,12 @@ def _load(candidates: list[str]) -> ctypes.CDLL:
     errors = []
     for name in candidates:
         try:
-            return ctypes.WinDLL(name) if _IS_WINDOWS else ctypes.CDLL(name)
+            # CDLL on Windows too, not WinDLL: FreeRDP exports are cdecl,
+            # and WinDLL marks every function stdcall, which makes ctypes
+            # refuse calls with more arguments than argtypes, i.e. the
+            # variadic PubSub_Subscribe handler ("this function takes 2
+            # arguments (3 given)").
+            return ctypes.CDLL(name)
         except OSError as exc:
             errors.append(f"  {name}: {exc}")
     tried = "\n".join(errors)
