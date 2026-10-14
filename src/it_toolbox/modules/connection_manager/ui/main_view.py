@@ -1,5 +1,6 @@
 import base64
 import platform
+from collections.abc import Callable
 
 import shiboken6
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -1860,7 +1861,10 @@ class ConnectionManagerView(QWidget):
             )
             self._embed_ftp(session_id, display_name, session, upload_paths=upload_paths)
         else:
-            self._embed_rdp(session_id, display_name, tunnel.port, username, password)
+            self._embed_rdp(
+                session_id, display_name, tunnel.port, username, password,
+                failure_detail=lambda: str(tunnel.last_error) if tunnel.last_error else None,
+            )
 
         label = f"{display_name} ({kind.upper()}) — 127.0.0.1:{tunnel.port}"
         self._active_sessions_dialog.add_session(session_id, label)
@@ -1909,6 +1913,7 @@ class ConnectionManagerView(QWidget):
         username: str | None,
         password: str | None,
         host: str = "127.0.0.1",
+        failure_detail: Callable[[], str | None] | None = None,
     ) -> None:
         desktop_size = settings.load_default_rdp_resolution()
         keyboard_layout = settings.load_rdp_keyboard_layout()
@@ -1921,6 +1926,7 @@ class ConnectionManagerView(QWidget):
             desktop_size=desktop_size,
             keyboard_layout=keyboard_layout,
             shared_folder=shared_folder,
+            failure_detail=failure_detail,
         )
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))
         self._session_tab_widgets[session_id] = rdp
