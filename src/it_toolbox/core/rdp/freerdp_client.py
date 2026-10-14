@@ -679,6 +679,18 @@ class FreeRdpSession:
             return False
         return bool(_core_lib.freerdp_check_event_handles(self._context))
 
+    def last_error_text(self) -> str | None:
+        """FreeRDP's description of the last error on this connection, or
+        None if it hasn't recorded one."""
+        if self._context is None:
+            return None
+        code = _core_lib.freerdp_get_last_error(self._context)
+        if not code:
+            return None
+        message = _core_lib.freerdp_get_last_error_string(code)
+        text = message.decode(errors="replace") if message else "unknown error"
+        return f"{text} (code {code:#x})"
+
     def get_frame(self) -> tuple[bytes, int, int, int]:
         """Returns (bgrx_pixels, width, height, stride) — a copy of the
         current GDI surface, safe to hand off across threads."""

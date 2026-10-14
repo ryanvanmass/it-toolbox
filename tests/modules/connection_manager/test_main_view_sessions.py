@@ -23,6 +23,7 @@ class _FakeTunnel:
     def __init__(self, port=2222):
         self.port = port
         self.stopped = False
+        self.last_error = None
 
     def start(self):
         return self.port
@@ -1477,10 +1478,12 @@ class _FakeRdpWidget(QWidget):
     finished = Signal()
 
     def __init__(
-        self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None
+        self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None,
+        failure_detail=None,
     ):
         super().__init__()
         self.host, self.port, self.username, self.password = host, port, username, password
+        self.failure_detail = failure_detail
         self.desktop_size = desktop_size
         self.keyboard_layout = keyboard_layout
         self.shared_folder = shared_folder
@@ -1508,6 +1511,21 @@ def test_rdp_connect_embeds_widget_and_registers_session(qtbot, monkeypatch):
         "secret",
     )
     assert len(view._active_sessions) == 1
+
+
+def test_rdp_connect_explains_failures_with_the_tunnels_last_error(qtbot, monkeypatch):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.RdpWidget", _FakeRdpWidget
+    )
+    view = _make_view(qtbot, monkeypatch)
+    tunnel = _FakeTunnel()
+
+    view._on_tunnel_ready(tunnel, "test-vm", "rdp", "alice", "secret")
+    widget = view._tabs.widget(0)
+
+    assert widget.failure_detail() is None
+    tunnel.last_error = ConnectionError("IAP tunnel refused (4003: failed to connect to backend).")
+    assert widget.failure_detail() == "IAP tunnel refused (4003: failed to connect to backend)."
 
 
 def test_rdp_connect_passes_the_configured_default_resolution(qtbot, monkeypatch):

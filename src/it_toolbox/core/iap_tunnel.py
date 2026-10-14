@@ -45,6 +45,10 @@ RECONNECT_INITIAL_SLEEP_SEC = 1.5
 RECONNECT_BACKOFF_MULTIPLIER = 1.1
 RECONNECT_MAX_SLEEP_SEC = 20
 RECONNECT_MAX_TOTAL_WAIT_SEC = 15 * 60
+# The first connect gets a much shorter budget than a reconnect: nothing is
+# on screen yet but "Connecting…", so a VM IAP can't reach should fail
+# while the user is still looking at it, not 15 minutes later.
+INITIAL_CONNECT_MAX_TOTAL_WAIT_SEC = 30
 
 CONNECT_OPEN_TIMEOUT_SEC = 60
 
@@ -55,6 +59,45 @@ class IncompleteFrame(Exception):
 
 class ProtocolError(Exception):
     """The server sent something that violates the expected protocol."""
+
+
+# Hints for the relay's close codes a user can actually fix. The relay
+# opens the websocket and then closes it with one of these (e.g. 4033
+# "not authorized"), rather than failing the HTTP handshake.
+_CLOSE_CODE_HINTS = {
+    4003: (
+        "IAP couldn't reach port {port} on the VM. Check that a firewall rule allows "
+        "35.235.240.0/20 to that port and that the service is running."
+    ),
+    4033: (
+        "IAP didn't accept your Google sign-in for this VM. Check you're signed in to "
+        "the right account and that it has the IAP-secured Tunnel User role "
+        "(roles/iap.tunnelResourceAccessor)."
+    ),
+    4047: "IAP couldn't find this VM. Check its project, zone and name.",
+}
+
+
+class IapTunnelError(ConnectionError):
+    """The IAP relay refused the tunnel, with its close code and reason."""
+
+    def __init__(self, target: "IapTunnelTarget", code: int, reason: str) -> None:
+        self.code = code
+        self.reason = reason
+        message = f"IAP tunnel refused ({code}: {reason or 'no reason given'})."
+        hint = _CLOSE_CODE_HINTS.get(code)
+        if hint:
+            message += " " + hint.format(port=target.port)
+        super().__init__(message)
+
+
+def _relay_refusal(exc: Exception) -> tuple[int, str] | None:
+    """The relay's 4xxx close code and reason, if `exc` is the relay
+    closing the websocket on purpose rather than a network failure."""
+    if isinstance(exc, websockets.ConnectionClosed) and exc.rcvd is not None:
+        if 4000 <= exc.rcvd.code < 5000:
+            return exc.rcvd.code, exc.rcvd.reason
+    return None
 
 
 # -- Frame codec --------------------------------------------------------
@@ -191,7 +234,13 @@ class IapTunnelConnection:
         self._unconfirmed: list[bytes] = []
 
     async def pump(self, local_reader: asyncio.StreamReader, local_writer: asyncio.StreamWriter) -> None:
-        ws = await self._connect()
+        try:
+            ws = await self._connect()
+        except BaseException:
+            # Close the local side too, so the client (FreeRDP, ssh) sees
+            # the connection end instead of waiting on a silent socket.
+            local_writer.close()
+            raise
         try:
             await asyncio.gather(
                 self._pump_local_to_remote(local_reader, ws),
@@ -203,7 +252,9 @@ class IapTunnelConnection:
 
     async def _connect(self):
         """Connect (or reconnect) with backoff, returning an open websocket."""
-        deadline = asyncio.get_event_loop().time() + RECONNECT_MAX_TOTAL_WAIT_SEC
+        initial = self._sid is None
+        max_wait = INITIAL_CONNECT_MAX_TOTAL_WAIT_SEC if initial else RECONNECT_MAX_TOTAL_WAIT_SEC
+        deadline = asyncio.get_event_loop().time() + max_wait
         sleep_sec = RECONNECT_INITIAL_SLEEP_SEC
         first_attempt = True
 
@@ -228,9 +279,14 @@ class IapTunnelConnection:
                 self._on_status("connected" if first_attempt else "reconnected")
                 return ws
             except Exception as exc:  # noqa: BLE001 - retried below, or re-raised at deadline
+                refusal = _relay_refusal(exc)
+                if refusal is not None and initial:
+                    # The relay said no (not authorized, VM port
+                    # unreachable, ...). Retrying won't change its answer.
+                    raise IapTunnelError(self._target, *refusal) from exc
                 if asyncio.get_event_loop().time() >= deadline:
                     raise ConnectionError(
-                        f"Failed to connect/reconnect within {RECONNECT_MAX_TOTAL_WAIT_SEC}s"
+                        f"Couldn't open the IAP tunnel within {max_wait}s: {exc}"
                     ) from exc
                 first_attempt = False
                 self._on_status(f"reconnecting ({exc})")
@@ -324,6 +380,9 @@ class TunnelManager:
         self._target = target
         self._get_access_token = get_access_token
         self._server: asyncio.AbstractServer | None = None
+        # Why the most recent forwarded connection failed, for the UI: the
+        # client on the other end of the local socket only sees it close.
+        self.last_error: Exception | None = None
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -331,7 +390,8 @@ class TunnelManager:
         conn = IapTunnelConnection(self._target, self._get_access_token)
         try:
             await conn.pump(reader, writer)
-        except Exception:
+        except Exception as exc:
+            self.last_error = exc
             logger.exception("IAP tunnel connection ended with an error")
 
     async def start(self, local_host: str = "127.0.0.1", local_port: int = 0) -> int:

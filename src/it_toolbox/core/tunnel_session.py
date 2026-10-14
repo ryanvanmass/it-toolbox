@@ -22,12 +22,18 @@ class BackgroundTunnel:
         self._serve_task: asyncio.Task | None = None
         self._port: int | None = None
         self._error: Exception | None = None
+        self._manager: TunnelManager | None = None
         self._ready = threading.Event()
 
     @property
     def port(self) -> int | None:
         """The bound local port, or None before start() has completed."""
         return self._port
+
+    @property
+    def last_error(self) -> Exception | None:
+        """Why the tunnel's most recent connection failed, if it did."""
+        return self._manager.last_error if self._manager is not None else None
 
     def start(self, timeout: float = 30) -> int:
         """Start the tunnel and block until its local port is bound.
@@ -55,7 +61,7 @@ class BackgroundTunnel:
     def _run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        manager = TunnelManager(self._target, self._get_access_token)
+        manager = self._manager = TunnelManager(self._target, self._get_access_token)
         try:
             self._port = self._loop.run_until_complete(manager.start())
             self._ready.set()
