@@ -15,6 +15,7 @@ to the remote desktop's native resolution before being sent.
 """
 
 import logging
+from collections.abc import Callable
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
@@ -80,9 +81,16 @@ class RdpWidget(QWidget):
         desktop_size: tuple[int, int] | None = None,
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         shared_folder: str | None = None,
+        failure_detail: Callable[[], str | None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # Whatever sits between FreeRDP and the server (an IAP tunnel) can
+        # know why a connection failed when FreeRDP only sees the socket
+        # close. Asked once the session fails, and preferred when it has
+        # an answer.
+        self._failure_detail = failure_detail or (lambda: None)
+        self._failure_shown = False
         # None means "match window size" (today's default: every resize
         # requests a matching server resolution). A fixed size instead
         # means the server resolution is requested once at connect and
@@ -148,23 +156,29 @@ class RdpWidget(QWidget):
             self._finished_emitted = True
             self.finished.emit()
 
+    def _show_failure(self, message: str) -> None:
+        message = self._failure_detail() or message
+        self._failure_shown = True
+        self._status_label.setText(f"Connection failed: {message}")
+        self._status_label.show()
+        # main_view.py tears this tab down as soon as `finished` fires
+        # (same teardown path a clean disconnect uses) — often too fast
+        # for the status label above to ever actually be read. A blocking
+        # dialog guarantees the user sees why the connection failed
+        # instead of just watching a tab flash open and close.
+        QMessageBox.warning(self, "RDP Connection Failed", message)
+
     def _on_error(self, message: str) -> None:
         if not self._closing:
-            self._status_label.setText(f"Connection failed: {message}")
-            self._status_label.show()
-            # main_view.py tears this tab down as soon as `finished` fires
-            # below (same teardown path a clean disconnect uses) — often
-            # too fast for the status label above to ever actually be
-            # read. A blocking dialog guarantees the user sees why the
-            # connection failed instead of just watching a tab flash open
-            # and close.
-            QMessageBox.warning(self, "RDP Connection Failed", message)
+            self._show_failure(message)
         self._emit_finished_once()
 
     def _on_disconnected(self) -> None:
-        if not self._closing and self._image is None:
-            self._status_label.setText("Disconnected")
-            self._status_label.show()
+        if not self._closing and self._image is None and not self._failure_shown:
+            # Ended before a single frame arrived: to the user that's a
+            # failed connection, not a disconnect, so say so rather than
+            # closing the tab without a word.
+            self._show_failure("The connection closed before the remote desktop appeared.")
         self._emit_finished_once()
 
     def _scaled_image_rect(self) -> QRect:

@@ -467,3 +467,42 @@ def test_shared_folder_is_passed_to_the_worker(qtbot, monkeypatch):
     qtbot.addWidget(widget)
 
     assert captured["shared_folder"] == "/home/alice/Downloads"
+
+
+def _capture_warnings(monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        "it_toolbox.widgets.rdp_widget.QMessageBox.warning",
+        lambda parent, title, text: shown.append(text),
+    )
+    return shown
+
+
+def test_closing_before_the_first_frame_is_reported_as_a_failure(rdp_widget, monkeypatch):
+    shown = _capture_warnings(monkeypatch)
+
+    rdp_widget._on_disconnected()
+
+    assert shown == ["The connection closed before the remote desktop appeared."]
+
+
+def test_an_error_followed_by_the_disconnect_is_reported_once(rdp_widget, monkeypatch):
+    shown = _capture_warnings(monkeypatch)
+
+    rdp_widget._on_error("connect failed")
+    rdp_widget._on_disconnected()
+
+    assert shown == ["connect failed"]
+
+
+def test_failure_detail_explains_the_failure_when_it_knows_why(qtbot, monkeypatch):
+    # e.g. the IAP tunnel's refusal, which FreeRDP only sees as a closed socket.
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _FakeWorker)
+    shown = _capture_warnings(monkeypatch)
+    widget = RdpWidget("host", 3389, "user", "pass", failure_detail=lambda: "IAP tunnel refused")
+    qtbot.addWidget(widget)
+
+    widget._on_disconnected()
+
+    assert shown == ["IAP tunnel refused"]
+    widget.close_session()
