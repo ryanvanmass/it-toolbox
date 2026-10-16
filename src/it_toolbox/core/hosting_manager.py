@@ -176,7 +176,15 @@ class HostingConnection(RemoteHelperConnection):
     def site_update(self, name: str, changes: dict) -> dict:
         return self.call("site-update", {"name": name, **changes}, timeout=SLOW_TIMEOUT)["site"]
 
+    def site_vhost_set(self, name: str, template: str | None = None, reset: bool = False) -> dict:
+        """Saves an edited vhost template, or with reset=True goes back to the
+        generated one. Returns the new vhost (as in site-get's `vhost`)."""
+        args = {"name": name, "reset": True} if reset else {"name": name, "template": template}
+        return self.call("site-vhost-set", args)["vhost"]
+
     def site_custom_nginx(self, name: str, text: str) -> str:
+        """Release 6 and earlier, which have custom directives instead of the
+        vhost editor (their site-get has `custom_nginx`, not `vhost`)."""
         return self.call("site-custom-nginx", {"name": name, "text": text})["text"]
 
     def site_delete(self, name: str, delete_databases: bool, keep_files: bool) -> dict:

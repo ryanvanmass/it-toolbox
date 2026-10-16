@@ -62,7 +62,11 @@ SITES = [
     _site("cloud", ssl_mode="self-signed",
           certificate={"issuer": "Self-signed", "expires": "2027-10-16T00:00:00+00:00"},
           application={"name": "nextcloud", "version": "31.0.9", "admin_user": "admin", "admin_path": "/",
-                       "office": {"port": 9980, "state": "failed"}, "drawio": True}),
+                       "office": {"port": 9980, "state": "failed"}, "drawio": True},
+          custom_nginx=None,
+          vhost={"template": "server {\n    server_name {{server_name}};\n}\n", "edited": True, "outdated": True,
+                 "generated": "server {\n    server_name {{server_name}};\n    listen 443;\n}\n",
+                 "values": {"server_name": "cloud.com www.cloud.com"}, "path": "/etc/nginx/conf.d/hosting-cloud.conf"}),
 ]
 
 
@@ -187,6 +191,17 @@ class FakeConnection:
         app["office"] = {"port": 9980, "state": "active"} if enabled else None
         self.sites[name]["application"] = app
         return dict(self.sites[name])
+
+    def site_vhost_set(self, name, template=None, reset=False):
+        self._record("site_vhost_set", name, template, reset)
+        vhost = dict(self.sites[name]["vhost"])
+        vhost.update(template=vhost["generated"] if reset else template, edited=not reset, outdated=False)
+        self.sites[name]["vhost"] = vhost
+        return vhost
+
+    def site_custom_nginx(self, name, text):
+        self._record("site_custom_nginx", name, text)
+        return text
 
     def app_drawio(self, name, enabled):
         self._record("app_drawio", name, enabled)
@@ -664,3 +679,35 @@ def test_fail2ban_not_installed_offers_install(qtbot, monkeypatch):
     assert not widget.fail2ban_install.isHidden() and widget.fail2ban_settings_button.isHidden()
     widget.fail2ban_install.click()
     qtbot.waitUntil(lambda: ("stack_install", ["fail2ban"], []) in widget.connection.calls)
+
+
+def test_vhost_editor(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 2)
+    detail = widget.detail
+
+    assert "{{server_name}}" in detail.custom_nginx.toPlainText()
+    assert "/etc/nginx/conf.d/hosting-cloud.conf (edited)" in detail.nginx_note.text()
+    assert not detail.vhost_outdated_row.isHidden() and not detail.vhost_reset.isHidden()
+    detail.custom_nginx.setPlainText("server {\n    server_name {{server_name}};\n    listen 443;\n}\n")
+    detail._save_nginx()
+    qtbot.waitUntil(lambda: detail.vhost is not None and not detail.vhost["outdated"])
+    assert widget.connection.calls[-1][0:2] == ("site_vhost_set", "cloud")
+    assert detail.vhost_outdated_row.isHidden()
+
+    _yes(monkeypatch)
+    detail._reset_vhost()
+    qtbot.waitUntil(lambda: ("site_vhost_set", "cloud", None, True) in widget.connection.calls)
+    qtbot.waitUntil(lambda: detail.vhost_reset.isHidden())
+
+
+def test_old_servers_keep_custom_directives(qtbot):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+    detail = widget.detail
+
+    assert detail.vhost is None and detail.vhost_placeholders.isHidden() and detail.vhost_reset.isHidden()
+    detail.custom_nginx.setPlainText("autoindex on;")
+    detail._save_nginx()
+
+    qtbot.waitUntil(lambda: ("site_custom_nginx", "blog", "autoindex on;") in widget.connection.calls)

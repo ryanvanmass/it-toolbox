@@ -1,8 +1,8 @@
 """One Hosting Manager tab (General Tools): manages a web server set up by
 the user's cockpit-hosting Cockpit module over SSH, with the same features
 as that module's page -- sites (static, PHP, reverse proxy, Node.js,
-Python, container), SSL, databases, cron jobs, SFTP, logs, WordPress and
-Nextcloud deployment (with Nextcloud updates, Nextcloud Office and draw.io),
+Python, container), SSL, the nginx vhost editor, databases, cron jobs,
+SFTP, logs, WordPress and Nextcloud deployment (with Nextcloud updates, Nextcloud Office and draw.io),
 malware scanning and its alerts, fail2ban intrusion protection, and
 installing the server stack.
 See core/hosting_manager.py for how it talks to the server.
@@ -129,6 +129,7 @@ class SiteDetail(QWidget):
         super().__init__()
         self.manager = manager
         self.site: dict | None = None
+        self.vhost: dict | None = None
 
         self.heading = QLabel()
         font = self.heading.font()
@@ -181,7 +182,7 @@ class SiteDetail(QWidget):
         self._show_settings(site)
         self._show_https(site)
         self._show_databases(site)
-        self.custom_nginx.setPlainText(site.get("custom_nginx") or "")
+        self._show_nginx(site)
         self.manager.update_site_row(site)
         if previous != site["name"]:
             self.cron_table.setRowCount(0)
@@ -825,26 +826,108 @@ class SiteDetail(QWidget):
 
         self.busy("Loading the log…", lambda: self.connection.site_logs(name, log, lines), show)
 
-    # -- Custom nginx ----------------------------------------------------------
+    # -- nginx vhost ------------------------------------------------------------
 
     def _build_nginx_tab(self) -> QWidget:
+        """The site's whole nginx vhost as a template (cockpit-hosting 7+), or
+        on older servers the custom directives added to its server blocks."""
         page = QWidget()
-        note = QLabel("Extra nginx directives for this site's server block. They're checked with "
-                      "nginx -t before being applied, and rolled back if nginx rejects them.")
-        note.setWordWrap(True)
+        self.nginx_note = QLabel()
+        self.nginx_note.setWordWrap(True)
+        self.nginx_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.vhost_outdated = QLabel(
+            "Recent changes to this site are not in your edited vhost: the module's own vhost changed (for "
+            "example SSL, the HTTPS redirect or an application) in lines you edited, so it couldn't be merged "
+            "in. Compare with the generated vhost and carry the change over, or reset to the generated one."
+        )
+        self.vhost_outdated.setWordWrap(True)
+        self.vhost_outdated.setStyleSheet("color: #b35c00;")
+        self.vhost_generated_button = _button("Show Generated Vhost…", self._show_generated_vhost)
+        self.vhost_outdated_row = QWidget()
+        outdated_layout = QVBoxLayout(self.vhost_outdated_row)
+        outdated_layout.setContentsMargins(0, 0, 0, 0)
+        outdated_layout.addWidget(self.vhost_outdated)
+        outdated_layout.addLayout(_row(self.vhost_generated_button))
         self.custom_nginx = QPlainTextEdit()
         self.custom_nginx.setFont(dialogs.monospace())
-        self.custom_nginx.setPlaceholderText("location /downloads/ {\n    autoindex on;\n}")
+        self.custom_nginx.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.vhost_placeholders = _button("Placeholders…", self._show_vhost_placeholders)
+        self.vhost_discard = _button("Discard Changes", self._discard_vhost)
+        self.vhost_reset = _button("Reset to Generated…", self._reset_vhost)
         layout = QVBoxLayout(page)
-        layout.addWidget(note)
+        layout.addWidget(self.nginx_note)
+        layout.addWidget(self.vhost_outdated_row)
         layout.addWidget(self.custom_nginx, 1)
-        layout.addLayout(_row(_button("Save", self._save_nginx)))
+        layout.addLayout(_row(_button("Save", self._save_nginx), self.vhost_discard, self.vhost_reset,
+                              self.vhost_placeholders))
         return page
+
+    def _show_nginx(self, site: dict) -> None:
+        vhost = site.get("vhost")
+        self.vhost = vhost
+        editor = vhost is not None
+        if editor:
+            self.nginx_note.setText(
+                f"Written to {vhost.get('path')}" + (" (edited)" if vhost.get("edited") else " (generated)")
+                + ". Checked with nginx -t before it's applied: if nginx refuses it, nothing changes. Names in "
+                "double braces are filled in from the site's settings, so domain, PHP and certificate changes "
+                "still reach an edited vhost."
+            )
+            self.custom_nginx.setPlainText(vhost.get("template") or "")
+            self.custom_nginx.setPlaceholderText("")
+        else:
+            self.nginx_note.setText(
+                "Extra nginx directives for this site's server block. They're checked with nginx -t before "
+                "being applied, and rolled back if nginx rejects them. (Update cockpit-hosting on the server "
+                "to edit the whole vhost.)"
+            )
+            self.custom_nginx.setPlainText(site.get("custom_nginx") or "")
+            self.custom_nginx.setPlaceholderText("location /downloads/ {\n    autoindex on;\n}")
+        self.vhost_outdated_row.setVisible(editor and bool(vhost.get("outdated")))
+        self.vhost_placeholders.setVisible(editor)
+        self.vhost_discard.setVisible(editor)
+        self.vhost_reset.setVisible(editor and bool(vhost.get("edited")))
+
+    def _after_vhost_change(self, vhost: dict) -> None:
+        # Reload the whole site: the reply only carries the vhost.
+        self.load(self.name)
 
     def _save_nginx(self) -> None:
         name, text = self.name, self.custom_nginx.toPlainText()
-        self.busy("Saving the nginx directives…", lambda: self.connection.site_custom_nginx(name, text),
-                  self.custom_nginx.setPlainText, "nginx reloaded")
+        if self.vhost is None:
+            self.busy("Saving the nginx directives…", lambda: self.connection.site_custom_nginx(name, text),
+                      self.custom_nginx.setPlainText, "nginx reloaded")
+            return
+        if text == self.vhost.get("template"):
+            self.manager.flash("Nothing changed")
+            return
+        if not text.strip():
+            QMessageBox.warning(self, TITLE, "The vhost can't be empty. Use Reset to Generated instead.")
+            return
+        self.busy("Saving the nginx vhost…", lambda: self.connection.site_vhost_set(name, text),
+                  self._after_vhost_change, "Saved and applied")
+
+    def _discard_vhost(self) -> None:
+        if self.vhost is not None:
+            self.custom_nginx.setPlainText(self.vhost.get("template") or "")
+
+    def _reset_vhost(self) -> None:
+        name = self.name
+        if _confirm(self, "Reset Vhost", "Throw away your edits to this site's vhost? The module writes it from "
+                                         "the site's settings again."):
+            self.busy("Resetting the nginx vhost…", lambda: self.connection.site_vhost_set(name, reset=True),
+                      self._after_vhost_change, "Vhost reset")
+
+    def _show_generated_vhost(self) -> None:
+        if self.vhost is not None:
+            self.manager.show_text(f"Generated vhost for {self.name}", self.vhost.get("generated") or "")
+
+    def _show_vhost_placeholders(self) -> None:
+        if self.vhost is not None:
+            values = self.vhost.get("values") or {}
+            width = max((len(key) for key in values), default=0) + 4
+            self.manager.show_text("What the names in double braces stand for", "\n".join(
+                f"{'{{' + key + '}}':<{width}}  {value}" for key, value in values.items()))
 
 
 # -- The manager tab ---------------------------------------------------------------
