@@ -26,6 +26,7 @@ STATUS = {
         "node": {"version": None},
         "podman": {"version": "5.4.0", "quadlet": True},
         "python": {"version": "3.12.9", "venv": True},
+        "fail2ban": {"version": "1.1.0", "active": True},
     },
     "settings": {"acme_email": "me@ex.com", "dns_providers": {"porkbun": True, "cloudflare": False}},
 }
@@ -58,6 +59,14 @@ SITES = [
           app_env={"MODE": "prod"},
           container={"image": "docker.io/library/nginx:latest", "port": 80, "volumes": ["/data"],
                      "command": None, "auto_update": False, "enabled": True}),
+    _site("cloud", ssl_mode="self-signed",
+          certificate={"issuer": "Self-signed", "expires": "2027-10-16T00:00:00+00:00"},
+          application={"name": "nextcloud", "version": "31.0.9", "admin_user": "admin", "admin_path": "/",
+                       "office": {"port": 9980, "state": "failed"}, "drawio": True},
+          custom_nginx=None,
+          vhost={"template": "server {\n    server_name {{server_name}};\n}\n", "edited": True, "outdated": True,
+                 "generated": "server {\n    server_name {{server_name}};\n    listen 443;\n}\n",
+                 "values": {"server_name": "cloud.com www.cloud.com"}, "path": "/etc/nginx/conf.d/hosting-cloud.conf"}),
 ]
 
 
@@ -158,6 +167,77 @@ class FakeConnection:
         self._record("malware_finding", finding_id, action)
         return self.malware_status()
 
+    def malware_alerts(self, pushover=None, smtp=None):
+        self._record("malware_alerts", pushover, smtp)
+        return self.malware_status()
+
+    def malware_alert_test(self, target, changes):
+        self._record("malware_alert_test", target, changes)
+        return {"sent": [target]}
+
+    def ssl_self_signed(self, name, days):
+        self._record("ssl_self_signed", name, days)
+        self.sites[name].update(ssl_mode="self-signed")
+        return dict(self.sites[name])
+
+    def app_update(self, name):
+        self._record("app_update", name)
+        return {"site": dict(self.sites[name]), "previous_version": "31.0.9", "version": "32.0.1",
+                "drawio_error": "app store unreachable"}
+
+    def app_office(self, name, enabled):
+        self._record("app_office", name, enabled)
+        app = dict(self.sites[name]["application"])
+        app["office"] = {"port": 9980, "state": "active"} if enabled else None
+        self.sites[name]["application"] = app
+        return dict(self.sites[name])
+
+    def site_vhost_set(self, name, template=None, reset=False):
+        self._record("site_vhost_set", name, template, reset)
+        vhost = dict(self.sites[name]["vhost"])
+        vhost.update(template=vhost["generated"] if reset else template, edited=not reset, outdated=False)
+        self.sites[name]["vhost"] = vhost
+        return vhost
+
+    def site_custom_nginx(self, name, text):
+        self._record("site_custom_nginx", name, text)
+        return text
+
+    def app_drawio(self, name, enabled):
+        self._record("app_drawio", name, enabled)
+        return dict(self.sites[name])
+
+    def stack_install(self, components, php):
+        self._record("stack_install", components, php)
+        return {"installed": components}
+
+    def fail2ban_status(self):
+        return {"installed": True, "version": "1.1.0", "active": True, "enabled": True, "bantime": 3600,
+                "findtime": 600, "maxretry": 5, "increment": True, "ignoreip": ["198.51.100.0/24"],
+                "sync_failure": None,
+                "jails": [
+                    {"id": "sshd", "managed": True, "enabled": True, "selected": True, "running": True,
+                     "waiting": False, "failed": 3, "total_failed": 9, "banned_count": 1, "total_banned": 4,
+                     "banned": [{"ip": "203.0.113.5", "until": "2026-10-16 08:00:00"}]},
+                    {"id": "hosting-nextcloud", "managed": True, "enabled": True, "selected": True,
+                     "running": False, "waiting": True, "failed": 0, "total_failed": 0, "banned_count": 0,
+                     "total_banned": 0, "banned": []},
+                    {"id": "hosting-bad-request", "managed": True, "enabled": False, "selected": False,
+                     "running": False, "waiting": False, "failed": 0, "total_failed": 0, "banned_count": 0,
+                     "total_banned": 0, "banned": []},
+                    {"id": "postfix", "managed": False, "enabled": True, "selected": True, "running": True,
+                     "waiting": False, "failed": 0, "total_failed": 0, "banned_count": 0, "total_banned": 0,
+                     "banned": []},
+                ]}
+
+    def fail2ban_settings(self, settings):
+        self._record("fail2ban_settings", settings)
+        return self.fail2ban_status()
+
+    def fail2ban_unban(self, jail, ip, allow):
+        self._record("fail2ban_unban", jail, ip, allow)
+        return self.fail2ban_status()
+
 
 @pytest.fixture(autouse=True)
 def _reset_fake():
@@ -169,7 +249,7 @@ def _reset_fake():
 def _make(qtbot):
     widget = w.HostingManagerWidget(SERVER, connection_factory=FakeConnection)
     qtbot.addWidget(widget)
-    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 2)
+    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 3)
     return widget
 
 
@@ -311,7 +391,7 @@ def test_create_site(qtbot, monkeypatch):
     monkeypatch.setattr(dialogs.CreateSiteDialog, "exec", fake_exec)
     widget.create_site()
 
-    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 3)
+    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 4)
     assert ("site_create", {"type": "php", "domain": "new.com", "aliases": ["www.new.com", "alt.new.com"],
                             "name": "new", "php_version": "8.3"}) in widget.connection.calls
     qtbot.waitUntil(lambda: widget.detail.name == "new")
@@ -352,7 +432,7 @@ def test_delete_site(qtbot, monkeypatch):
     monkeypatch.setattr(dialogs.DeleteSiteDialog, "exec", fake_exec)
     widget.delete_site(widget.detail.site)
 
-    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 1)
+    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 2)
     assert ("site_delete", "shop", True, False) in widget.connection.calls
     assert widget.detail.site is None
 
@@ -424,3 +504,210 @@ def test_stack_dialog_marks_installed_components():
     dialog.components["clamav"].setChecked(True)
     dialog.php["8.4"].setChecked(True)
     assert dialog.selection() == (["clamav"], ["8.4"])
+
+
+def _yes(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+
+def test_stack_lists_fail2ban(qtbot):
+    widget = _make(qtbot)
+
+    stack_rows = {widget.stack_table.item(r, 0).text(): widget.stack_table.item(r, 1).text()
+                  for r in range(widget.stack_table.rowCount())}
+    assert stack_rows["fail2ban"] == "1.1.0"
+    dialog = dialogs.StackDialog(STATUS)
+    assert dialog.components["fail2ban"].text().endswith("(installed)")
+
+
+def test_nextcloud_site_shows_update_office_and_drawio(qtbot):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 2)
+    detail = widget.detail
+
+    assert not detail.update_app_button.isHidden()
+    assert not detail.nextcloud_extras.isHidden()
+    assert detail.office_label.text() == "Nextcloud Office: failed"
+    assert detail.office_setup.text() == "Repair" and not detail.office_remove.isHidden()
+    assert detail.drawio_label.text() == "draw.io: set up"
+    assert "Self-signed" in detail.https_state.text()
+    assert detail.self_signed.text() == "Make New Self-Signed Certificate…"
+
+
+def test_wordpress_site_has_no_nextcloud_extras(qtbot):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+
+    assert widget.detail.update_app_button.isHidden()
+    assert widget.detail.nextcloud_extras.isHidden()
+
+
+def test_office_repair(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 2)
+    _yes(monkeypatch)
+
+    widget.detail.office_setup.click()
+
+    qtbot.waitUntil(lambda: widget.detail.office_label.text() == "Nextcloud Office: running")
+    assert ("app_office", "cloud", True) in widget.connection.calls
+    assert widget.detail.office_setup.isHidden()
+
+
+def test_nextcloud_update_reports_versions_and_extra_failures(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 2)
+    _yes(monkeypatch)
+    info, warnings = [], []
+    monkeypatch.setattr(QMessageBox, "information", lambda parent, title, text: info.append(text))
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text: warnings.append(text))
+
+    widget.detail.update_app_button.click()
+
+    qtbot.waitUntil(lambda: bool(info))
+    assert ("app_update", "cloud") in widget.connection.calls
+    assert info == ["Nextcloud was updated from 31.0.9 to 32.0.1."]
+    assert len(warnings) == 1 and "draw.io could not be updated" in warnings[0]
+
+
+def test_self_signed_certificate(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+    monkeypatch.setattr(w.QInputDialog, "getItem", lambda *a, **k: ("2 years", True))
+
+    widget.detail.self_signed.click()
+
+    qtbot.waitUntil(lambda: ("ssl_self_signed", "blog", 730) in widget.connection.calls)
+    qtbot.waitUntil(lambda: "Self-signed" in widget.detail.https_state.text())
+
+
+def test_malware_alerts_dialog_sends_only_typed_secrets(qtbot):
+    alerts = {"pushover": {"enabled": True, "token_set": True, "user_set": True},
+              "smtp": {"enabled": False, "host": "", "port": 587, "security": "starttls", "username": "",
+                       "password_set": False, "sender": "", "recipients": []}}
+    tests = []
+    dialog = dialogs.MalwareAlertsDialog(alerts, lambda target, changes, _d: tests.append((target, changes)))
+    qtbot.addWidget(dialog)
+
+    assert dialog.pushover_ready()
+    assert dialog.pushover_changes() == {"enabled": True}
+    dialog.smtp_security.setCurrentIndex(dialog.smtp_security.findData("tls"))
+    assert dialog.smtp_port.value() == 465
+    dialog.smtp_enabled.setChecked(True)
+    dialog.smtp_host.setText("smtp.ex.com")
+    dialog.smtp_user.setText("me")
+    dialog.smtp_password.setText("pw")
+    dialog.smtp_sender.setText("server@ex.com")
+    dialog.smtp_recipients.setText("a@ex.com, b@ex.com")
+    dialog.smtp_test.click()
+
+    assert tests == [("smtp", {"enabled": True, "host": "smtp.ex.com", "port": 465, "security": "tls",
+                               "username": "me", "sender": "server@ex.com", "recipients": ["a@ex.com", "b@ex.com"],
+                               "password": "pw"})]
+    dialog.smtp_user.setText("")
+    assert dialog.smtp_changes()["clear_password"] is True
+    assert "password" not in dialog.smtp_changes()
+
+
+def test_malware_alerts_saved_and_shown(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    qtbot.waitUntil(lambda: bool(widget.malware))
+
+    def fake_exec(dialog):
+        dialog.pushover_enabled.setChecked(True)
+        dialog.pushover_token.setText("tok")
+        dialog.pushover_user.setText("usr")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(dialogs.MalwareAlertsDialog, "exec", fake_exec)
+    widget._edit_malware_alerts()
+
+    qtbot.waitUntil(lambda: any(c[0] == "malware_alerts" for c in widget.connection.calls))
+    call = next(c for c in widget.connection.calls if c[0] == "malware_alerts")
+    assert call[1] == {"enabled": True, "token": "tok", "user": "usr"}
+    assert call[2]["enabled"] is False
+
+
+def test_fail2ban_tab(qtbot):
+    widget = _make(qtbot)
+    qtbot.waitUntil(lambda: widget.bans_table.rowCount() == 1)
+
+    jails = {widget.jails_table.item(r, 0).text(): widget.jails_table.item(r, 1).text()
+             for r in range(widget.jails_table.rowCount())}
+    assert jails == {"SSH and SFTP logins": "Watching", "Nextcloud logins": "Waiting for a site",
+                     "postfix (set up outside cockpit-hosting)": "Watching"}
+    assert widget.bans_table.item(0, 0).text() == "203.0.113.5"
+    assert widget.bans_table.item(0, 1).text() == "SSH and SFTP logins"
+    info = widget.fail2ban_info.text()
+    assert "after 5 failures within 10 minutes, for 1 hour, longer for repeat offenders" in info
+    assert "198.51.100.0/24" in info
+    assert widget.fail2ban_install.isHidden()
+
+
+def test_fail2ban_unban_and_allow(qtbot):
+    widget = _make(qtbot)
+    qtbot.waitUntil(lambda: widget.bans_table.rowCount() == 1)
+
+    widget._unban(widget.fail2ban["jails"][0]["banned"][0] | {"jail": "sshd"}, True)
+
+    qtbot.waitUntil(lambda: ("fail2ban_unban", "sshd", "203.0.113.5", True) in widget.connection.calls)
+
+
+def test_fail2ban_settings_dialog(qtbot):
+    dialog = dialogs.Fail2banSettingsDialog(FakeConnection(SERVER).fail2ban_status())
+    qtbot.addWidget(dialog)
+
+    assert list(dialog.jails) == ["sshd", "hosting-nextcloud", "hosting-bad-request"]
+    dialog.jails["hosting-bad-request"].setChecked(True)
+    dialog.maxretry.setValue(3)
+    dialog.bantime.setCurrentIndex(dialog.bantime.findData(86400))
+    dialog.ignoreip.setPlainText("198.51.100.0/24\n192.0.2.7")
+
+    assert dialog.settings() == {
+        "enabled": True, "jails": ["sshd", "hosting-nextcloud", "hosting-bad-request"], "maxretry": 3,
+        "findtime": 600, "bantime": 86400, "increment": True, "ignoreip": ["198.51.100.0/24", "192.0.2.7"],
+    }
+    dialog.enabled.setChecked(False)
+    assert not dialog.jails["sshd"].isEnabled()
+
+
+def test_fail2ban_not_installed_offers_install(qtbot, monkeypatch):
+    monkeypatch.setattr(FakeConnection, "fail2ban_status", lambda self: {"installed": False, "jails": []})
+    widget = _make(qtbot)
+    qtbot.waitUntil(lambda: "isn't installed" in widget.fail2ban_info.text())
+
+    assert not widget.fail2ban_install.isHidden() and widget.fail2ban_settings_button.isHidden()
+    widget.fail2ban_install.click()
+    qtbot.waitUntil(lambda: ("stack_install", ["fail2ban"], []) in widget.connection.calls)
+
+
+def test_vhost_editor(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 2)
+    detail = widget.detail
+
+    assert "{{server_name}}" in detail.custom_nginx.toPlainText()
+    assert "/etc/nginx/conf.d/hosting-cloud.conf (edited)" in detail.nginx_note.text()
+    assert not detail.vhost_outdated_row.isHidden() and not detail.vhost_reset.isHidden()
+    detail.custom_nginx.setPlainText("server {\n    server_name {{server_name}};\n    listen 443;\n}\n")
+    detail._save_nginx()
+    qtbot.waitUntil(lambda: detail.vhost is not None and not detail.vhost["outdated"])
+    assert widget.connection.calls[-1][0:2] == ("site_vhost_set", "cloud")
+    assert detail.vhost_outdated_row.isHidden()
+
+    _yes(monkeypatch)
+    detail._reset_vhost()
+    qtbot.waitUntil(lambda: ("site_vhost_set", "cloud", None, True) in widget.connection.calls)
+    qtbot.waitUntil(lambda: detail.vhost_reset.isHidden())
+
+
+def test_old_servers_keep_custom_directives(qtbot):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+    detail = widget.detail
+
+    assert detail.vhost is None and detail.vhost_placeholders.isHidden() and detail.vhost_reset.isHidden()
+    detail.custom_nginx.setPlainText("autoindex on;")
+    detail._save_nginx()
+
+    qtbot.waitUntil(lambda: ("site_custom_nginx", "blog", "autoindex on;") in widget.connection.calls)

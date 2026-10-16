@@ -39,7 +39,7 @@ SITE_TYPE_LABELS = {
 # Sites that run an app the helper can start and stop.
 APP_SITE_TYPES = {"node", "python", "container"}
 
-STACK_COMPONENTS = ["nginx", "mariadb", "certbot", "nodejs", "python", "podman", "clamav"]
+STACK_COMPONENTS = ["nginx", "mariadb", "certbot", "nodejs", "python", "podman", "clamav", "fail2ban"]
 STACK_COMPONENT_LABELS = {
     "nginx": "nginx",
     "mariadb": "MariaDB",
@@ -48,6 +48,7 @@ STACK_COMPONENT_LABELS = {
     "python": "Python",
     "podman": "Podman (container sites)",
     "clamav": "ClamAV (malware scanning)",
+    "fail2ban": "fail2ban (intrusion protection)",
 }
 
 DNS_PROVIDERS = ["porkbun", "cloudflare"]
@@ -64,7 +65,11 @@ SSL_MODE_LABELS = {
     "letsencrypt-http": "Let's Encrypt (HTTP)",
     "letsencrypt-dns": "Let's Encrypt (DNS)",
     "custom": "Custom certificate",
+    "self-signed": "Self-signed",
 }
+# Lifetimes the Cockpit page offers for a self-signed certificate; the
+# helper takes days, at most 3650.
+SELF_SIGNED_YEARS = [1, 2, 5, 10]
 
 APPLICATIONS = ["wordpress", "nextcloud"]
 APPLICATION_LABELS = {"wordpress": "WordPress", "nextcloud": "Nextcloud"}
@@ -80,6 +85,52 @@ MALWARE_ACTION_LABELS = {
     "quarantine": "Move to quarantine",
     "delete": "Delete",
 }
+
+SMTP_SECURITY = ["starttls", "tls", "none"]
+SMTP_SECURITY_LABELS = {"starttls": "STARTTLS", "tls": "TLS", "none": "None (unencrypted)"}
+SMTP_PORTS = {"starttls": 587, "tls": 465, "none": 25}
+
+# The jails the module manages, in the helper's order, with what each
+# guards against (the Cockpit page's Fail2banCard JAILS).
+FAIL2BAN_JAILS = {
+    "sshd": ("SSH and SFTP logins", "Failed logins to the server, including the sites' SFTP users"),
+    "hosting-nginx-auth": ("Password-protected pages", "Wrong passwords for pages behind an nginx login"),
+    "hosting-botsearch": ("Vulnerability scanners",
+                          "Requests for phpMyAdmin, webmail or WordPress pages that don't exist"),
+    "hosting-forbidden": ("Hidden files", "Requests for files that are never served, such as .env and .git"),
+    "hosting-wordpress": ("WordPress logins", "Failed logins on WordPress sites"),
+    "hosting-wordpress-xmlrpc": ("WordPress XML-RPC", (
+        "Every call to xmlrpc.php, where password guessing goes. Also blocks the WordPress apps and Jetpack."
+    )),
+    "hosting-nextcloud": ("Nextcloud logins", "Failed logins and two-factor checks on Nextcloud sites"),
+    "hosting-bad-request": ("Malformed requests", "Requests nginx answers with 400 Bad Request"),
+}
+# (seconds, label) choices for fail2ban's time window and ban time.
+FAIL2BAN_DURATIONS = [
+    (600, "10 minutes"),
+    (3600, "1 hour"),
+    (6 * 3600, "6 hours"),
+    (86400, "1 day"),
+    (7 * 86400, "1 week"),
+    (30 * 86400, "30 days"),
+]
+# The time window only offers up to a day.
+FAIL2BAN_FINDTIMES = FAIL2BAN_DURATIONS[:4]
+
+
+def jail_label(jail_id: str) -> str:
+    return FAIL2BAN_JAILS.get(jail_id, (jail_id, ""))[0]
+
+
+def duration_label(seconds: int) -> str:
+    known = dict(FAIL2BAN_DURATIONS).get(seconds)
+    if known:
+        return known
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"{hours} hour" + ("" if hours == 1 else "s")
+    minutes = round(seconds / 60)
+    return f"{minutes} minute" + ("" if minutes == 1 else "s")
 
 
 HostingError = RemoteHelperError
@@ -125,7 +176,15 @@ class HostingConnection(RemoteHelperConnection):
     def site_update(self, name: str, changes: dict) -> dict:
         return self.call("site-update", {"name": name, **changes}, timeout=SLOW_TIMEOUT)["site"]
 
+    def site_vhost_set(self, name: str, template: str | None = None, reset: bool = False) -> dict:
+        """Saves an edited vhost template, or with reset=True goes back to the
+        generated one. Returns the new vhost (as in site-get's `vhost`)."""
+        args = {"name": name, "reset": True} if reset else {"name": name, "template": template}
+        return self.call("site-vhost-set", args)["vhost"]
+
     def site_custom_nginx(self, name: str, text: str) -> str:
+        """Release 6 and earlier, which have custom directives instead of the
+        vhost editor (their site-get has `custom_nginx`, not `vhost`)."""
         return self.call("site-custom-nginx", {"name": name, "text": text})["text"]
 
     def site_delete(self, name: str, delete_databases: bool, keep_files: bool) -> dict:
@@ -140,6 +199,19 @@ class HostingConnection(RemoteHelperConnection):
 
     def app_deploy(self, name: str, deploy_input: dict) -> dict:
         return self.call("app-deploy", {"name": name, **deploy_input}, timeout=SLOW_TIMEOUT)
+
+    def app_update(self, name: str) -> dict:
+        # Nextcloud's updater goes one major version at a time, then
+        # Nextcloud Office pulls Collabora's newest image.
+        return self.call("app-update", {"name": name}, timeout=SLOW_TIMEOUT)
+
+    def app_office(self, name: str, enabled: bool) -> dict:
+        # Setting up downloads Collabora Online's image (about 1 GB).
+        return self.call("app-office", {"name": name, "enabled": enabled}, timeout=SLOW_TIMEOUT)["site"]
+
+    def app_drawio(self, name: str, enabled: bool) -> dict:
+        # Installs the Nextcloud app from the app store.
+        return self.call("app-drawio", {"name": name, "enabled": enabled}, timeout=SLOW_TIMEOUT)["site"]
 
     def app_control(self, name: str, action: str) -> dict:
         timeout = SLOW_TIMEOUT if action == "pull" else 300
@@ -188,6 +260,9 @@ class HostingConnection(RemoteHelperConnection):
     def ssl_custom(self, name: str, certificate: str, private_key: str) -> dict:
         return self.call("ssl-custom", {"name": name, "certificate": certificate, "private_key": private_key})["site"]
 
+    def ssl_self_signed(self, name: str, days: int) -> dict:
+        return self.call("ssl-self-signed", {"name": name, "days": days})["site"]
+
     def ssl_remove(self, name: str) -> dict:
         return self.call("ssl-remove", {"name": name})["site"]
 
@@ -223,3 +298,22 @@ class HostingConnection(RemoteHelperConnection):
     def malware_finding(self, finding_id: int, action: str) -> dict:
         return self.call("malware-finding", {"id": finding_id, "action": action})
 
+    def malware_alerts(self, pushover: dict | None = None, smtp: dict | None = None) -> dict:
+        """Changes where scan alerts go. Secrets left out keep the stored ones."""
+        changes = {key: value for key, value in (("pushover", pushover), ("smtp", smtp)) if value is not None}
+        return self.call("malware-alerts", changes)
+
+    def malware_alert_test(self, target: str, changes: dict) -> dict:
+        """Sends a test alert with these (unsaved) values over the stored ones."""
+        return self.call("malware-alert-test", {"target": target, target: changes})
+
+    # -- Intrusion protection (fail2ban) ----------------------------------
+
+    def fail2ban_status(self) -> dict:
+        return self.call("fail2ban-status")
+
+    def fail2ban_settings(self, settings: dict) -> dict:
+        return self.call("fail2ban-settings", settings)
+
+    def fail2ban_unban(self, jail: str, ip: str, allow: bool) -> dict:
+        return self.call("fail2ban-unban", {"jail": jail, "ip": ip, "allow": allow})
