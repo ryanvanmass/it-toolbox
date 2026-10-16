@@ -72,6 +72,23 @@ def test_server_round_trips_as_hosting_server():
         (lambda c: c.dns_provider_set("cloudflare", None), {"configured": False}, "dns-provider-set",
          {"provider": "cloudflare", "clear": True}, {"configured": False}),
         (lambda c: c.settings_set("me@ex.com"), {}, "settings-set", {"acme_email": "me@ex.com"}, {}),
+        (lambda c: c.ssl_self_signed("a", 730), {"site": {"name": "a"}}, "ssl-self-signed",
+         {"name": "a", "days": 730}, {"name": "a"}),
+        (lambda c: c.app_update("a"), {"site": {}, "version": "32.0.1"}, "app-update", {"name": "a"},
+         {"site": {}, "version": "32.0.1"}),
+        (lambda c: c.app_office("a", True), {"site": {"name": "a"}}, "app-office", {"name": "a", "enabled": True},
+         {"name": "a"}),
+        (lambda c: c.app_drawio("a", False), {"site": {"name": "a"}}, "app-drawio", {"name": "a", "enabled": False},
+         {"name": "a"}),
+        (lambda c: c.malware_alerts(smtp={"enabled": False}), {"alerts": {}}, "malware-alerts",
+         {"smtp": {"enabled": False}}, {"alerts": {}}),
+        (lambda c: c.malware_alert_test("pushover", {"token": "t"}), {"sent": ["pushover"]}, "malware-alert-test",
+         {"target": "pushover", "pushover": {"token": "t"}}, {"sent": ["pushover"]}),
+        (lambda c: c.fail2ban_status(), {"installed": True}, "fail2ban-status", {}, {"installed": True}),
+        (lambda c: c.fail2ban_settings({"maxretry": 3}), {"maxretry": 3}, "fail2ban-settings", {"maxretry": 3},
+         {"maxretry": 3}),
+        (lambda c: c.fail2ban_unban("sshd", "203.0.113.5", True), {"jails": []}, "fail2ban-unban",
+         {"jail": "sshd", "ip": "203.0.113.5", "allow": True}, {"jails": []}),
     ],
 )
 def test_methods_match_the_cockpit_pages_helper_calls(call, reply, subcommand, args, result):
@@ -88,6 +105,9 @@ def test_methods_match_the_cockpit_pages_helper_calls(call, reply, subcommand, a
         lambda c: c.app_deploy("a", {"application": "nextcloud"}),
         lambda c: c.app_control("a", "pull"),
         lambda c: c.ssl_issue("a", "dns", "porkbun"),
+        lambda c: c.app_update("a"),
+        lambda c: c.app_office("a", True),
+        lambda c: c.app_drawio("a", True),
     ],
 )
 def test_slow_calls_get_the_long_timeout(call):
@@ -100,3 +120,11 @@ def test_ssl_issue_over_http_sends_no_provider():
     conn = _Scripted({"site": {}})
     conn.ssl_issue("a", "http")
     assert conn.calls[0][1] == {"name": "a", "method": "http"}
+
+
+def test_duration_labels():
+    assert hm.duration_label(3600) == "1 hour"
+    assert hm.duration_label(7200) == "2 hours"
+    assert hm.duration_label(120) == "2 minutes"
+    assert hm.jail_label("hosting-nextcloud") == "Nextcloud logins"
+    assert hm.jail_label("custom-jail") == "custom-jail"
