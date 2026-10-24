@@ -70,17 +70,50 @@ SITES = [
 ]
 
 
+BACKUP = {
+    "enabled": True, "schedule": "0 2 * * *", "keep": {"daily": 7, "weekly": 4, "monthly": 6}, "alerts": True,
+    "installed": True, "versions": {"restic": "0.17.3", "rclone": "1.68"},
+    "destination": {"kind": "sftp", "path": "backups/web", "host": "nas.lan", "port": 22, "user": "bk",
+                    "password_set": True, "private_key_set": False},
+    "host": "web", "running": False, "busy_sites": [], "next_run": "Sat 2026-10-25 02:00:00 EDT",
+    "alert_failure": None,
+    "runs": [{"id": 2, "site": "shop", "kind": "backup", "started_at": "2026-10-24T02:00:00+00:00",
+              "finished_at": "2026-10-24T02:01:00+00:00", "state": "failed", "snapshot": None, "bytes_added": None,
+              "failure": "rclone: connection refused", "detail": None},
+             {"id": 1, "site": "blog", "kind": "backup", "started_at": "2026-10-24T02:00:00+00:00",
+              "finished_at": "2026-10-24T02:00:30+00:00", "state": "done", "snapshot": "a1b2c3d4e5f6",
+              "bytes_added": 2048, "failure": None, "detail": {"databases": ["blog_wp"], "files": 10, "size": 1}}],
+    "sites": [{"name": "blog", "mode": "global", "schedule": None, "last_backup": "2026-10-24T02:00:30+00:00"},
+              {"name": "shop", "mode": "custom", "schedule": "0 */6 * * *", "last_backup": None},
+              {"name": "cloud", "mode": "off", "schedule": None, "last_backup": None}],
+}
+
+TRAFFIC = {
+    "range": "24h", "start": 1761264000, "end": 1761350400, "bucket": 3600,
+    "series": [{"time": 1761264000 + i * 3600, "requests": i, "bytes": i * 100, "visitors": 1,
+                "client_errors": 0, "server_errors": 0} for i in range(24)],
+    "totals": {"requests": 276, "bytes": 27600, "visitors": 3, "client_errors": 4, "server_errors": 0},
+    "statuses": [{"status": 200, "requests": 272}, {"status": 404, "requests": 4}],
+    "pages": [{"path": "/", "requests": 200, "bytes": 20000}],
+    "visitors": [{"ip": "203.0.113.9", "requests": 150, "bytes": 15000}],
+    "missing": [{"path": "/wp-login.php", "requests": 4}], "referrers": [],
+    "log_start": None, "truncated": False, "unparsed": 2, "log": "/home/blog/logs/access.log",
+}
+
+
 class FakeConnection:
     instances = []
     connect_errors = []
     helper_path = hm.HELPER_PATH
+    extra_sites = []
 
     def __init__(self, server, **credentials):
         self.server = server
         self.credentials = credentials
         self.calls = []
         self.helper_path = type(self).helper_path
-        self.sites = {s["name"]: dict(s) for s in SITES}
+        self.sites = {s["name"]: dict(s) for s in [*SITES, *type(self).extra_sites]}
+        self.storage_job = None
         FakeConnection.instances.append(self)
 
     def connect(self):
@@ -238,24 +271,133 @@ class FakeConnection:
         self._record("fail2ban_unban", jail, ip, allow)
         return self.fail2ban_status()
 
+    def site_disable(self, name):
+        self._record("site_disable", name)
+        self.sites[name]["disabled"] = True
+        return dict(self.sites[name])
+
+    def site_enable(self, name):
+        self._record("site_enable", name)
+        self.sites[name]["disabled"] = False
+        return dict(self.sites[name])
+
+    def site_traffic(self, name, traffic_range):
+        self._record("site_traffic", name, traffic_range)
+        return TRAFFIC
+
+    def storage_status(self, name, usage=False):
+        return {"storage": None, "storage_dir": f"/home/{name}", "home": f"/home/{name}", "job": self.storage_job,
+                "moving": False, **({"used": 5 * 1024 * 1024, "free": None} if usage else {})}
+
+    def storage_move(self, name, location, keep_old):
+        self._record("storage_move", name, location, keep_old)
+        self.storage_job = {"from": f"/home/{name}", "to": location, "state": "running", "step": "Copying",
+                            "progress": 40, "failure": None, "result": None, "keep_old": keep_old}
+        return self.storage_status(name)
+
+    def storage_clear(self, name):
+        self._record("storage_clear", name)
+        self.storage_job = None
+        return self.storage_status(name)
+
+    def schedule_check(self, schedule):
+        self._record("schedule_check", schedule)
+        if schedule == "bad":
+            raise rh.RemoteHelperError("Not a cron schedule or systemd calendar expression")
+        return {"on_calendar": "*-*-* 02:00:00", "next_run": "Sat 2026-10-25 02:00:00"}
+
+    def cron_create(self, name, schedule, command):
+        self._record("cron_create", name, schedule, command)
+        return {}
+
+    def app_deploy(self, name, deploy_input):
+        self._record("app_deploy", name, deploy_input)
+        app = deploy_input["application"]
+        self.sites[name]["application"] = {"name": app, "version": "1", "admin_user": "me", "admin_path": "/"}
+        return {"site": dict(self.sites[name]), "admin_url": f"https://{name}.com/", "admin_user": "me",
+                "admin_password": "secret"}
+
+    def app_team_folders(self, name, enabled):
+        self._record("app_team_folders", name, enabled)
+        app = dict(self.sites[name]["application"])
+        app["team_folders"] = enabled
+        self.sites[name]["application"] = app
+        return dict(self.sites[name])
+
+    def import_status(self):
+        return {"job": None, "running": False, "source": None, "scan": None, "public_key": None}
+
+    def backup_status(self):
+        return BACKUP
+
+    def backup_snapshots(self, name):
+        return [{"id": "a1b2c3d4e5f6a7b8", "short_id": "a1b2c3d4", "time": "2026-10-24T02:00:30+00:00",
+                 "host": "web", "paths": [], "size": 4096, "files": 10}]
+
+    def backup_site(self, name, mode, schedule=None):
+        self._record("backup_site", name, mode, schedule)
+        return BACKUP
+
+    def backup_restore(self, name, snapshot, files, databases):
+        self._record("backup_restore", name, snapshot, files, databases)
+        return BACKUP
+
+    def backup_now(self, name=None):
+        self._record("backup_now", name)
+        return BACKUP
+
+    def backup_destination(self, destination, password=""):
+        self._record("backup_destination", destination, password)
+        return {**BACKUP, "repository": "opened"}
+
+    def repo_status(self, name):
+        return {"url": f"https://{name}.com", "fingerprint": "ABCD1234", "key_url": f"https://{name}.com/key.asc",
+                "repo_file_url": "", "sources_url": "", "commands": {"dnf": "dnf config-manager …", "apt": "curl …"},
+                "incoming": f"/home/{name}/htdocs/incoming", "sftp_path": "/htdocs/incoming",
+                "packages": [{"kind": "rpm", "file": "tool-1.0-1.noarch.rpm", "size": 2048, "modified": "today"}],
+                "waiting": [{"file": "broken.rpm", "reason": "not signed"}], "indexed_at": None,
+                "last_error": None, "watching": False}
+
+    def repo_delete(self, name, kind, file):
+        self._record("repo_delete", name, kind, file)
+        return self.repo_status(name)
+
+    def forgejo_runners(self, name):
+        return [{"id": 1, "name": "git-1", "labels": ["docker:docker://node:22"], "capacity": 2, "uuid": "u",
+                 "state": "active", "status": "idle", "version": "v13.0.0"}]
+
+    def forgejo_runner_add(self, name, runner_name="", labels=None, capacity=1):
+        self._record("forgejo_runner_add", name, runner_name, labels, capacity)
+        return self.forgejo_runners(name)
+
+    def zabbix_status(self, name):
+        return {"zabbixdb": "active", "zabbixserver": "failed", "import_running": False,
+                "counts": {"hosts": 12, "templates": 300}}
+
+    def zabbix_update(self, name, version=""):
+        self._record("zabbix_update", name, version)
+        return {"site": dict(self.sites[name]), "previous_version": "7.0.5", "version": "7.4.1"}
+
 
 @pytest.fixture(autouse=True)
 def _reset_fake():
     FakeConnection.instances = []
     FakeConnection.connect_errors = []
     FakeConnection.helper_path = hm.HELPER_PATH
+    FakeConnection.extra_sites = []
 
 
 def _make(qtbot):
     widget = w.HostingManagerWidget(SERVER, connection_factory=FakeConnection)
     qtbot.addWidget(widget)
-    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 3)
+    qtbot.waitUntil(lambda: widget.site_table.rowCount() == 3 + len(FakeConnection.extra_sites))
     return widget
 
 
 def _select(qtbot, widget, row):
+    name = [*SITES, *FakeConnection.extra_sites][row]["name"]
     widget.site_table.selectRow(row)
-    qtbot.waitUntil(lambda: widget.detail.site is not None and widget.detail.name == SITES[row]["name"])
+    qtbot.waitUntil(lambda: widget.detail.site is not None and widget.detail.name == name)
 
 
 def test_connects_and_lists_sites_databases_malware_and_stack(qtbot):
@@ -410,7 +552,7 @@ def test_create_site_dialog_fields_follow_the_type(qtbot):
 
     assert dialog.form.isRowVisible(dialog.image) and not dialog.form.isRowVisible(dialog.php_version)
     assert dialog.site_input() == {
-        "type": "container", "domain": "app.com", "aliases": [], "name": "", "app_env": {"A": "1"},
+        "type": "container", "domain": "app.com", "aliases": ["www.app.com"], "name": "", "app_env": {"A": "1"},
         "image": "ghcr.io/x/y:1", "container_port": 8080, "volumes": ["/data", "/config"],
     }
 
@@ -711,3 +853,375 @@ def test_old_servers_keep_custom_directives(qtbot):
     detail._save_nginx()
 
     qtbot.waitUntil(lambda: ("site_custom_nginx", "blog", "autoindex on;") in widget.connection.calls)
+
+
+# -- Parity with cockpit-hosting releases 8 to 14 and Zabbix ------------------------------
+
+REPO_SITE = _site("pkgs", "static", application={"name": "repo", "version": "", "admin_user": "", "admin_path": "",
+                                                  "fingerprint": "ABCD1234"})
+FORGEJO_SITE = _site("git", "container", app_state="active", ssl_mode="letsencrypt-dns",
+                     container={"image": "data.forgejo.org/forgejo/forgejo:17-rootless", "port": 3000,
+                                "volumes": ["/var/lib/gitea"], "command": None, "auto_update": False, "enabled": True},
+                     application={"name": "forgejo", "version": "17.0.1", "admin_user": "ryan",
+                                  "admin_path": "/-/admin", "ssh_port": 2222, "runners": []})
+ZABBIX_SITE = _site("zbx", "container", app_state="active",
+                    container={"image": "zabbix/zabbix-web-nginx-pgsql:alpine-7.0-latest", "port": 8080,
+                               "volumes": [], "command": None, "auto_update": False, "enabled": True},
+                    application={"name": "zabbix", "version": "7.0.5", "admin_user": "", "admin_path": "/",
+                                 "zabbix": "7.0", "engine": "postgresql", "server_port": 10051, "imported": None})
+
+FULL_STATUS = {**STATUS, "stack": {**STATUS["stack"], "repo": {"version": None, "ready": False},
+                                   "backup": {"version": "0.17.3", "rclone": "1.68"}},
+               "settings": {**STATUS["settings"], "storage_default": "/srv/sites"}}
+
+
+def test_create_dialog_offers_the_ready_made_applications(qtbot):
+    dialog = dialogs.CreateSiteDialog(FULL_STATUS)
+    qtbot.addWidget(dialog)
+
+    kinds = [dialog.type.itemData(i) for i in range(dialog.type.count())]
+    assert kinds[:5] == ["wordpress", "nextcloud", "repo", "forgejo", "zabbix"]
+    repo = dialog.type.model().item(kinds.index("repo"))
+    assert not repo.isEnabled()
+    assert "package repository tools" in dialog.type.itemData(kinds.index("repo"), w.Qt.ItemDataRole.ToolTipRole)
+    assert dialog.type.currentData() == "php"
+
+
+def test_create_forgejo_site_input_and_admin(qtbot):
+    dialog = dialogs.CreateSiteDialog(FULL_STATUS)
+    qtbot.addWidget(dialog)
+    dialog.type.setCurrentIndex(dialog.type.findData("forgejo"))
+    dialog.domain.setText("git.example.com")
+    dialog.deploy.admin_user.setText("ryan")
+
+    assert not dialog.form.isRowVisible(dialog.image) and dialog.form.isRowVisible(dialog.deploy.admin_user)
+    assert not dialog.form.isRowVisible(dialog.www)
+    assert dialog.site_input() == {"type": "container", "domain": "git.example.com", "aliases": [], "name": "",
+                                   "application": "forgejo"}
+    assert dialog.deploy_input() == {"application": "forgejo", "admin_user": "ryan"}
+    dialog.deploy.admin_user.setText("")
+    assert "Forgejo needs an admin user" in dialog.deploy.problem()
+
+
+def test_create_zabbix_site_input(qtbot):
+    dialog = dialogs.CreateSiteDialog(FULL_STATUS)
+    qtbot.addWidget(dialog)
+    dialog.type.setCurrentIndex(dialog.type.findData("zabbix"))
+    dialog.domain.setText("zbx.example.com")
+    dialog.zabbix_version.setCurrentIndex(dialog.zabbix_version.findData("7.4"))
+    dialog.deploy.admin_password.setText("long-password")
+
+    assert not dialog.form.isRowVisible(dialog.deploy.admin_user)
+    assert dialog.site_input()["zabbix_version"] == "7.4"
+    assert dialog.deploy_input() == {"application": "zabbix", "admin_password": "long-password"}
+
+
+def test_create_wordpress_deploys_after_creating(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    shown = []
+
+    def fake_exec(dialog):
+        dialog.type.setCurrentIndex(dialog.type.findData("wordpress"))
+        dialog.domain.setText("new.com")
+        dialog.name.setText("new")
+        dialog.deploy.admin_email.setText("me@new.com")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(dialogs.CreateSiteDialog, "exec", fake_exec)
+    monkeypatch.setattr(dialogs.CredentialsDialog, "exec", lambda dialog: shown.append(dialog) or 0)
+    widget.create_site()
+
+    qtbot.waitUntil(lambda: bool(shown))
+    calls = widget.connection.calls
+    assert ("site_create", {"type": "php", "domain": "new.com", "aliases": ["www.new.com"], "name": "new",
+                            "php_version": "8.3"}) in calls
+    deploy = next(c for c in calls if c[0] == "app_deploy")
+    assert deploy[1:] == ("new", {"application": "wordpress", "admin_email": "me@new.com"})
+
+
+def test_disable_and_enable_site(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+    _yes(monkeypatch)
+    detail = widget.detail
+
+    detail.disable_button.click()
+    qtbot.waitUntil(lambda: ("site_disable", "blog") in widget.connection.calls)
+    qtbot.waitUntil(lambda: detail.disable_button.text() == "Enable Site")
+    assert not detail.disabled_note.isHidden()
+    assert widget.site_table.item(0, 0).text() == "blog.com (disabled)"
+
+    detail.disable_button.click()
+    qtbot.waitUntil(lambda: ("site_enable", "blog") in widget.connection.calls)
+    qtbot.waitUntil(lambda: detail.disabled_note.isHidden())
+
+
+def test_traffic_tab_loads_with_its_range(qtbot):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+    detail = widget.detail
+
+    detail.tabs.setCurrentIndex(detail.traffic_index)
+    qtbot.waitUntil(lambda: ("site_traffic", "blog", "24h") in widget.connection.calls)
+    qtbot.waitUntil(lambda: detail.traffic.pages_table.rowCount() == 1)
+    assert "Requests: 276" in detail.traffic.totals.text() and "(1.4%)" in detail.traffic.totals.text()
+    assert detail.traffic.statuses_table.item(1, 1).text() == "4 (1.4%)"
+    assert "2 lines were not in nginx's log format" in detail.traffic.source.text()
+
+    assert not detail.traffic.chart.grab().isNull()  # paints the bars and scale
+    detail.traffic.range.setCurrentIndex(detail.traffic.range.findData("365d"))
+    qtbot.waitUntil(lambda: ("site_traffic", "blog", "365d") in widget.connection.calls)
+
+
+def test_move_files_shows_progress(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+    detail = widget.detail
+    seen = []
+
+    def fake_exec(dialog):
+        seen.append(dialog)
+        dialog.location.setText("/srv/sites/")
+        dialog.keep_old.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(dialogs.MoveStorageDialog, "exec", fake_exec)
+    detail.move_button.click()
+
+    qtbot.waitUntil(lambda: ("storage_move", "blog", "/srv/sites", True) in widget.connection.calls)
+    qtbot.waitUntil(lambda: "Moving the files to /srv/sites: Copying (40%)" in detail.storage_note.text())
+    assert not detail.move_button.isEnabled()
+    detail.stop()
+
+
+def test_move_dialog_needs_a_folder_when_files_are_home(qtbot, monkeypatch):
+    dialog = dialogs.MoveStorageDialog(SITES[0], 5 * 1024 * 1024)
+    qtbot.addWidget(dialog)
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+
+    dialog._accept()
+
+    assert warnings and "already in the home folder" in warnings[0]
+    dialog.location.setText("/mnt/disk")
+    assert "/mnt/disk/blog" in dialog.help.text()
+
+
+def test_cron_dialog_checks_the_schedule(qtbot):
+    checks = []
+
+    def checker(schedule):
+        checks.append(schedule)
+        if schedule == "bad":
+            raise rh.RemoteHelperError("Not a cron schedule")
+        return {"on_calendar": "*-*-* 02:00:00", "next_run": "tomorrow 02:00"}
+
+    dialog = dialogs.CronJobDialog(checker=checker)
+    qtbot.addWidget(dialog)
+    dialog.schedule.edit.setText("0 2 * * *")
+    qtbot.waitUntil(lambda: "tomorrow 02:00" in dialog.schedule.result.text())
+    assert dialog.schedule.error() is None
+
+    dialog.schedule.edit.setText("bad")
+    qtbot.waitUntil(lambda: dialog.schedule.error() == "Not a cron schedule")
+    assert checks == ["0 2 * * *", "bad"]
+
+
+def test_team_folders(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 2)
+    _yes(monkeypatch)
+    detail = widget.detail
+
+    assert detail.team_folders_label.text() == "Team folders: not set up"
+    detail.team_folders_setup.click()
+
+    qtbot.waitUntil(lambda: detail.team_folders_label.text() == "Team folders: set up")
+    assert ("app_team_folders", "cloud", True) in widget.connection.calls
+
+
+def test_backups_tab(qtbot):
+    widget = _make(qtbot)
+    tab = widget.backups_tab
+    qtbot.waitUntil(lambda: tab.sites_table.rowCount() == 3)
+
+    assert "bk@nas.lan:backups/web" in tab.info.text()
+    assert "The last backup failed for: shop.com" in tab.info.text()
+    assert tab.sites_table.item(1, 1).text() == "Own schedule: Every 6 hours"
+    assert tab.sites_table.item(1, 2).text() == "Never — last one failed"
+    assert tab.runs_table.item(1, 2).text() == "Snapshot a1b2c3d4, 1 database, 2.0 KB new"
+    assert tab.runs_table.item(0, 3).text() == "Failed: rclone: connection refused"
+    assert tab.install_button.isHidden() and not tab.now_button.isHidden()
+
+
+def test_site_backups_restore(qtbot, monkeypatch):
+    widget = _make(qtbot)
+    _select(qtbot, widget, 0)
+    detail = widget.detail
+    detail.tabs.setCurrentIndex(detail.backups_index)
+    qtbot.waitUntil(lambda: detail.backups.snapshots_table.rowCount() == 1)
+    assert detail.backups.modes["global"].isChecked()
+
+    def fake_exec(dialog):
+        dialog.databases.setChecked(False)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(dialogs.RestoreDialog, "exec", fake_exec)
+    detail.backups.snapshots_table.selectRow(0)
+    detail.backups._restore()
+    qtbot.waitUntil(lambda: ("backup_restore", "blog", "a1b2c3d4e5f6a7b8", True, False) in widget.connection.calls)
+
+    detail.backups.modes["off"].setChecked(True)
+    detail.backups._save()
+    qtbot.waitUntil(lambda: ("backup_site", "blog", "off", None) in widget.connection.calls)
+
+
+def test_backup_destination_dialog_keeps_saved_secrets(qtbot):
+    dialog = dialogs.BackupDestinationDialog(BACKUP)
+    qtbot.addWidget(dialog)
+
+    assert dialog.kind.currentData() == "sftp"
+    assert dialog.problem() is None
+    assert dialog.destination() == {"kind": "sftp", "path": "backups/web", "host": "nas.lan", "port": 22,
+                                    "user": "bk"}
+    dialog.kind.setCurrentIndex(dialog.kind.findData("s3"))
+    assert dialog.problem() == "S3 needs an access key and a secret key."
+    dialog.kind.setCurrentIndex(dialog.kind.findData("local"))
+    dialog.local_path.setText("relative")
+    assert "absolute" in dialog.problem()
+
+
+def test_package_repository_card(qtbot, monkeypatch):
+    FakeConnection.extra_sites = [REPO_SITE]
+    widget = _make(qtbot)
+    _select(qtbot, widget, 3)
+    card = widget.detail.repo_card
+    _yes(monkeypatch)
+
+    qtbot.waitUntil(lambda: card.packages.rowCount() == 2)
+    assert not card.isHidden() and widget.detail.application_box.isHidden()
+    assert "Uploads are not being watched" in card.problem.text()
+    assert card.packages.item(1, 1).text() == "incoming"
+    card.packages.selectRow(1)
+    card._delete()
+    qtbot.waitUntil(lambda: ("repo_delete", "pkgs", "incoming", "broken.rpm") in widget.connection.calls)
+
+
+def test_forgejo_card_and_runner(qtbot, monkeypatch):
+    FakeConnection.extra_sites = [FORGEJO_SITE]
+    widget = _make(qtbot)
+    _select(qtbot, widget, 3)
+    card = widget.detail.forgejo_card
+
+    qtbot.waitUntil(lambda: card.runners.rowCount() == 1)
+    assert "ssh://git@git.com:2222/OWNER/REPO.git" in card.info.text()
+    assert card.runners.item(0, 3).text() == "Idle"
+    assert card.admin_button.isHidden() and not card.password_button.isHidden()
+    assert widget.detail.settings_form.isRowVisible(widget.detail.image)
+
+    def fake_exec(dialog):
+        dialog.runner_name.setText("big")
+        dialog.capacity.setValue(4)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(dialogs.AddRunnerDialog, "exec", fake_exec)
+    card._add_runner()
+    qtbot.waitUntil(lambda: ("forgejo_runner_add", "git", "big", hm.FORGEJO_DEFAULT_LABELS, 4)
+                    in widget.connection.calls)
+    card.stop()
+
+
+def test_zabbix_card(qtbot, monkeypatch):
+    FakeConnection.extra_sites = [ZABBIX_SITE]
+    widget = _make(qtbot)
+    _select(qtbot, widget, 3)
+    detail = widget.detail
+    card = detail.zabbix_card
+
+    qtbot.waitUntil(lambda: "server failed" in card.info.text())
+    assert "12 hosts, 300 templates" in card.info.text()
+    assert "Admin still has the default password" in card.info.text()
+    assert not card.admin_button.isHidden()
+    assert not detail.settings_form.isRowVisible(detail.image)
+
+    def fake_exec(dialog):
+        dialog.release.setCurrentIndex(dialog.release.findData("7.4"))
+        return QDialog.DialogCode.Accepted
+
+    infos = []
+    monkeypatch.setattr(dialogs.ZabbixUpdateDialog, "exec", fake_exec)
+    monkeypatch.setattr(QMessageBox, "information", lambda parent, title, text: infos.append(text))
+    card._update()
+    qtbot.waitUntil(lambda: bool(infos))
+    assert ("zabbix_update", "zbx", "7.4") in widget.connection.calls
+    assert infos == ["Zabbix was updated from 7.0.5 to 7.4.1."]
+    card.stop()
+
+
+def test_zabbix_update_dialog_offers_only_newer_releases(qtbot):
+    dialog = dialogs.ZabbixUpdateDialog("7.2")
+    qtbot.addWidget(dialog)
+
+    assert [dialog.release.itemData(i) for i in range(dialog.release.count())] == ["7.2", "7.4"]
+    assert dialog.new_release() == ""
+
+
+def test_server_tab_shows_new_components_and_storage(qtbot, monkeypatch):
+    monkeypatch.setattr(FakeConnection, "status", lambda self: FULL_STATUS)
+    widget = _make(qtbot)
+
+    stack_rows = {widget.stack_table.item(r, 0).text(): widget.stack_table.item(r, 1).text()
+                  for r in range(widget.stack_table.rowCount())}
+    assert stack_rows["restic (backups)"] == "0.17.3, rclone 1.68"
+    assert stack_rows["Package repository tools"] == "Not installed"
+    assert widget.storage_default.text() == "/srv/sites/<site>"
+    dialog = dialogs.StackDialog(FULL_STATUS)
+    assert dialog.components["backup"].text().endswith("(installed)")
+    assert not dialog.components["repo"].text().endswith("(installed)")
+
+
+def test_cloudpanel_import_choices(qtbot):
+    scan = {
+        "source": {"host": "cp.lan", "port": 22, "user": "root", "auth": "password", "fingerprint": "SHA256:x",
+                   "cloudpanel_version": "2.5", "db_version": "8.0", "mysql_error": None},
+        "php_here": ["8.3"],
+        "scanned_at": "",
+        "sites": [
+            {"id": 1, "domain": "shop.com", "domains": ["shop.com"], "cloudpanel_type": "php", "type": "php",
+             "application": "WooCommerce", "user": "shop", "name": "shop", "existing": None, "root": "shop.com",
+             "php_version": "8.2", "php_target": None, "php_settings": {}, "app_port": None, "app_command": None,
+             "upstream": None, "force_https": True, "databases": [], "cron": [], "certificate": None,
+             "sftp_keys": 0, "size": 1024, "skipped": [], "notes": [],
+             "blockers": ["PHP 8.2 is not installed here"]},
+            {"id": 2, "domain": "api.com", "domains": ["api.com"], "cloudpanel_type": "nodejs", "type": "node",
+             "application": None, "user": "api", "name": "api", "existing": None, "root": "api.com",
+             "php_version": None, "php_target": None, "php_settings": {}, "app_port": 3000,
+             "app_command": "npm start", "upstream": None, "force_https": False, "databases": [], "cron": [],
+             "certificate": None, "sftp_keys": 1, "size": None, "skipped": ["Node.js version"], "notes": [],
+             "blockers": []},
+            {"id": 3, "domain": "old.com", "domains": ["old.com"], "cloudpanel_type": "static", "type": "static",
+             "application": None, "user": "old", "name": "old", "existing": "old", "root": "old.com",
+             "php_version": None, "php_target": None, "php_settings": {}, "app_port": None, "app_command": None,
+             "upstream": None, "force_https": False, "databases": [], "cron": [], "certificate": None,
+             "sftp_keys": 0, "size": 10, "skipped": [], "notes": [], "blockers": []},
+        ],
+    }
+
+    class Conn(FakeConnection):
+        def import_status(self):
+            return {"job": None, "running": False, "source": scan["source"], "scan": scan, "public_key": None}
+
+    from it_toolbox.widgets import hosting_import
+
+    dialog = hosting_import.CloudPanelImportDialog(Conn(SERVER))
+    qtbot.addWidget(dialog)
+    qtbot.waitUntil(lambda: dialog.sites_table.rowCount() == 3)
+
+    assert not dialog.sites_table.cellWidget(0, 0).isEnabled()
+    dialog.sites_table.cellWidget(1, 4).setText("api2")
+    assert dialog.chosen() == [{"id": 2, "name": "api2", "app_command": "npm start"}, {"id": 3}]
+    php = dialog.sites_table.cellWidget(0, 3)
+    php.setCurrentIndex(php.findData("8.3"))
+    assert dialog.sites_table.cellWidget(0, 0).isChecked()
+    assert dialog.chosen()[0] == {"id": 1, "name": "shop", "php_version": "8.3"}
+    assert "Not copied (no equivalent here):\n  • Node.js version" in hosting_import.plan_details(scan["sites"][1])

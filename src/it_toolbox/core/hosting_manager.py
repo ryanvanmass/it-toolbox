@@ -14,6 +14,8 @@ The methods below mirror helper.ts's `helper` object one to one.
 
 from __future__ import annotations
 
+import re
+
 from it_toolbox.core.remote_helper import (
     RemoteHelperConnection,
     RemoteHelperError,
@@ -39,7 +41,8 @@ SITE_TYPE_LABELS = {
 # Sites that run an app the helper can start and stop.
 APP_SITE_TYPES = {"node", "python", "container"}
 
-STACK_COMPONENTS = ["nginx", "mariadb", "certbot", "nodejs", "python", "podman", "clamav", "fail2ban"]
+STACK_COMPONENTS = ["nginx", "mariadb", "certbot", "nodejs", "python", "podman", "clamav", "fail2ban", "repo",
+                    "backup"]
 STACK_COMPONENT_LABELS = {
     "nginx": "nginx",
     "mariadb": "MariaDB",
@@ -49,6 +52,8 @@ STACK_COMPONENT_LABELS = {
     "podman": "Podman (container sites)",
     "clamav": "ClamAV (malware scanning)",
     "fail2ban": "fail2ban (intrusion protection)",
+    "repo": "Package repository tools (createrepo_c, apt-ftparchive)",
+    "backup": "Backup tools (restic and rclone)",
 }
 
 DNS_PROVIDERS = ["porkbun", "cloudflare"]
@@ -71,11 +76,62 @@ SSL_MODE_LABELS = {
 # helper takes days, at most 3650.
 SELF_SIGNED_YEARS = [1, 2, 5, 10]
 
+# What can be deployed into an existing, empty PHP site.
 APPLICATIONS = ["wordpress", "nextcloud"]
-APPLICATION_LABELS = {"wordpress": "WordPress", "nextcloud": "Nextcloud"}
+APPLICATION_LABELS = {
+    "wordpress": "WordPress",
+    "nextcloud": "Nextcloud",
+    "repo": "Package repository",
+    "forgejo": "Forgejo",
+    "zabbix": "Zabbix",
+}
+
+# The Create Site dialog's choices (the Cockpit page's siteTypeOptions):
+# (id, site type, ready-made application or None, label). A ready-made
+# application is created as a site of that type, then app-deploy'ed --
+# except Forgejo and Zabbix, whose containers site-create sets up itself.
+SITE_KINDS = [
+    ("wordpress", "php", "wordpress", "WordPress"),
+    ("nextcloud", "php", "nextcloud", "Nextcloud"),
+    ("repo", "static", "repo", "Package repository (RPM and .deb)"),
+    ("forgejo", "container", "forgejo", "Forgejo (Git hosting with Actions runners)"),
+    ("zabbix", "container", "zabbix", "Zabbix (monitoring)"),
+    ("php", "php", None, "PHP"),
+    ("static", "static", None, "Static"),
+    ("node", "node", None, "Node.js"),
+    ("python", "python", None, "Python"),
+    ("container", "container", None, "Container"),
+    ("proxy", "proxy", None, "Reverse proxy"),
+]
+# Applications whose containers site-create makes (it takes `application`).
+CONTAINER_APPLICATIONS = {"forgejo", "zabbix"}
+
+# Zabbix releases the module runs, oldest first.
+ZABBIX_RELEASES = ["7.0", "7.2", "7.4"]
+# What a new Zabbix site can start on.
+ZABBIX_NEW_RELEASES = ["7.0", "7.4"]
+ZABBIX_ENGINE_LABELS = {"postgresql": "PostgreSQL", "mysql": "MySQL", "mariadb": "MariaDB"}
+
+# A new Forgejo runner's labels: what runs-on: says, and the image its jobs run in.
+FORGEJO_DEFAULT_LABELS = [
+    "docker:docker://data.forgejo.org/oci/node:22-bookworm",
+    "ubuntu-latest:docker://data.forgejo.org/oci/node:22-bookworm",
+]
+
+
+def zabbix_release_label(release: str) -> str:
+    return f"{release} LTS" if release == "7.0" else release
+
+
+def release_newer(a: str, b: str) -> bool:
+    return tuple(int(part) for part in a.split(".")) > tuple(int(part) for part in b.split("."))
+
 
 LOG_NAMES = ["access", "error", "php", "app"]
 LOG_LABELS = {"access": "Access log", "error": "Error log", "php": "PHP errors", "app": "App output"}
+
+TRAFFIC_RANGES = [("24h", "24 hours"), ("7d", "7 days"), ("30d", "30 days"), ("90d", "90 days"),
+                  ("365d", "365 days")]
 
 PHP_SETTING_KEYS = ["memory_limit", "upload_max_filesize", "post_max_size", "max_execution_time", "max_input_vars"]
 
@@ -118,6 +174,70 @@ FAIL2BAN_DURATIONS = [
 FAIL2BAN_FINDTIMES = FAIL2BAN_DURATIONS[:4]
 
 
+BACKUP_KINDS = ["drive", "s3", "sftp", "local"]
+BACKUP_KIND_LABELS = {"drive": "Google Drive", "s3": "S3", "sftp": "SFTP", "local": "Folder on this server"}
+S3_PROVIDERS = [
+    ("AWS", "Amazon S3"), ("Cloudflare", "Cloudflare R2"), ("Wasabi", "Wasabi"), ("Minio", "MinIO"),
+    ("Ceph", "Ceph"), ("DigitalOcean", "DigitalOcean Spaces"), ("Other", "Other S3-compatible"),
+]
+BACKUP_SCHEDULE_PRESETS = [
+    ("0 2 * * *", "Every day at 02:00"),
+    ("0 */6 * * *", "Every 6 hours"),
+    ("0 * * * *", "Every hour"),
+    ("0 2 * * 0", "Every Sunday at 02:00"),
+]
+BACKUP_MODES = [("global", "On the server's schedule"), ("custom", "On its own schedule"),
+                ("off", "Only when I click Back Up Now")]
+
+
+def schedule_label(schedule: str) -> str:
+    return dict(BACKUP_SCHEDULE_PRESETS).get(schedule, schedule)
+
+
+def backup_destination_text(destination: dict) -> str:
+    kind = destination.get("kind")
+    if kind == "drive":
+        return f"Google Drive, {destination.get('path', '')}"
+    if kind == "s3":
+        return f"{destination.get('endpoint') or 's3.amazonaws.com'} {destination.get('path', '')}"
+    if kind == "sftp":
+        port = destination.get("port") or 22
+        return (f"{destination.get('user')}@{destination.get('host')}{'' if port == 22 else f':{port}'}:"
+                f"{destination.get('path', '')}")
+    return destination.get("local_path") or ""
+
+
+def backup_run_label(run: dict) -> str:
+    """What a backup run did, as the Cockpit page's runWhat()."""
+    snapshot = (run.get("snapshot") or "")[:8]
+    detail = run.get("detail") or {}
+    if run.get("kind") == "prune":
+        return "Cleaned up old backups"
+    if run.get("kind") == "restore":
+        parts = (["files"] if detail.get("files") else []) + (["databases"] if detail.get("databases") else [])
+        return f"Restored {' and '.join(parts)} from {snapshot}" if parts else f"Restore from {snapshot}"
+    if run.get("state") != "done":
+        return "Backup"
+    text = f"Snapshot {snapshot}"
+    databases = len(detail.get("databases") or [])
+    if databases:
+        text += f", {databases} database" + ("" if databases == 1 else "s")
+    if run.get("bytes_added") is not None:
+        text += f", {format_bytes(run['bytes_added'])} new"
+    return text
+
+
+def format_bytes(num_bytes: int | None) -> str:
+    if num_bytes is None:
+        return ""
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return ""
+
+
 def jail_label(jail_id: str) -> str:
     return FAIL2BAN_JAILS.get(jail_id, (jail_id, ""))[0]
 
@@ -132,6 +252,9 @@ def duration_label(seconds: int) -> str:
     minutes = round(seconds / 60)
     return f"{minutes} minute" + ("" if minutes == 1 else "s")
 
+
+# File names the helper takes from a package repository's incoming folder.
+PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+~^-]{0,250}\.(rpm|deb)$")
 
 HostingError = RemoteHelperError
 
@@ -149,8 +272,10 @@ class HostingConnection(RemoteHelperConnection):
     def status(self) -> dict:
         return self.call("status")
 
-    def settings_set(self, acme_email: str) -> dict:
-        return self.call("settings-set", {"acme_email": acme_email})
+    def settings_set(self, acme_email: str | None = None, storage_default: str | None = None) -> dict:
+        settings = {key: value for key, value in (("acme_email", acme_email), ("storage_default", storage_default))
+                    if value is not None}
+        return self.call("settings-set", settings)
 
     def stack_install(self, components: list[str], php: list[str]) -> dict:
         return self.call("stack-install", {"components": components, "php": php}, timeout=SLOW_TIMEOUT)
@@ -187,6 +312,12 @@ class HostingConnection(RemoteHelperConnection):
         vhost editor (their site-get has `custom_nginx`, not `vhost`)."""
         return self.call("site-custom-nginx", {"name": name, "text": text})["text"]
 
+    def site_disable(self, name: str) -> dict:
+        return self.call("site-disable", {"name": name})["site"]
+
+    def site_enable(self, name: str) -> dict:
+        return self.call("site-enable", {"name": name})["site"]
+
     def site_delete(self, name: str, delete_databases: bool, keep_files: bool) -> dict:
         return self.call(
             "site-delete", {"name": name, "delete_databases": delete_databases, "keep_files": keep_files}
@@ -194,6 +325,21 @@ class HostingConnection(RemoteHelperConnection):
 
     def site_logs(self, name: str, log: str, lines: int) -> dict:
         return self.call("site-logs", {"name": name, "log": log, "lines": lines})
+
+    def site_traffic(self, name: str, traffic_range: str) -> dict:
+        # Reads a year of access logs at most.
+        return self.call("site-traffic", {"name": name, "range": traffic_range}, timeout=SLOW_TIMEOUT)
+
+    # -- Moving a site's files (in a unit of its own; poll storage_status) --
+
+    def storage_status(self, name: str, usage: bool = False) -> dict:
+        return self.call("storage-status", {"name": name, "usage": usage})
+
+    def storage_move(self, name: str, location: str, keep_old: bool) -> dict:
+        return self.call("storage-move", {"name": name, "location": location, "keep_old": keep_old})
+
+    def storage_clear(self, name: str) -> dict:
+        return self.call("storage-clear", {"name": name})
 
     # -- Apps -------------------------------------------------------------
 
@@ -213,9 +359,113 @@ class HostingConnection(RemoteHelperConnection):
         # Installs the Nextcloud app from the app store.
         return self.call("app-drawio", {"name": name, "enabled": enabled}, timeout=SLOW_TIMEOUT)["site"]
 
+    def app_team_folders(self, name: str, enabled: bool) -> dict:
+        return self.call("app-team-folders", {"name": name, "enabled": enabled}, timeout=SLOW_TIMEOUT)["site"]
+
     def app_control(self, name: str, action: str) -> dict:
         timeout = SLOW_TIMEOUT if action == "pull" else 300
         return self.call("app-control", {"name": name, "action": action}, timeout=timeout)["site"]
+
+    # -- Forgejo sites ------------------------------------------------------
+
+    def forgejo_runners(self, name: str) -> list[dict]:
+        return self.call("forgejo-runners", {"name": name}).get("runners", [])
+
+    def forgejo_runner_add(self, name: str, runner_name: str = "", labels: list[str] | None = None,
+                           capacity: int = 1) -> list[dict]:
+        args: dict = {"name": name, "capacity": capacity}
+        if runner_name:
+            args["runner_name"] = runner_name
+        if labels:
+            args["labels"] = labels
+        # The first runner pulls the runner image.
+        return self.call("forgejo-runner-add", args, timeout=SLOW_TIMEOUT).get("runners", [])
+
+    def forgejo_runner_delete(self, name: str, runner_id: int) -> dict:
+        """{runners, warning?}: the warning says what could not be cleaned up."""
+        return self.call("forgejo-runner-delete", {"name": name, "id": runner_id})
+
+    def forgejo_password(self, name: str) -> dict:
+        return self.call("forgejo-password", {"name": name})
+
+    # -- Zabbix sites -------------------------------------------------------
+
+    def zabbix_status(self, name: str) -> dict:
+        return self.call("zabbix-status", {"name": name})
+
+    def zabbix_password(self, name: str, user: str = "") -> dict:
+        args = {"name": name, "user": user} if user else {"name": name}
+        return self.call("zabbix-password", args)
+
+    def zabbix_update(self, name: str, version: str = "") -> dict:
+        """Pulls the newest images of the site's release, or moves it to `version`."""
+        args = {"name": name, "zabbix_version": version} if version else {"name": name}
+        return self.call("app-update", args, timeout=SLOW_TIMEOUT)
+
+    def zabbix_import_scan(self, name: str, scan_input: dict) -> dict:
+        return self.call("zabbix-import-scan", {"name": name, **scan_input}, timeout=SLOW_TIMEOUT)
+
+    def zabbix_import_start(self, name: str, options: dict) -> dict:
+        return self.call("zabbix-import-start", {"name": name, **options})
+
+    def zabbix_import_status(self, name: str) -> dict:
+        return self.call("zabbix-import-status", {"name": name})
+
+    def zabbix_import_cancel(self, name: str) -> dict:
+        return self.call("zabbix-import-cancel", {"name": name})
+
+    def zabbix_import_clear(self, name: str) -> dict:
+        return self.call("zabbix-import-clear", {"name": name})
+
+    def zabbix_import_forget(self, name: str) -> dict:
+        return self.call("zabbix-import-forget", {"name": name})
+
+    # -- Package repository sites -------------------------------------------
+
+    def repo_status(self, name: str) -> dict:
+        return self.call("repo-status", {"name": name})["repo"]
+
+    def repo_reindex(self, name: str) -> dict:
+        return self.call("repo-reindex", {"name": name}, timeout=SLOW_TIMEOUT)["repo"]
+
+    def repo_delete(self, name: str, kind: str, file: str) -> dict:
+        """kind is rpm, deb, or incoming (a file left in the upload folder)."""
+        return self.call("repo-delete", {"name": name, "kind": kind, "file": file}, timeout=SLOW_TIMEOUT)["repo"]
+
+    def repo_upload(self, incoming: str, file_name: str, data: bytes) -> None:
+        """Writes a package into the repository's incoming folder as root,
+        as the Cockpit page does with cockpit.file(); repo_reindex() then
+        takes it in."""
+        if not PACKAGE_NAME.match(file_name):
+            raise HostingError(f"{file_name} is not an .rpm or .deb file name")
+        status, _, err = self.run(["sh", "-c", 'cat > "$1"', "sh", f"{incoming.rstrip('/')}/{file_name}"], data,
+                                  timeout=SLOW_TIMEOUT)
+        if status != 0:
+            raise HostingError(f"Could not upload {file_name}: {err.strip() or f'exit status {status}'}")
+
+    # -- Importing sites from CloudPanel ------------------------------------
+
+    def import_key(self) -> str:
+        return self.call("import-key")["public_key"]
+
+    def import_scan(self, scan_input: dict) -> dict:
+        # Measures every site's files and databases over SSH.
+        return self.call("import-scan", scan_input, timeout=SLOW_TIMEOUT)
+
+    def import_start(self, sites: list[dict]) -> dict:
+        return self.call("import-start", {"sites": sites})
+
+    def import_status(self) -> dict:
+        return self.call("import-status")
+
+    def import_cancel(self) -> dict:
+        return self.call("import-cancel")
+
+    def import_clear(self) -> dict:
+        return self.call("import-clear")
+
+    def import_forget(self) -> dict:
+        return self.call("import-forget")
 
     # -- Cron -------------------------------------------------------------
 
@@ -306,6 +556,39 @@ class HostingConnection(RemoteHelperConnection):
     def malware_alert_test(self, target: str, changes: dict) -> dict:
         """Sends a test alert with these (unsaved) values over the stored ones."""
         return self.call("malware-alert-test", {"target": target, target: changes})
+
+    # -- Backups (restic on rclone) -----------------------------------------
+
+    def backup_status(self) -> dict:
+        return self.call("backup-status")
+
+    def backup_destination(self, destination: dict, password: str = "") -> dict:
+        """Saves where backups go, opening (or creating) the restic
+        repository there; the reply's `repository` is opened or created."""
+        args = {**destination, "repository_password": password} if password else dict(destination)
+        return self.call("backup-destination", args, timeout=SLOW_TIMEOUT)
+
+    def backup_password(self) -> str:
+        return self.call("backup-password")["password"]
+
+    def backup_settings(self, settings: dict) -> dict:
+        return self.call("backup-settings", settings)
+
+    def backup_site(self, name: str, mode: str, schedule: str | None = None) -> dict:
+        args = {"name": name, "mode": mode}
+        if schedule:
+            args["schedule"] = schedule
+        return self.call("backup-site", args)
+
+    def backup_now(self, name: str | None = None) -> dict:
+        return self.call("backup-now", {"name": name} if name else {})
+
+    def backup_snapshots(self, name: str) -> list[dict]:
+        return self.call("backup-snapshots", {"name": name}, timeout=SLOW_TIMEOUT).get("snapshots", [])
+
+    def backup_restore(self, name: str, snapshot: str, files: bool, databases: bool) -> dict:
+        return self.call("backup-restore", {"name": name, "snapshot": snapshot, "files": files,
+                                            "databases": databases})
 
     # -- Intrusion protection (fail2ban) ----------------------------------
 
