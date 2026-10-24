@@ -131,6 +131,43 @@ checked against docs:
 
 See the git log on this branch for the full detail behind each of these.
 
+## Clipboard sync — host→guest text (2026-10-06)
+
+Mirrors the embedded-RDP clipboard feature (`docs/embedded-rdp-status.md`,
+PR #33) over spice-vdagent instead of cliprdr. Host→guest text only;
+guest→host is out of scope.
+
+- `SpiceSession.announce_clipboard_text()` caches the host text and, once
+  the agent is connected and advertises `VD_AGENT_CAP_CLIPBOARD_BY_DEMAND`
+  (5), calls `MainChannel.clipboard_selection_grab(0, [1])` (selection
+  CLIPBOARD, type UTF8_TEXT). The `main-clipboard-selection-request`
+  signal answers the guest's paste with `clipboard_selection_notify()`.
+  Copying non-text on the host releases our grab; a guest-side copy
+  (`main-clipboard-selection-grab`) means the grab is no longer ours.
+  Cached text that couldn't be offered yet (no agent, or an agent that
+  hasn't announced its capabilities) is re-announced from
+  `main-agent-update`. Not from `notify::agent-connected`: that fires
+  before the capabilities arrive, so every `agent_test_capability()` is
+  still False there (found in the live test below).
+- `SpiceSessionWorker.send_clipboard_text()` hops onto the GLib thread
+  via `GLib.idle_add`, same as the input/resize calls.
+- `SpiceWidget` pushes on `QApplication.clipboard().dataChanged` and once
+  on connect, and disconnects that signal in `close_session()`. Like RDP,
+  every open session tab receives every host copy.
+
+Constants checked against spice-protocol's `spice/vd_agent.h`; signal and
+method signatures checked against spice-glib 0.42's typelib (PyGObject
+accepts a plain list for `types` and `bytes` for `data`).
+
+**Verified live (2026-10-06)** with the real `SpiceWidget` (offscreen
+Qt) against a nested QEMU 10.1 guest: Fedora 44 cloud image, Xvfb,
+spice-vdagent 0.23, `com.redhat.spice.0` spicevmc channel. The guest
+read each paste back with `xclip -o -selection clipboard`. All of these
+pass: text copied before connecting, a live host copy, Unicode +
+multiline text, a non-text host copy releasing the grab, text again
+after that, a guest-side copy not being overwritten, and cached text
+re-offered after restarting the guest's agent.
+
 ## Environment note — updated
 
 The original plan (below) was written on a Windows dev machine with no
