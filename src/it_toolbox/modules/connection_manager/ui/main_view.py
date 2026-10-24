@@ -1918,6 +1918,7 @@ class ConnectionManagerView(QWidget):
         desktop_size = settings.load_default_rdp_resolution()
         keyboard_layout = settings.load_rdp_keyboard_layout()
         shared_folder = settings.load_rdp_shared_folder()
+        graphics_pipeline = settings.load_rdp_graphics_pipeline()
         rdp = RdpWidget(
             host,
             port,
@@ -1926,6 +1927,7 @@ class ConnectionManagerView(QWidget):
             desktop_size=desktop_size,
             keyboard_layout=keyboard_layout,
             shared_folder=shared_folder,
+            graphics_pipeline=graphics_pipeline,
             failure_detail=failure_detail,
         )
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))

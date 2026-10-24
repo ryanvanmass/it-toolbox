@@ -1256,7 +1256,24 @@ class SettingsView(QWidget):
 
         self._rdp_resolution_combo.currentIndexChanged.connect(self._on_rdp_resolution_changed)
         layout.addWidget(self._rdp_resolution_combo)
+
+        self._rdp_graphics_pipeline_checkbox = QCheckBox(
+            "Use the RemoteFX graphics pipeline (experimental, applies to new sessions)"
+        )
+        self._rdp_graphics_pipeline_checkbox.setToolTip(
+            "Asks the server for RDP 8 graphics (RemoteFX progressive codec) instead "
+            "of plain bitmaps. Can be smoother on Windows servers, but has used more "
+            "bandwidth in testing against xrdp."
+        )
+        self._rdp_graphics_pipeline_checkbox.setChecked(settings.load_rdp_graphics_pipeline())
+        self._rdp_graphics_pipeline_checkbox.checkStateChanged.connect(
+            self._on_rdp_graphics_pipeline_changed
+        )
+        layout.addWidget(self._rdp_graphics_pipeline_checkbox)
         return box
+
+    def _on_rdp_graphics_pipeline_changed(self) -> None:
+        settings.save_rdp_graphics_pipeline(self._rdp_graphics_pipeline_checkbox.isChecked())
 
     def _on_rdp_resolution_changed(self, index: int) -> None:
         _, resolution = RDP_RESOLUTION_PRESETS[index]

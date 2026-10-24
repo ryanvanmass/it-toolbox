@@ -19,6 +19,7 @@ class _FakeWorker:
         self.clipboard_texts = []
         self.scancode_calls = []
         self.unicode_calls = []
+        self.frames_consumed = 0
         self.started = False
         self.stopped = False
 
@@ -30,6 +31,9 @@ class _FakeWorker:
 
     def request_resize(self, width, height):
         self.resize_calls.append((width, height))
+
+    def frame_consumed(self):
+        self.frames_consumed += 1
 
     def send_clipboard_text(self, text):
         self.clipboard_texts.append(text)
@@ -85,7 +89,7 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     captured = {}
 
     class _CapturingWorker(_FakeWorker):
-        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None):
+        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None, graphics_pipeline=False):
             super().__init__()
             captured["desktop_size"] = desktop_size
 
@@ -103,7 +107,7 @@ def test_keyboard_layout_is_passed_to_the_worker(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None,
+            shared_folder=None, graphics_pipeline=False,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -122,7 +126,7 @@ def test_keyboard_layout_defaults_to_english_us(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None,
+            shared_folder=None, graphics_pipeline=False,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -456,7 +460,7 @@ def test_shared_folder_is_passed_to_the_worker(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None,
+            shared_folder=None, graphics_pipeline=False,
         ):
             super().__init__()
             captured["shared_folder"] = shared_folder
@@ -506,3 +510,33 @@ def test_failure_detail_explains_the_failure_when_it_knows_why(qtbot, monkeypatc
 
     assert shown == ["IAP tunnel refused"]
     widget.close_session()
+
+
+def test_graphics_pipeline_is_passed_to_the_worker(qtbot, monkeypatch):
+    captured = {}
+
+    class _CapturingWorker(_FakeWorker):
+        def __init__(self, *args):
+            super().__init__()
+            captured["graphics_pipeline"] = args[8]
+
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _CapturingWorker)
+
+    widget = RdpWidget("host", 3389, "user", "pass", graphics_pipeline=True)
+    qtbot.addWidget(widget)
+
+    assert captured["graphics_pipeline"] is True
+
+
+def test_a_frame_is_reported_consumed_once_painted(qtbot, monkeypatch):
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _FakeWorker)
+    widget = RdpWidget("host", 3389, "user", "pass")
+    qtbot.addWidget(widget)
+    widget.resize(4, 4)
+
+    widget._on_frame_ready(bytes(4 * 4 * 4), 4, 4, 16)
+    assert widget._worker.frames_consumed == 0  # not painted yet
+
+    widget.grab()
+    widget.grab()  # a repaint of the same frame doesn't count again
+    assert widget._worker.frames_consumed == 1

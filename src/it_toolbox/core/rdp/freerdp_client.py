@@ -24,6 +24,8 @@ import ctypes
 import logging
 import os
 import platform
+import threading
+import time
 
 from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_rdp_client_context as RdpClientContext,
@@ -237,6 +239,10 @@ _core_lib.freerdp_settings_set_string.restype = ctypes.c_int32
 _core_lib.freerdp_settings_set_uint32.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32]
 _core_lib.freerdp_settings_set_uint32.restype = ctypes.c_int32
 
+# UINT32 freerdp_settings_get_uint32(const rdpSettings* settings, FreeRDP_Settings_Keys_UInt32 id);
+_core_lib.freerdp_settings_get_uint32.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_core_lib.freerdp_settings_get_uint32.restype = ctypes.c_uint32
+
 # BOOL freerdp_settings_set_bool(rdpSettings* settings, FreeRDP_Settings_Keys_Bool id, BOOL val);
 _core_lib.freerdp_settings_set_bool.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int32]
 _core_lib.freerdp_settings_set_bool.restype = ctypes.c_int32
@@ -272,11 +278,96 @@ _client_lib.freerdp_client_add_device_channel.restype = ctypes.c_int32
 _core_lib.freerdp_check_event_handles.argtypes = [ctypes.POINTER(RdpContext)]
 _core_lib.freerdp_check_event_handles.restype = ctypes.c_int32
 
+# void rdp_update_lock(rdpUpdate* update); void rdp_update_unlock(rdpUpdate* update);
+# (freerdp/update.h) The lock FreeRDP holds while drawing into the GDI
+# surface (between its own BeginPaint and EndPaint). Taken around reading
+# that surface, because with the graphics pipeline the drawing happens on
+# FreeRDP's dynamic-channel thread, not the one pumping the connection.
+# Recursive, so it's also fine to take from inside a paint on that thread.
+for _name in ("rdp_update_lock", "rdp_update_unlock"):
+    getattr(_core_lib, _name).argtypes = [ctypes.c_void_p]
+    getattr(_core_lib, _name).restype = None
+
+# DWORD freerdp_get_event_handles(rdpContext* context, HANDLE* events, DWORD count);
+# The handles freerdp_check_event_handles() services (the socket, channel
+# queues, timers) -- waited on in FreeRdpSession.wait_for_activity so the
+# pump wakes the moment data arrives instead of polling on a fixed sleep.
+_core_lib.freerdp_get_event_handles.argtypes = [
+    ctypes.POINTER(RdpContext),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.c_uint32,
+]
+_core_lib.freerdp_get_event_handles.restype = ctypes.c_uint32
+
+# void freerdp_client_OnChannelConnectedEventHandler(void* context, const ChannelConnectedEventArgs* e);
+# void freerdp_client_OnChannelDisconnectedEventHandler(void* context, const ChannelDisconnectedEventArgs* e);
+# (freerdp/client.h) FreeRDP's own handlers for the channels every client
+# wires up the same way -- rdpgfx above all, which they connect to the GDI
+# surface with gdi_graphics_pipeline_init() (and tear down again on
+# disconnect). Subscribed directly as C function pointers alongside our own
+# handler, which only deals with disp/cliprdr. Never called from Python, so
+# no argtypes.
+_CLIENT_CHANNEL_HANDLERS = (
+    (b"ChannelConnected", _client_lib.freerdp_client_OnChannelConnectedEventHandler),
+    (b"ChannelDisconnected", _client_lib.freerdp_client_OnChannelDisconnectedEventHandler),
+)
+
+# HANDLE CreateEventA(LPSECURITY_ATTRIBUTES, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName);
+# BOOL SetEvent(HANDLE); BOOL ResetEvent(HANDLE); BOOL CloseHandle(HANDLE);
+# DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE* lpHandles, BOOL bWaitAll, DWORD dwMilliseconds);
+# winpr's portable implementations everywhere but Windows, where winpr3.dll
+# doesn't export them (it defers to the real kernel32 ones, and the handles
+# FreeRDP hands out are real kernel handles there).
+_sync_lib = ctypes.WinDLL("kernel32") if _IS_WINDOWS else _winpr_lib
+_sync_lib.CreateEventA.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32, ctypes.c_char_p]
+_sync_lib.CreateEventA.restype = ctypes.c_void_p
+for _name in ("SetEvent", "ResetEvent", "CloseHandle"):
+    getattr(_sync_lib, _name).argtypes = [ctypes.c_void_p]
+    getattr(_sync_lib, _name).restype = ctypes.c_int32
+_sync_lib.WaitForMultipleObjects.argtypes = [
+    ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.c_int32,
+    ctypes.c_uint32,
+]
+_sync_lib.WaitForMultipleObjects.restype = ctypes.c_uint32
+MAXIMUM_WAIT_OBJECTS = 64  # winpr/synch.h, same limit as Windows
+
+
+class WakeEvent:
+    """A manual-reset event that can be waited on together with FreeRDP's
+    own handles (see FreeRdpSession.wait_for_activity), so another thread
+    can interrupt the wait -- e.g. to have queued input sent right away.
+    set() and close() are safe from any thread.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()  # so set() never races close()
+        self.handle = _sync_lib.CreateEventA(None, 1, 0, None)
+        if not self.handle:
+            raise FreeRdpError("CreateEvent failed")
+
+    def set(self) -> None:
+        with self._lock:
+            if self.handle:
+                _sync_lib.SetEvent(self.handle)
+
+    def reset(self) -> None:
+        with self._lock:
+            if self.handle:
+                _sync_lib.ResetEvent(self.handle)
+
+    def close(self) -> None:
+        with self._lock:
+            handle, self.handle = self.handle, None
+        if handle:
+            _sync_lib.CloseHandle(handle)
+
+
 # BOOL gdi_resize(rdpGdi* gdi, UINT32 width, UINT32 height);  (freerdp/gdi/gdi.h)
-# Resizes the local framebuffer to match a resolution change we requested
-# via the disp channel — there's no "desktop was resized" callback the way
-# PostConnect/EndPaint are exposed, since we're the one initiating the
-# resize, so we're also responsible for keeping gdi's buffer in sync.
+# Resizes the local framebuffer to match a resolution change: right away
+# when we request one via the disp channel, and again from DesktopResize
+# once the server has applied it (a no-op when the sizes already match).
 _core_lib.gdi_resize.argtypes = [ctypes.POINTER(RdpGdi), ctypes.c_uint32, ctypes.c_uint32]
 _core_lib.gdi_resize.restype = ctypes.c_int32
 
@@ -397,6 +488,7 @@ def _configure_settings(
     ignore_certificate: bool,
     keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
     shared_folder: str | None = None,
+    graphics_pipeline: bool = False,
 ) -> None:
     settings = context.contents.settings  # c_void_p, opaque — accessed via accessors only
     _core_lib.freerdp_settings_set_string(settings, SETTING_SERVER_HOSTNAME, host.encode())
@@ -446,8 +538,32 @@ def _configure_settings(
     # that case.
     keyboard_layout_key = _settings_key_for_name("FreeRDP_KeyboardLayout")
     _core_lib.freerdp_settings_set_uint32(settings, keyboard_layout_key, keyboard_layout)
+    _configure_performance(settings, graphics_pipeline)
     if shared_folder:
         _add_shared_drive(settings, shared_folder)
+
+
+# The RDP 8+ graphics pipeline (rdpgfx) with the progressive RemoteFX codec,
+# opt-in via Settings > RDP Display; looked up by name for the same reason
+# as the clipboard keys above. Decoded in software by libfreerdp itself, so
+# it works with every FreeRDP build, painted into the same GDI surface once
+# FreeRDP's own channel handler hooks it up (see _CLIENT_CHANNEL_HANDLERS),
+# and frame-acknowledged, so the server paces itself to how fast frames are
+# consumed. Not the default because against xrdp it used several times the
+# bandwidth (and ~3x the client CPU) of plain bitmap updates. H.264
+# (GfxH264/AVC444) stays off: whether it decodes depends on how FreeRDP was
+# built (openh264/ffmpeg), and advertising it without a working decoder
+# gives a black screen.
+#
+# Two other things a fresh rdpSettings leaves off that xfreerdp turns on
+# were tried and left off on purpose: BitmapCacheEnabled turned the whole
+# screen white after the first resize against xrdp (on main too, so not an
+# interaction with anything here), and the offscreen cache
+# (OffscreenSupportLevel) did the same together with it.
+def _configure_performance(settings: ctypes.c_void_p, graphics_pipeline: bool) -> None:
+    if graphics_pipeline:
+        _core_lib.freerdp_settings_set_bool(settings, _settings_key_for_name("FreeRDP_SupportGraphicsPipeline"), 1)
+        _core_lib.freerdp_settings_set_bool(settings, _settings_key_for_name("FreeRDP_GfxProgressive"), 1)
 
 
 def shared_drive_name(folder: str) -> str:
@@ -526,6 +642,12 @@ _POST_CONNECT_TYPE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(RdpFreerdp)
 # BOOL (*pEndPaint)(rdpContext* context); fired after each frame update is
 # fully applied to the GDI surface — the signal to go read gdi->primary_buffer.
 _END_PAINT_TYPE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(RdpContext))
+# BOOL (*pDesktopResize)(rdpContext* context); called once the server has
+# changed the desktop size (DesktopWidth/DesktopHeight in settings already
+# hold the new one) -- the client must resize its own framebuffer to match.
+# Mandatory with the graphics pipeline: its Reset Graphics handler calls it
+# unconditionally, and a NULL here segfaults.
+_DESKTOP_RESIZE_TYPE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(RdpContext))
 # void (*)(void* context, const ChannelConnectedEventArgs* e); fired once per
 # virtual channel as each one finishes connecting — the disp/cliprdr client
 # contexts only exist from this point on, unlike PostConnect/EndPaint which
@@ -555,6 +677,7 @@ class FreeRdpSession:
         # holds these pointers for as long as the connection is open.
         self._post_connect_cb = _POST_CONNECT_TYPE(self._on_post_connect)
         self._end_paint_cb = _END_PAINT_TYPE(self._on_end_paint)
+        self._desktop_resize_cb = _DESKTOP_RESIZE_TYPE(self._on_desktop_resize)
         self._channel_connected_cb = _CHANNEL_CONNECTED_TYPE(self._on_channel_connected)
 
     def _on_post_connect(self, instance: ctypes.POINTER(RdpFreerdp)) -> int:
@@ -562,12 +685,34 @@ class FreeRdpSession:
             return 0
         context = instance.contents.context
         context.contents.update.contents.EndPaint = self._end_paint_cb
+        context.contents.update.contents.DesktopResize = self._desktop_resize_cb
         return 1
 
     def _on_end_paint(self, context: ctypes.POINTER(RdpContext)) -> int:
+        # Not always on the thread driving the connection: graphics-pipeline
+        # frames are painted from FreeRDP's dynamic-channel thread.
         if self.on_frame is not None:
             self.on_frame()
         return 1
+
+    def _on_desktop_resize(self, context: ctypes.POINTER(RdpContext)) -> int:
+        settings = context.contents.settings
+        width = _core_lib.freerdp_settings_get_uint32(settings, _settings_key_for_name("FreeRDP_DesktopWidth"))
+        height = _core_lib.freerdp_settings_get_uint32(settings, _settings_key_for_name("FreeRDP_DesktopHeight"))
+        # A no-op when it's the size request_resize() already resized to.
+        return int(self._resize_framebuffer(width, height))
+
+    def _resize_framebuffer(self, width: int, height: int) -> bool:
+        # Under the update lock, so it can't land in the middle of a paint
+        # on FreeRDP's dynamic-channel thread: gdi_resize() ends whatever
+        # paint it thinks is in progress, which mustn't be another
+        # thread's.
+        update = self._context.contents.update
+        _core_lib.rdp_update_lock(update)
+        try:
+            return bool(_core_lib.gdi_resize(self._context.contents.gdi, width, height))
+        finally:
+            _core_lib.rdp_update_unlock(update)
 
     def _on_channel_connected(self, sender, event_args: ctypes.POINTER(ChannelConnectedEventArgs)) -> None:
         # .name is POINTER(c_char), not c_char_p — doesn't auto-convert to
@@ -598,8 +743,7 @@ class FreeRdpSession:
             # dimensions), which is worse than a no-op: produces a
             # cropped/corrupted display instead of just not resizing.
             return
-        gdi = self._context.contents.gdi
-        _core_lib.gdi_resize(gdi, width, height)
+        self._resize_framebuffer(width, height)
         self.display.request_resize(width, height)
 
     def announce_clipboard_text(self, text: str | None) -> None:
@@ -623,6 +767,7 @@ class FreeRdpSession:
         desktop_size: tuple[int, int] | None = None,
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         shared_folder: str | None = None,
+        graphics_pipeline: bool = False,
     ) -> None:
         context = _new_context()
         self._context = context
@@ -637,6 +782,7 @@ class FreeRdpSession:
                 ignore_certificate,
                 keyboard_layout,
                 shared_folder,
+                graphics_pipeline,
             )
             if desktop_size is not None:
                 _apply_desktop_size(context, *desktop_size)
@@ -653,6 +799,10 @@ class FreeRdpSession:
             b"ChannelConnected",
             ctypes.cast(self._channel_connected_cb, ctypes.c_void_p),
         )
+        for event_name, handler in _CLIENT_CHANNEL_HANDLERS:
+            _winpr_lib.PubSub_Subscribe(
+                context.contents.pubSub, event_name, ctypes.cast(handler, ctypes.c_void_p)
+            )
         # Required for cliprdr specifically (a static channel) — see the
         # freerdp_client_load_channels binding's comment above. Must run
         # after settings are configured, before freerdp_connect().
@@ -679,6 +829,24 @@ class FreeRdpSession:
             return False
         return bool(_core_lib.freerdp_check_event_handles(self._context))
 
+    def wait_for_activity(self, timeout_ms: int, wake: WakeEvent | None = None) -> None:
+        """Blocks until FreeRDP has something for pump_once() to process,
+        `wake` is set, or timeout_ms passes -- the same wait xfreerdp's
+        main loop does between freerdp_check_event_handles() calls."""
+        if self._context is None:
+            return
+        handles = (ctypes.c_void_p * MAXIMUM_WAIT_OBJECTS)()
+        count = _core_lib.freerdp_get_event_handles(self._context, handles, MAXIMUM_WAIT_OBJECTS - 1)
+        if wake is not None and wake.handle:
+            handles[count] = wake.handle
+            count += 1
+        if count:
+            # A failed wait (0xFFFFFFFF) needs no handling of its own: the
+            # next pump_once() reports a broken connection anyway.
+            _sync_lib.WaitForMultipleObjects(count, handles, 0, timeout_ms)
+        else:
+            time.sleep(timeout_ms / 1000)
+
     def last_error_text(self) -> str | None:
         """FreeRDP's description of the last error on this connection, or
         None if it hasn't recorded one."""
@@ -696,10 +864,15 @@ class FreeRdpSession:
         current GDI surface, safe to hand off across threads."""
         if self._context is None:
             raise FreeRdpError("not connected")
-        gdi = self._context.contents.gdi.contents  # rdpContext.gdi: POINTER(struct_rdp_gdi)
-        size = gdi.stride * gdi.height
-        pixels = ctypes.string_at(gdi.primary_buffer, size)
-        return pixels, gdi.width, gdi.height, gdi.stride
+        update = self._context.contents.update
+        _core_lib.rdp_update_lock(update)
+        try:
+            gdi = self._context.contents.gdi.contents  # rdpContext.gdi: POINTER(struct_rdp_gdi)
+            size = gdi.stride * gdi.height
+            pixels = ctypes.string_at(gdi.primary_buffer, size)
+            return pixels, gdi.width, gdi.height, gdi.stride
+        finally:
+            _core_lib.rdp_update_unlock(update)
 
     def disconnect(self) -> None:
         if self._context is None:
@@ -800,7 +973,6 @@ def capture_one_frame(
     gdi_init + the EndPaint hook + reading the GDI surface all work before
     any Qt widget is built around this.
     """
-    import time
 
     session = FreeRdpSession()
     frame_ready = False

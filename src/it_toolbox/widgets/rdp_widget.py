@@ -81,6 +81,7 @@ class RdpWidget(QWidget):
         desktop_size: tuple[int, int] | None = None,
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         shared_folder: str | None = None,
+        graphics_pipeline: bool = False,
         failure_detail: Callable[[], str | None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -101,6 +102,11 @@ class RdpWidget(QWidget):
         self._desktop_size = desktop_size
         self._image: QImage | None = None
         self._frame_bytes: bytes | None = None  # keeps QImage's backing buffer alive
+        # The worker sends no further frame until this one has been painted
+        # (see paintEvent), so frames are copied at most as often as the
+        # widget actually repaints -- and not at all while it's hidden in a
+        # background tab.
+        self._frame_unpainted = False
         self._closing = False  # set by close_session(); suppresses finished re-emission
         self._finished_emitted = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -121,7 +127,15 @@ class RdpWidget(QWidget):
         self._resize_debounce.timeout.connect(self._send_resize_request)
 
         self._worker = RdpSessionWorker(
-            host, port, username, password, domain, desktop_size, keyboard_layout, shared_folder
+            host,
+            port,
+            username,
+            password,
+            domain,
+            desktop_size,
+            keyboard_layout,
+            shared_folder,
+            graphics_pipeline,
         )
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)
@@ -149,6 +163,7 @@ class RdpWidget(QWidget):
     def _on_frame_ready(self, pixels: bytes, width: int, height: int, stride: int) -> None:
         self._frame_bytes = pixels  # QImage below wraps this buffer without copying it
         self._image = QImage(self._frame_bytes, width, height, stride, QImage.Format.Format_RGB32)
+        self._frame_unpainted = True
         self.update()
 
     def _emit_finished_once(self) -> None:
@@ -208,6 +223,9 @@ class RdpWidget(QWidget):
             # draw (typical "Match window size" mode).
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawImage(target, self._image, self._image.rect())
+        if self._frame_unpainted:
+            self._frame_unpainted = False
+            self._worker.frame_consumed()
 
     def sizeHint(self):
         if self._image is not None:
