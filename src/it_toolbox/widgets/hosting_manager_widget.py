@@ -2,9 +2,11 @@
 the user's cockpit-hosting Cockpit module over SSH, with the same features
 as that module's page -- sites (static, PHP, reverse proxy, Node.js,
 Python, container), SSL, the nginx vhost editor, databases, cron jobs,
-SFTP, logs, WordPress and Nextcloud deployment (with Nextcloud updates, Nextcloud Office and draw.io),
-malware scanning and its alerts, fail2ban intrusion protection, and
-installing the server stack.
+SFTP, logs, traffic, disabling a site and moving its files, WordPress and
+Nextcloud (with Nextcloud updates, Nextcloud Office, draw.io and Team
+folders), package repository, Forgejo and Zabbix sites, importing sites
+from CloudPanel, backups, malware scanning and its alerts, fail2ban
+intrusion protection, and installing the server stack.
 See core/hosting_manager.py for how it talks to the server.
 """
 
@@ -12,7 +14,7 @@ from __future__ import annotations
 
 import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -34,9 +36,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from it_toolbox.core import async_utils
 from it_toolbox.core import hosting_manager as hm
 from it_toolbox.widgets import hosting_dialogs as dialogs
 from it_toolbox.widgets import status_bar
+from it_toolbox.widgets.hosting_apps import ForgejoCard, RepoCard, ZabbixCard
+from it_toolbox.widgets.hosting_backups import BackupsTab, SiteBackupsPanel
+from it_toolbox.widgets.hosting_import import CloudPanelImportDialog
+from it_toolbox.widgets.hosting_traffic import TrafficPanel
 from it_toolbox.widgets.remote_helper_widget import (
     RemoteHelperTab,
     fill_table,
@@ -88,6 +95,10 @@ def app_label(site: dict) -> str:
     return site.get("app_state") or ""
 
 
+# How often a running move of a site's files is checked on.
+STORAGE_POLL_MS = 2000
+
+
 def _group(title: str, *rows: QWidget | QHBoxLayout) -> QGroupBox:
     box = QGroupBox(title)
     layout = QVBoxLayout(box)
@@ -136,19 +147,50 @@ class SiteDetail(QWidget):
         font.setPointSize(font.pointSize() + 3)
         font.setBold(True)
         self.heading.setFont(font)
+        self.disable_button = _button("Disable Site…", self._toggle_disabled)
+        self.disabled_note = QLabel(
+            "This site is disabled. Visitors get a page saying the site is disabled, and its PHP pool, app or "
+            "container, cron jobs and Nextcloud Office are stopped. Its files, databases, SFTP login and backups "
+            "are kept.")
+        self.disabled_note.setWordWrap(True)
+        self.disabled_note.setStyleSheet("color: #b35c00;")
+        self.storage_note = QLabel()
+        self.storage_note.setWordWrap(True)
+        self.storage_dismiss = _button("Dismiss", self._dismiss_storage)
+        self.storage_row = QWidget()
+        storage_layout = QHBoxLayout(self.storage_row)
+        storage_layout.setContentsMargins(0, 0, 0, 0)
+        storage_layout.addWidget(self.storage_note, 1)
+        storage_layout.addWidget(self.storage_dismiss)
+        self.storage_row.hide()
+        self.storage_job: dict | None = None
+        self._storage_poll = QTimer(self)
+        self._storage_poll.setSingleShot(True)
+        self._storage_poll.setInterval(STORAGE_POLL_MS)
+        self._storage_poll.timeout.connect(self._poll_storage)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_settings_tab(), "Settings")
         self.tabs.addTab(self._build_https_tab(), "SSL")
+        self.tabs.addTab(self._build_nginx_tab(), "Vhost")
         self.databases_index = self.tabs.addTab(self._build_databases_tab(), "Databases")
-        self.cron_index = self.tabs.addTab(self._build_cron_tab(), "Cron Jobs")
         self.sftp_index = self.tabs.addTab(self._build_sftp_tab(), "SFTP")
+        self.cron_index = self.tabs.addTab(self._build_cron_tab(), "Cron Jobs")
+        self.backups = SiteBackupsPanel(self)
+        self.backups_index = self.tabs.addTab(self.backups, "Backups")
+        self.traffic = TrafficPanel(self)
+        self.traffic_index = self.tabs.addTab(self.traffic, "Traffic")
         self.logs_index = self.tabs.addTab(self._build_logs_tab(), "Logs")
-        self.tabs.addTab(self._build_nginx_tab(), "nginx")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+        header = QHBoxLayout()
+        header.addWidget(self.heading, 1)
+        header.addWidget(self.disable_button)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.heading)
+        layout.addLayout(header)
+        layout.addWidget(self.disabled_note)
+        layout.addWidget(self.storage_row)
         layout.addWidget(self.tabs, 1)
         self.setEnabled(False)
 
@@ -164,9 +206,19 @@ class SiteDetail(QWidget):
         self.manager.busy(*args, **kwargs)
 
     def clear(self) -> None:
+        self.stop()
         self.site = None
         self.heading.setText("Select a site")
+        self.disabled_note.hide()
+        self.storage_row.hide()
         self.setEnabled(False)
+
+    def stop(self) -> None:
+        """Stops every poll (on clear and before a reconnect)."""
+        self._storage_poll.stop()
+        self.backups.clear()
+        for card in (self.forgejo_card, self.zabbix_card):
+            card.stop()
 
     def load(self, name: str) -> None:
         self.busy(f"Loading {name}…", lambda: self.connection.site_get(name), self.show_site)
@@ -176,9 +228,12 @@ class SiteDetail(QWidget):
         previous = self.name
         self.site = site
         self.setEnabled(True)
+        disabled = bool(site.get("disabled"))
         self.heading.setText(
             f"{site.get('primary_domain') or site['name']} — {hm.SITE_TYPE_LABELS.get(site['type'], site['type'])}"
+            + (" (disabled)" if disabled else "")
         )
+        self.disable_button.setText("Enable Site" if disabled else "Disable Site…")
         self._show_settings(site)
         self._show_https(site)
         self._show_databases(site)
@@ -188,6 +243,12 @@ class SiteDetail(QWidget):
             self.cron_table.setRowCount(0)
             self.log_view.clear()
             self.sftp_loaded = False
+            self.backups.clear()
+            self.traffic.clear()
+            self.storage_job = None
+            self.storage_row.hide()
+            self._poll_storage()
+        self._show_disabled_note()
         self._on_tab_changed(self.tabs.currentIndex())
 
     def _on_tab_changed(self, index: int) -> None:
@@ -199,6 +260,95 @@ class SiteDetail(QWidget):
             self.refresh_sftp()
         elif index == self.logs_index and not self.log_view.toPlainText():
             self.refresh_logs()
+        elif index == self.backups_index and self.backups.loaded_for != self.name:
+            self.backups.load()
+        elif index == self.traffic_index and self.traffic.loaded_for != self.name:
+            self.traffic.refresh()
+
+    # -- Disabling, and moving the files ---------------------------------------
+
+    def _show_disabled_note(self) -> None:
+        moving = bool(self.storage_job) and self.storage_job.get("state") == "running"
+        self.disabled_note.setVisible(bool(self.site and self.site.get("disabled")) and not moving)
+
+    def _toggle_disabled(self) -> None:
+        name = self.name
+        if self.site.get("disabled"):
+            self.busy(f"Enabling {name}…", lambda: self.connection.site_enable(name), self.show_site, "Site enabled")
+            return
+        if not _confirm(self, f"Disable {self.site.get('primary_domain') or name}",
+                        "Visitors get a page saying the site is disabled, and its PHP pool, app or container, cron "
+                        "jobs and Nextcloud Office are stopped. Its files, databases, certificate, SFTP login and "
+                        "backups are kept, and enabling it brings it back as it was.\n\nDisable it?"):
+            return
+        self.busy(f"Disabling {name}…", lambda: self.connection.site_disable(name), self.show_site, "Site disabled")
+
+    def _poll_storage(self) -> None:
+        name = self.name
+        if not name:
+            return
+
+        def show(status: dict) -> None:
+            try:
+                if name == self.name:
+                    self.show_storage(status)
+            except RuntimeError:
+                pass
+
+        async_utils.run_in_background(lambda: self.connection.storage_status(name), on_result=show,
+                                      on_error=lambda _error: None)
+
+    def show_storage(self, status: dict) -> None:
+        """How a move of the site's files is going, or how it ended."""
+        job = status.get("job")
+        was_running = bool(self.storage_job) and self.storage_job.get("state") == "running"
+        self.storage_job = job
+        running = bool(job) and job.get("state") == "running"
+        self.move_button.setEnabled(not running)
+        if not job:
+            self.storage_row.hide()
+        elif running:
+            step = job.get("step") or "Starting"
+            progress = f" ({job['progress']}%)" if job.get("progress") is not None else ""
+            self.storage_note.setText(f"Moving the files to {job.get('to')}: {step}{progress}")
+            self.storage_note.setStyleSheet("")
+        elif job.get("state") == "failed":
+            self.storage_note.setText(f"The files could not be moved: {job.get('failure')}")
+            self.storage_note.setStyleSheet("color: #c9190b;")
+        else:
+            result = job.get("result") or {}
+            lines = [f"The files were moved to {job.get('to')}.", *(result.get("problems") or [])]
+            if result.get("old_copy"):
+                lines.append(f"The old copy is still in {result['old_copy']}.")
+            self.storage_note.setText("\n".join(lines))
+            self.storage_note.setStyleSheet("color: #b35c00;" if result.get("problems") else "")
+        if job:
+            self.storage_row.show()
+            self.storage_dismiss.setVisible(not running)
+        self._show_disabled_note()
+        if running:
+            self._storage_poll.start()
+        elif was_running:
+            # The move ended: the site shows its new location (and is enabled again).
+            self.load(self.name)
+
+    def _move_files(self) -> None:
+        site = self.site
+        name = site["name"]
+
+        def ask(status: dict) -> None:
+            dialog = dialogs.MoveStorageDialog(site, status.get("used"), self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            target, keep_old = dialog.target(), dialog.keep_old.isChecked()
+            self.busy(f"Starting to move {name}'s files…",
+                      lambda: self.connection.storage_move(name, target, keep_old), self.show_storage, "Move started")
+
+        self.busy(f"Measuring {name}'s files…", lambda: self.connection.storage_status(name, usage=True), ask)
+
+    def _dismiss_storage(self) -> None:
+        name = self.name
+        self.busy("Dismissing…", lambda: self.connection.storage_clear(name), self.show_storage)
 
     def _update(self, message: str, changes: dict, done: str = "Saved") -> None:
         name = self.name
@@ -263,22 +413,34 @@ class SiteDetail(QWidget):
         self.drawio_label = QLabel()
         self.drawio_setup = _button("Set Up", lambda: self._set_drawio(True))
         self.drawio_remove = _button("Remove", lambda: self._set_drawio(False))
+        self.team_folders_label = QLabel()
+        self.team_folders_setup = _button("Set Up", lambda: self._set_team_folders(True))
+        self.team_folders_remove = _button("Remove", lambda: self._set_team_folders(False))
         self.nextcloud_extras = QWidget()
         extras = QVBoxLayout(self.nextcloud_extras)
         extras.setContentsMargins(0, 0, 0, 0)
         extras.addLayout(_row(self.office_label, self.office_setup, self.office_remove))
         extras.addLayout(_row(self.drawio_label, self.drawio_setup, self.drawio_remove))
+        extras.addLayout(_row(self.team_folders_label, self.team_folders_setup, self.team_folders_remove))
         self.application_box = _group(
             "Application", _row(self.application_label, self.update_app_button, self.deploy_button),
             self.nextcloud_extras,
         )
 
+        self.repo_card = RepoCard(self)
+        self.forgejo_card = ForgejoCard(self)
+        self.zabbix_card = ZabbixCard(self)
+
         delete = _button("Delete Site…", lambda: self.manager.delete_site(self.site))
+        self.move_button = _button("Move Files…", self._move_files)
 
         inner = QVBoxLayout(page)
-        inner.addWidget(self.info)
+        inner.addLayout(_row(self.info, self.move_button))
         inner.addWidget(self.app_box)
+        inner.addWidget(self.forgejo_card)
+        inner.addWidget(self.zabbix_card)
         inner.addWidget(self.application_box)
+        inner.addWidget(self.repo_card)
         inner.addLayout(self.settings_form)
         inner.addLayout(_row(save, delete))
         inner.addStretch(1)
@@ -291,6 +453,10 @@ class SiteDetail(QWidget):
             f"Files: {site['root_dir']}",
             f"Logs: {site['logs_dir']}",
         ]
+        if (site.get("application") or {}).get("name") == "nextcloud":
+            lines.append(f"Nextcloud data: {site.get('data_dir')}/nextcloud")
+        if site.get("storage"):
+            lines.append(f"Stored in: {site.get('storage_dir')}")
         if site.get("runtime_version"):
             lines.append(f"Runtime: {site['runtime_version']}")
         if site.get("app_port"):
@@ -329,7 +495,9 @@ class SiteDetail(QWidget):
         self.settings_form.setRowVisible(self.upstream, site_type == "proxy")
 
         container = site.get("container") or {}
-        is_container = site_type == "container"
+        app = site.get("application") or {}
+        # Zabbix's containers are the helper's to set up, as on the Cockpit page.
+        is_container = site_type == "container" and app.get("name") != "zabbix"
         self.image.setText(container.get("image", ""))
         self.container_port.setValue(int(container.get("port") or 80))
         self.volumes.setText(", ".join(container.get("volumes") or []))
@@ -337,18 +505,26 @@ class SiteDetail(QWidget):
         for widget in (self.image, self.container_port, self.volumes, self.auto_update):
             self.settings_form.setRowVisible(widget, is_container)
 
-        runs_app = site_type in hm.APP_SITE_TYPES
+        runs_app = site_type in hm.APP_SITE_TYPES and app.get("name") != "zabbix"
         self.app_command.setText((container.get("command") if is_container else site.get("app_command")) or "")
         self.app_env.setPlainText(dialogs.format_env(site.get("app_env")))
         self.settings_form.setRowVisible(self.app_command, runs_app)
         self.settings_form.setRowVisible(self.app_env, runs_app)
 
-        self.app_box.setVisible(runs_app)
+        self.app_box.setVisible(site_type in hm.APP_SITE_TYPES)
         self.app_state.setText(f"State: {site.get('app_state') or 'unknown'}")
         self.app_buttons["pull"].setVisible(is_container)
 
+        for card, application in ((self.repo_card, "repo"), (self.forgejo_card, "forgejo"),
+                                  (self.zabbix_card, "zabbix")):
+            shown = app.get("name") == application
+            card.setVisible(shown)
+            if shown:
+                card.show_site(site)
+            elif hasattr(card, "stop"):
+                card.stop()
+
         self.application_box.setVisible(php)
-        app = site.get("application")
         if app:
             self.application_label.setText(
                 f"{hm.APPLICATION_LABELS.get(app['name'], app['name'])} {app.get('version') or ''} — "
@@ -372,6 +548,10 @@ class SiteDetail(QWidget):
             self.drawio_label.setText("draw.io: " + ("set up" if drawio else "not set up"))
             self.drawio_setup.setText("Repair" if drawio else "Set Up")
             self.drawio_remove.setVisible(drawio)
+            team_folders = bool(app.get("team_folders"))
+            self.team_folders_label.setText("Team folders: " + ("set up" if team_folders else "not set up"))
+            self.team_folders_setup.setText("Repair" if team_folders else "Set Up")
+            self.team_folders_remove.setVisible(team_folders)
 
     def _save_settings(self) -> None:
         site = self.site
@@ -392,7 +572,7 @@ class SiteDetail(QWidget):
                 changes["php_settings"] = php_changes
         if site_type == "proxy" and self.upstream.text().strip() != (site.get("upstream") or ""):
             changes["upstream"] = self.upstream.text().strip()
-        if site_type in hm.APP_SITE_TYPES:
+        if self.settings_form.isRowVisible(self.app_env):
             try:
                 env = dialogs.parse_env(self.app_env.toPlainText())
             except ValueError as exc:
@@ -400,7 +580,7 @@ class SiteDetail(QWidget):
                 return
             if env != (site.get("app_env") or {}):
                 changes["app_env"] = env
-        if site_type == "container":
+        if self.settings_form.isRowVisible(self.image):
             container = site.get("container") or {}
             wanted = {
                 "image": self.image.text().strip(),
@@ -417,7 +597,8 @@ class SiteDetail(QWidget):
                 "auto_update": bool(container.get("auto_update")),
             }
             changes.update({key: value for key, value in wanted.items() if value != have[key]})
-        elif site_type in hm.APP_SITE_TYPES and self.app_command.text().strip() != (site.get("app_command") or ""):
+        elif self.settings_form.isRowVisible(self.app_command) and \
+                self.app_command.text().strip() != (site.get("app_command") or ""):
             changes["app_command"] = self.app_command.text().strip()
         if not changes:
             self.manager.flash("Nothing changed")
@@ -454,8 +635,9 @@ class SiteDetail(QWidget):
                   f"{label} deployed")
 
     def _extras_failed(self, result: dict, verb: str, hint: str) -> None:
-        """Nextcloud itself worked, but Nextcloud Office or draw.io didn't."""
-        for key, label in (("office_error", "Nextcloud Office"), ("drawio_error", "draw.io")):
+        """Nextcloud itself worked, but Nextcloud Office, draw.io or Team folders didn't."""
+        for key, label in (("office_error", "Nextcloud Office"), ("drawio_error", "draw.io"),
+                           ("team_folders_error", "Team folders")):
             if result.get(key):
                 QMessageBox.warning(self, TITLE, f"Nextcloud works, but {label} could not be {verb}. "
                                                  f"{hint}\n\n{result[key]}")
@@ -467,6 +649,8 @@ class SiteDetail(QWidget):
             extras.append("Nextcloud Office (its app and Collabora Online's newest image)")
         if app.get("drawio"):
             extras.append("the draw.io app")
+        if app.get("team_folders"):
+            extras.append("the Team folders app")
         text = ("Nextcloud's own updater backs up the current code, downloads the newest release and upgrades "
                 "the database, one major version at a time until it is current. The site is in maintenance "
                 "mode while it runs. Your files and database are not backed up by this; take a backup first "
@@ -517,6 +701,19 @@ class SiteDetail(QWidget):
             return
         self.busy(f"{'Setting up' if enabled else 'Removing'} draw.io on {name}…",
                   lambda: self.connection.app_drawio(name, enabled), self.show_site, "Done")
+
+    def _set_team_folders(self, enabled: bool) -> None:
+        name = self.name
+        if enabled:
+            text = ("Team folders are folders shared by groups of users, with their own quotas and permissions. An "
+                    "admin creates them under Administration settings, Team folders, in Nextcloud.\n\nSet it up now?")
+        else:
+            text = ("The Team folders app is turned off, and its folders are hidden. They and their files are kept, "
+                    "and come back when it is set up again.\n\nRemove it?")
+        if not _confirm(self, "Set Up Team Folders" if enabled else "Remove Team Folders", text):
+            return
+        self.busy(f"{'Setting up' if enabled else 'Removing'} Team folders on {name}…",
+                  lambda: self.connection.app_team_folders(name, enabled), self.show_site, "Done")
 
     # -- SSL ------------------------------------------------------------------
 
@@ -681,7 +878,7 @@ class SiteDetail(QWidget):
         self.refresh_cron()
 
     def _add_cron(self) -> None:
-        dialog = dialogs.CronJobDialog(parent=self)
+        dialog = dialogs.CronJobDialog(parent=self, checker=self.connection.schedule_check)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         schedule, command = dialog.values()
@@ -693,7 +890,7 @@ class SiteDetail(QWidget):
         job = self._selected_job()
         if job is None:
             return
-        dialog = dialogs.CronJobDialog(job, self)
+        dialog = dialogs.CronJobDialog(job, self, checker=self.connection.schedule_check)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         schedule, command = dialog.values()
@@ -961,6 +1158,8 @@ class HostingManagerWidget(RemoteHelperTab):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_sites_tab(), "Sites")
         self.tabs.addTab(self._build_databases_tab(), "Databases")
+        self.backups_tab = BackupsTab(self)
+        self.tabs.addTab(self.backups_tab, "Backups")
         self.tabs.addTab(self._build_malware_tab(), "Malware Scanning")
         self.tabs.addTab(self._build_fail2ban_tab(), "Intrusion Protection")
         self.tabs.addTab(self._build_server_tab(), "Server")
@@ -984,6 +1183,10 @@ class HostingManagerWidget(RemoteHelperTab):
 
     # -- Connecting --------------------------------------------------------------
 
+    def before_reconnect(self) -> None:
+        self.detail.stop()
+        self.backups_tab.stop()
+
     def on_connected(self) -> None:
         if self.connection.helper_path is None:
             self.stack.setCurrentWidget(self.missing_page)
@@ -998,6 +1201,8 @@ class HostingManagerWidget(RemoteHelperTab):
         self.refresh_databases()
         self.refresh_malware()
         self.refresh_fail2ban()
+        self.backups_tab.refresh()
+        self.check_import()
         if not (status.get("stack") or {}).get("nginx", {}).get("version"):
             self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
@@ -1015,8 +1220,13 @@ class HostingManagerWidget(RemoteHelperTab):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addLayout(_row(_button("Create Site…", self.create_site), _button("Refresh", self.refresh_sites),
-                                   stretch=False))
+        self.import_button = _button("Import from CloudPanel…", self.import_sites)
+        self.import_note = QLabel("Importing sites from CloudPanel: open the import to see its progress.")
+        self.import_note.setWordWrap(True)
+        self.import_note.hide()
+        left_layout.addLayout(_row(_button("Create Site…", self.create_site), self.import_button,
+                                   _button("Refresh", self.refresh_sites), stretch=False))
+        left_layout.addWidget(self.import_note)
         left_layout.addWidget(self.filter)
         left_layout.addWidget(self.site_table, 1)
         self.detail = SiteDetail(self)
@@ -1034,8 +1244,9 @@ class HostingManagerWidget(RemoteHelperTab):
         self.busy("Loading sites…", self.connection.site_list, self.show_sites)
 
     def _site_row(self, site: dict) -> list:
-        return [site.get("primary_domain") or site["name"], hm.SITE_TYPE_LABELS.get(site["type"], site["type"]),
-                site["name"], https_label(site), app_label(site)]
+        domain = (site.get("primary_domain") or site["name"]) + (" (disabled)" if site.get("disabled") else "")
+        return [domain, hm.SITE_TYPE_LABELS.get(site["type"], site["type"]), site["name"], https_label(site),
+                app_label(site)]
 
     def show_sites(self, sites: list[dict]) -> None:
         selected = self.detail.name
@@ -1082,26 +1293,82 @@ class HostingManagerWidget(RemoteHelperTab):
                     menu.addAction(label).triggered.connect(
                         lambda _=False, a=action: self.detail._app_control(a))
                 menu.addSeparator()
+            if site["name"] == self.detail.name:
+                menu.addAction("Enable Site" if site.get("disabled") else "Disable Site…").triggered.connect(
+                    self.detail._toggle_disabled)
             menu.addAction("Delete Site…").triggered.connect(lambda: self.delete_site(site))
             menu.addSeparator()
         menu.addAction("Create Site…").triggered.connect(self.create_site)
+        menu.addAction("Import from CloudPanel…").triggered.connect(self.import_sites)
         menu.exec(self.site_table.viewport().mapToGlobal(pos))
+
+    def open_site(self, name: str, tab: str = "") -> None:
+        """Shows a site on the Sites tab, on one of its sub-tabs ("backups")."""
+        self.tabs.setCurrentIndex(0)
+        names = [s["name"] for s in self.sites]
+        if name in names:
+            self.site_table.selectRow(names.index(name))
+        if tab == "backups":
+            self.detail.tabs.setCurrentIndex(self.detail.backups_index)
 
     def create_site(self) -> None:
         dialog = dialogs.CreateSiteDialog(self.server_status, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        site_input = dialog.site_input()
+        site_input, deploy_input = dialog.site_input(), dialog.deploy_input()
 
-        def done(site: dict) -> None:
-            self.sites.append(site)
+        def add(site: dict) -> None:
+            self.sites = [s for s in self.sites if s["name"] != site["name"]] + [site]
             self.detail.site = None
             self.show_sites(sorted(self.sites, key=lambda s: s["name"]))
             names = [s["name"] for s in self.sites]
             self.site_table.selectRow(names.index(site["name"]))
 
-        self.busy(f"Creating {site_input['domain']}…", lambda: self.connection.site_create(site_input), done,
+        def deployed(result: dict) -> None:
+            add(result["site"])
+            self.refresh_databases()
+            if deploy_input["application"] == "repo":
+                return
+            self.detail._extras_failed(result, "set up", "Try again with Set Up in the site's Application box.")
+            label = hm.APPLICATION_LABELS[deploy_input["application"]]
+            dialogs.CredentialsDialog(
+                f"{label} Is Ready",
+                "Save the password now — it isn't stored, so it can't be shown again.",
+                [("Sign in at", result.get("admin_url", "")), ("User", result.get("admin_user", "")),
+                 ("Password", result.get("admin_password", ""))],
+                self,
+            ).exec()
+
+        def created(site: dict) -> None:
+            add(site)
+            if deploy_input is None:
+                return
+            # The site exists from here on, whatever the deployment does.
+            label = hm.APPLICATION_LABELS[deploy_input["application"]]
+            self.busy(f"Installing {label} into {site['name']}…",
+                      lambda: self.connection.app_deploy(site["name"], deploy_input), deployed, f"{label} installed",
+                      on_error=lambda _error: self.detail.load(site["name"]))
+
+        self.busy(f"Creating {site_input['domain']}…", lambda: self.connection.site_create(site_input), created,
                   "Site created")
+
+    def check_import(self) -> None:
+        """Shows that a CloudPanel import is running (it goes on without the dialog)."""
+        def show(status: dict) -> None:
+            try:
+                self.import_note.setVisible(bool(status.get("running")))
+            except RuntimeError:
+                pass
+
+        async_utils.run_in_background(self.connection.import_status, on_result=show, on_error=lambda _error: None)
+
+    def import_sites(self) -> None:
+        if self.connection is None:
+            return
+        CloudPanelImportDialog(self.connection, self.refresh_sites, self).exec()
+        self.refresh_sites()
+        self.refresh_databases()
+        self.check_import()
 
     def delete_site(self, site: dict | None) -> None:
         if site is None:
@@ -1446,6 +1713,10 @@ class HostingManagerWidget(RemoteHelperTab):
                               _button("Refresh", self.refresh_status)))
         layout.addWidget(_group("Let's Encrypt", _row(QLabel("Account email:"), self.acme_email,
                                                       _button("Save", self._save_acme_email), stretch=False)))
+        self.storage_default = QLabel()
+        self.storage_default.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(_group("Site files", _row(QLabel("New sites' files:"), self.storage_default,
+                                                   _button("Change…", self._edit_storage_default))))
         layout.addWidget(_group("DNS providers (for DNS challenges)", *dns_rows))
         return page
 
@@ -1478,13 +1749,20 @@ class HostingManagerWidget(RemoteHelperTab):
         rows = []
         for key, label in (("nginx", "nginx"), ("mariadb", "MariaDB"), ("certbot", "Certbot"),
                            ("node", "Node.js"), ("python", "Python"), ("podman", "Podman"),
-                           ("clamav", "ClamAV"), ("fail2ban", "fail2ban")):
+                           ("clamav", "ClamAV"), ("fail2ban", "fail2ban"), ("repo", "Package repository tools"),
+                           ("backup", "restic (backups)")):
             tool = stack.get(key) or {}
             version = tool.get("version") or "Not installed"
             if key == "python" and tool.get("version") and not tool.get("venv"):
                 version += " (no venv module)"
             if key == "podman" and tool.get("version") and not tool.get("quadlet"):
                 version += " (too old for container sites)"
+            if key == "repo" and tool.get("version") and not tool.get("ready"):
+                version += " (apt-ftparchive or gpg missing)"
+            if key == "backup" and tool.get("version") and not tool.get("rclone"):
+                version += " (rclone missing)"
+            elif key == "backup" and tool.get("rclone"):
+                version += f", rclone {tool['rclone']}"
             rows.append([label, version, running(tool)])
         for php in stack.get("php") or []:
             version = php["version"] + ("" if php.get("cli_installed") else " (no command-line PHP)")
@@ -1493,6 +1771,8 @@ class HostingManagerWidget(RemoteHelperTab):
 
         settings = status.get("settings") or {}
         self.acme_email.setText(settings.get("acme_email") or "")
+        storage = settings.get("storage_default") or ""
+        self.storage_default.setText(f"{storage}/<site>" if storage else "/home/<site>")
         for provider, label in self.dns_labels.items():
             label.setText("Configured" if (settings.get("dns_providers") or {}).get(provider) else "Not set")
 
@@ -1506,9 +1786,19 @@ class HostingManagerWidget(RemoteHelperTab):
             self.refresh_status()
             self.refresh_malware()
             self.refresh_fail2ban()
+            self.backups_tab.refresh()
 
         self.busy("Installing server components (this can take several minutes)…",
                   lambda: self.connection.stack_install(components, php), done, "Components installed")
+
+    def _edit_storage_default(self) -> None:
+        dialog = dialogs.StorageDefaultDialog((self.server_status.get("settings") or {}).get("storage_default") or "",
+                                              self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        location = dialog.location.text().strip()
+        self.busy("Saving…", lambda: self.connection.settings_set(storage_default=location),
+                  lambda _: self.refresh_status(), "Saved")
 
     def _save_acme_email(self) -> None:
         email = self.acme_email.text().strip()
