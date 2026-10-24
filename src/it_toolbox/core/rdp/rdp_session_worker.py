@@ -13,6 +13,7 @@ cross-thread *object deletion*, not signal emission).
 
 import queue
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal
 
@@ -22,6 +23,12 @@ from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US, FreeR
 # anyway -- the same idle timeout xfreerdp's own main loop uses. Anything
 # that needs the loop sooner sets _wake instead of relying on this.
 _IDLE_WAIT_MS = 100
+
+# Frames are delivered at most this often (~60 fps). Waiting for the
+# previous frame to be painted isn't a cap on its own: nothing ties a
+# QWidget repaint to the display's refresh, so a busy session could
+# otherwise be copied and repainted a few hundred times a second.
+_MIN_FRAME_INTERVAL = 1 / 60
 
 
 class RdpSessionSignals(QObject):
@@ -79,6 +86,7 @@ class RdpSessionWorker:
         # frames.
         self._frame_dirty = False
         self._frame_in_flight = threading.Event()
+        self._last_frame_at = 0.0
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -207,13 +215,13 @@ class RdpSessionWorker:
                                 f"The connection closed before the remote desktop appeared: {reason}"
                             )
                     break
-                self._deliver_frame()
+                wait_ms = self._deliver_frame()
                 # freerdp_check_event_handles() is non-blocking, so the loop
                 # needs pacing -- this waits on FreeRDP's own handles (and
                 # _wake) rather than a fixed sleep, so incoming data is
                 # handled as soon as it arrives and an idle session costs
                 # next to no CPU.
-                self._session.wait_for_activity(_IDLE_WAIT_MS, self._wake)
+                self._session.wait_for_activity(wait_ms, self._wake)
         except Exception as exc:  # noqa: BLE001 - see comment above
             self.signals.error.emit(f"{type(exc).__name__}: {exc}")
         finally:
@@ -229,13 +237,20 @@ class RdpSessionWorker:
         self._frame_dirty = True
         self._wake.set()
 
-    def _deliver_frame(self) -> None:
+    def _deliver_frame(self) -> int:
+        """Sends the pending frame if there is one and it's due; returns
+        how long the pump may wait before it should be called again."""
         if not self._frame_dirty or self._frame_in_flight.is_set():
-            return
+            return _IDLE_WAIT_MS
+        due_in = self._last_frame_at + _MIN_FRAME_INTERVAL - time.monotonic()
+        if due_in > 0:
+            return max(1, int(due_in * 1000))
         self._frame_dirty = False
         self._frame_in_flight.set()
+        self._last_frame_at = time.monotonic()
         # Runs on the background thread — reads the ctypes GDI surface here
         # (same thread that owns the connection) and hands plain bytes
         # across via emit(), never a raw pointer.
         pixels, width, height, stride = self._session.get_frame()
         self.signals.frame_ready.emit(pixels, width, height, stride)
+        return _IDLE_WAIT_MS

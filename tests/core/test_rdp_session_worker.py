@@ -89,6 +89,21 @@ def test_frames_are_held_back_until_the_previous_one_is_consumed(qtbot, monkeypa
     assert (len(delivered), session.frames_read) == (1, 1)
 
     worker.frame_consumed()
+    worker._last_frame_at = 0.0  # past the ~60 fps cap
     worker._deliver_frame()
     worker._deliver_frame()  # nothing new painted since
     assert (len(delivered), session.frames_read) == (2, 2)
+
+
+def test_frames_are_capped_at_about_60_per_second(qtbot, monkeypatch):
+    session = _RecordingSession()
+    worker = _worker_with(monkeypatch, session)
+    worker._on_frame()
+    worker._deliver_frame()
+    worker.frame_consumed()
+    worker._on_frame()
+
+    wait_ms = worker._deliver_frame()  # straight after the last one: too soon
+
+    assert session.frames_read == 1
+    assert 1 <= wait_ms <= 17
