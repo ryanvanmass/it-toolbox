@@ -219,6 +219,7 @@ class StackDialog(QDialog):
             "python": stack.get("python", {}).get("venv"),
             "podman": stack.get("podman", {}).get("version"),
             "clamav": stack.get("clamav", {}).get("version"),
+            "fail2ban": stack.get("fail2ban", {}).get("version"),
         }
         self.components: dict[str, QCheckBox] = {}
         components_box = QGroupBox("Components")
@@ -417,12 +418,11 @@ class DeployDialog(QDialog):
         self.form.addRow("Admin user:", self.admin_user)
         self.form.addRow("Admin email:", self.admin_email)
         self.form.addRow("Admin password:", self.admin_password)
-        note = QLabel("The site's web folder must be empty apart from the placeholder page. "
-                      "A database is created for the application. This can take several minutes.")
-        note.setWordWrap(True)
+        self.note = QLabel()
+        self.note.setWordWrap(True)
         layout = QVBoxLayout(self)
         layout.addLayout(self.form)
-        layout.addWidget(note)
+        layout.addWidget(self.note)
         layout.addWidget(_buttons(self, self._accept))
         self.application.currentIndexChanged.connect(self._update_fields)
         self._update_fields()
@@ -431,6 +431,12 @@ class DeployDialog(QDialog):
         wordpress = self.application.currentData() == "wordpress"
         self.form.setRowVisible(self.title, wordpress)
         self.form.setRowVisible(self.admin_email, wordpress)
+        note = ("The site's web folder must be empty apart from the placeholder page. "
+                "A database is created for the application. This can take several minutes.")
+        if not wordpress:
+            note += ("\n\nNextcloud Office (Collabora Online in a container of the site's user; needs Podman "
+                     "and about 1 GB of memory) and draw.io are set up with it.")
+        self.note.setText(note)
 
     def _accept(self) -> None:
         if not self.admin_user.text().strip():
@@ -477,3 +483,223 @@ class CredentialsDialog(QDialog):
         layout.addWidget(label)
         layout.addLayout(form)
         layout.addWidget(buttons)
+
+
+class MalwareAlertsDialog(QDialog):
+    """Where malware scan alerts go: Pushover and/or email over SMTP, as in
+    the Cockpit page's malware settings. Stored secrets are never sent back
+    by the helper, so their fields start empty and are only sent when typed.
+    `send_test(target, changes, dialog)` sends a test alert with the values
+    as they are in the dialog."""
+
+    def __init__(self, alerts: dict, send_test=None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Malware Alerts")
+        self.setMinimumWidth(520)
+        self.saved_pushover = alerts.get("pushover") or {}
+        self.saved_smtp = alerts.get("smtp") or {}
+        self._send_test = send_test
+        saved_hint = "Saved. Leave empty to keep it."
+
+        self.pushover_enabled = QCheckBox("Send alerts with Pushover")
+        self.pushover_enabled.setChecked(bool(self.saved_pushover.get("enabled")))
+        self.pushover_token = QLineEdit()
+        self.pushover_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pushover_token.setPlaceholderText(
+            saved_hint if self.saved_pushover.get("token_set") else "The token of an application at pushover.net")
+        self.pushover_user = QLineEdit()
+        self.pushover_user.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pushover_user.setPlaceholderText(
+            saved_hint if self.saved_pushover.get("user_set") else "Your user or group key")
+        self.pushover_test = QPushButton("Send Test Alert")
+        self.pushover_test.clicked.connect(lambda _=False: self._test("pushover"))
+        pushover_box = QGroupBox("Pushover")
+        pushover_form = QFormLayout(pushover_box)
+        pushover_form.addRow("", self.pushover_enabled)
+        pushover_form.addRow("API token:", self.pushover_token)
+        pushover_form.addRow("User key:", self.pushover_user)
+        pushover_form.addRow("", self.pushover_test)
+
+        smtp = self.saved_smtp
+        self.smtp_enabled = QCheckBox("Send alerts by email")
+        self.smtp_enabled.setChecked(bool(smtp.get("enabled")))
+        self.smtp_host = QLineEdit(smtp.get("host") or "")
+        self.smtp_host.setPlaceholderText("smtp.example.com")
+        self.smtp_security = QComboBox()
+        for security in hm.SMTP_SECURITY:
+            self.smtp_security.addItem(hm.SMTP_SECURITY_LABELS[security], security)
+        self.smtp_security.setCurrentIndex(max(0, self.smtp_security.findData(smtp.get("security") or "starttls")))
+        self.smtp_port = QSpinBox()
+        self.smtp_port.setRange(1, 65535)
+        self.smtp_port.setValue(int(smtp.get("port") or hm.SMTP_PORTS[self.smtp_security.currentData()]))
+        self.smtp_security.currentIndexChanged.connect(self._security_changed)
+        self.smtp_user = QLineEdit(smtp.get("username") or "")
+        self.smtp_user.setPlaceholderText("Leave empty if the server doesn't need a login")
+        self.smtp_password = QLineEdit()
+        self.smtp_password.setEchoMode(QLineEdit.EchoMode.Password)
+        if smtp.get("password_set"):
+            self.smtp_password.setPlaceholderText(saved_hint)
+        self.smtp_user.textChanged.connect(lambda text: self.smtp_password.setEnabled(bool(text.strip())))
+        self.smtp_password.setEnabled(bool(self.smtp_user.text().strip()))
+        self.smtp_sender = QLineEdit(smtp.get("sender") or "")
+        self.smtp_sender.setPlaceholderText("server@example.com")
+        self.smtp_recipients = QLineEdit(", ".join(smtp.get("recipients") or []))
+        self.smtp_recipients.setPlaceholderText("One or more addresses, separated by commas")
+        self.smtp_test = QPushButton("Send Test Alert")
+        self.smtp_test.clicked.connect(lambda _=False: self._test("smtp"))
+        smtp_box = QGroupBox("Email")
+        smtp_form = QFormLayout(smtp_box)
+        smtp_form.addRow("", self.smtp_enabled)
+        smtp_form.addRow("SMTP server:", self.smtp_host)
+        smtp_form.addRow("Security:", self.smtp_security)
+        smtp_form.addRow("Port:", self.smtp_port)
+        smtp_form.addRow("User name:", self.smtp_user)
+        smtp_form.addRow("Password:", self.smtp_password)
+        smtp_form.addRow("From:", self.smtp_sender)
+        smtp_form.addRow("To:", self.smtp_recipients)
+        smtp_form.addRow("", self.smtp_test)
+
+        note = QLabel("An alert goes out when a scan finds infected files (not ones marked as false positives).")
+        note.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.addWidget(note)
+        layout.addWidget(pushover_box)
+        layout.addWidget(smtp_box)
+        layout.addWidget(_buttons(self, self._accept))
+
+    def _security_changed(self) -> None:
+        # Follow the usual port, unless someone typed another one.
+        if self.smtp_port.value() in hm.SMTP_PORTS.values():
+            self.smtp_port.setValue(hm.SMTP_PORTS[self.smtp_security.currentData()])
+
+    def pushover_ready(self) -> bool:
+        return ((bool(self.pushover_token.text().strip()) or bool(self.saved_pushover.get("token_set")))
+                and (bool(self.pushover_user.text().strip()) or bool(self.saved_pushover.get("user_set"))))
+
+    def smtp_ready(self) -> bool:
+        return all(edit.text().strip() for edit in (self.smtp_host, self.smtp_sender, self.smtp_recipients))
+
+    def pushover_changes(self) -> dict:
+        changes = {"enabled": self.pushover_enabled.isChecked()}
+        if self.pushover_token.text().strip():
+            changes["token"] = self.pushover_token.text().strip()
+        if self.pushover_user.text().strip():
+            changes["user"] = self.pushover_user.text().strip()
+        return changes
+
+    def smtp_changes(self) -> dict:
+        user = self.smtp_user.text().strip()
+        changes = {
+            "enabled": self.smtp_enabled.isChecked(),
+            "host": self.smtp_host.text().strip(),
+            "port": self.smtp_port.value(),
+            "security": self.smtp_security.currentData(),
+            "username": user,
+            "sender": self.smtp_sender.text().strip(),
+            "recipients": [r for r in self.smtp_recipients.text().replace(";", ",").replace(" ", ",").split(",") if r],
+        }
+        if user and self.smtp_password.text():
+            changes["password"] = self.smtp_password.text()
+        if not user:
+            # No user name, no login: don't keep a password that can't be used.
+            changes["clear_password"] = True
+        return changes
+
+    def _test(self, target: str) -> None:
+        ready = self.pushover_ready() if target == "pushover" else self.smtp_ready()
+        if not ready:
+            QMessageBox.warning(self, TITLE, "Pushover needs an API token and a user key."
+                                if target == "pushover" else "Email needs an SMTP server, a From and a To address.")
+            return
+        if self._send_test is not None:
+            changes = self.pushover_changes() if target == "pushover" else self.smtp_changes()
+            self._send_test(target, changes, self)
+
+    def _accept(self) -> None:
+        if self.pushover_enabled.isChecked() and not self.pushover_ready():
+            QMessageBox.warning(self, TITLE, "Pushover needs an API token and a user key.")
+            return
+        if self.smtp_enabled.isChecked() and not self.smtp_ready():
+            QMessageBox.warning(self, TITLE, "Email needs an SMTP server, a From and a To address.")
+            return
+        self.accept()
+
+
+def _duration_combo(value: int, choices: list[tuple[int, str]]) -> QComboBox:
+    combo = QComboBox()
+    if value not in dict(choices):
+        combo.addItem(hm.duration_label(value), value)
+    for seconds, label in choices:
+        combo.addItem(label, seconds)
+    combo.setCurrentIndex(combo.findData(value))
+    return combo
+
+
+class Fail2banSettingsDialog(QDialog):
+    """Intrusion protection settings: on/off, which managed jails run, and
+    when to ban (the Cockpit page's Fail2banCard settings)."""
+
+    def __init__(self, status: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Intrusion Protection")
+        self.setMinimumWidth(520)
+        self.enabled = QCheckBox("Ban addresses that attack the server")
+        self.enabled.setChecked(bool(status.get("enabled")))
+        self.jails: dict[str, QCheckBox] = {}
+        jails_box = QGroupBox("Watch for")
+        jails_layout = QVBoxLayout(jails_box)
+        for jail in status.get("jails") or []:
+            if not jail.get("managed"):
+                continue
+            box = QCheckBox(hm.jail_label(jail["id"]))
+            box.setToolTip(hm.FAIL2BAN_JAILS.get(jail["id"], ("", ""))[1])
+            box.setChecked(bool(jail.get("selected")))
+            self.jails[jail["id"]] = box
+            jails_layout.addWidget(box)
+        self.maxretry = QSpinBox()
+        self.maxretry.setRange(1, 100)
+        self.maxretry.setValue(int(status.get("maxretry") or 5))
+        self.findtime = _duration_combo(int(status.get("findtime") or 600), hm.FAIL2BAN_FINDTIMES)
+        self.bantime = _duration_combo(int(status.get("bantime") or 3600), hm.FAIL2BAN_DURATIONS)
+        self.increment = QCheckBox("Ban repeat offenders for longer each time")
+        self.increment.setChecked(bool(status.get("increment")))
+        self.ignoreip = QPlainTextEdit("\n".join(status.get("ignoreip") or []))
+        self.ignoreip.setFixedHeight(70)
+        self.ignoreip.setFont(monospace())
+        self.ignoreip.setToolTip("Addresses or networks (such as 203.0.113.0/24), one per line. "
+                                 "Add your own, so a mistyped password can't lock you out.")
+        form = QFormLayout()
+        form.addRow("Attempts:", self.maxretry)
+        form.addRow("Within:", self.findtime)
+        form.addRow("Ban for:", self.bantime)
+        form.addRow("", self.increment)
+        form.addRow("Never ban:", self.ignoreip)
+        when_box = QGroupBox("When to ban")
+        when_box.setLayout(form)
+        note = QLabel("fail2ban watches the logs and blocks addresses that keep failing, in the server's firewall. "
+                      "127.0.0.1 and ::1 are never banned.")
+        note.setWordWrap(True)
+        self.enabled.toggled.connect(self._update_enabled)
+        layout = QVBoxLayout(self)
+        layout.addWidget(note)
+        layout.addWidget(self.enabled)
+        layout.addWidget(jails_box)
+        layout.addWidget(when_box)
+        layout.addWidget(_buttons(self, self.accept))
+        self._update_enabled()
+
+    def _update_enabled(self) -> None:
+        on = self.enabled.isChecked()
+        for widget in (*self.jails.values(), self.maxretry):
+            widget.setEnabled(on)
+
+    def settings(self) -> dict:
+        return {
+            "enabled": self.enabled.isChecked(),
+            "jails": [jail for jail, box in self.jails.items() if box.isChecked()],
+            "maxretry": self.maxretry.value(),
+            "findtime": self.findtime.currentData(),
+            "bantime": self.bantime.currentData(),
+            "increment": self.increment.isChecked(),
+            "ignoreip": [v for v in self.ignoreip.toPlainText().replace(",", " ").split() if v],
+        }

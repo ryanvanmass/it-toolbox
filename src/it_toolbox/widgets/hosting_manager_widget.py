@@ -1,8 +1,10 @@
 """One Hosting Manager tab (Cockpit module): manages a web server set up by
 the user's cockpit-hosting Cockpit module over SSH, with the same features
 as that module's page -- sites (static, PHP, reverse proxy, Node.js,
-Python, container), SSL, databases, cron jobs, SFTP, logs, WordPress and
-Nextcloud deployment, malware scanning, and installing the server stack.
+Python, container), SSL, the nginx vhost editor, databases, cron jobs,
+SFTP, logs, WordPress and Nextcloud deployment (with Nextcloud updates, Nextcloud Office and draw.io),
+malware scanning and its alerts, fail2ban intrusion protection, and
+installing the server stack.
 See core/hosting_manager.py for how it talks to the server.
 """
 
@@ -127,6 +129,7 @@ class SiteDetail(QWidget):
         super().__init__()
         self.manager = manager
         self.site: dict | None = None
+        self.vhost: dict | None = None
 
         self.heading = QLabel()
         font = self.heading.font()
@@ -179,7 +182,7 @@ class SiteDetail(QWidget):
         self._show_settings(site)
         self._show_https(site)
         self._show_databases(site)
-        self.custom_nginx.setPlainText(site.get("custom_nginx") or "")
+        self._show_nginx(site)
         self.manager.update_site_row(site)
         if previous != site["name"]:
             self.cron_table.setRowCount(0)
@@ -253,7 +256,22 @@ class SiteDetail(QWidget):
         self.application_label = QLabel()
         self.application_label.setWordWrap(True)
         self.deploy_button = _button("Deploy WordPress or Nextcloud…", self._deploy)
-        self.application_box = _group("Application", _row(self.application_label, self.deploy_button))
+        self.update_app_button = _button("Update Nextcloud…", self._update_application)
+        self.office_label = QLabel()
+        self.office_setup = _button("Set Up", lambda: self._set_office(True))
+        self.office_remove = _button("Remove", lambda: self._set_office(False))
+        self.drawio_label = QLabel()
+        self.drawio_setup = _button("Set Up", lambda: self._set_drawio(True))
+        self.drawio_remove = _button("Remove", lambda: self._set_drawio(False))
+        self.nextcloud_extras = QWidget()
+        extras = QVBoxLayout(self.nextcloud_extras)
+        extras.setContentsMargins(0, 0, 0, 0)
+        extras.addLayout(_row(self.office_label, self.office_setup, self.office_remove))
+        extras.addLayout(_row(self.drawio_label, self.drawio_setup, self.drawio_remove))
+        self.application_box = _group(
+            "Application", _row(self.application_label, self.update_app_button, self.deploy_button),
+            self.nextcloud_extras,
+        )
 
         delete = _button("Delete Site…", lambda: self.manager.delete_site(self.site))
 
@@ -285,6 +303,9 @@ class SiteDetail(QWidget):
         self.info.setText("\n".join(lines))
 
         self.domains.setPlainText("\n".join(site.get("domains") or []))
+        self.domains.setToolTip("One per line; the first is the primary domain." + (
+            " The self-signed certificate is made again for the new domains."
+            if site.get("ssl_mode") == "self-signed" else ""))
         self.force_https.setChecked(bool(site.get("force_https")))
         self.force_https.setEnabled(site.get("ssl_mode", "none") != "none")
 
@@ -336,6 +357,21 @@ class SiteDetail(QWidget):
         else:
             self.application_label.setText("No application deployed.")
         self.deploy_button.setVisible(not app)
+        nextcloud = bool(app) and app["name"] == "nextcloud"
+        self.update_app_button.setVisible(nextcloud)
+        self.nextcloud_extras.setVisible(nextcloud)
+        if nextcloud:
+            office = app.get("office")
+            running = bool(office) and office.get("state") == "active"
+            self.office_label.setText("Nextcloud Office: " + (
+                ("running" if running else office.get("state") or "not running") if office else "not set up"))
+            self.office_setup.setText("Repair" if office else "Set Up")
+            self.office_setup.setVisible(not running)
+            self.office_remove.setVisible(bool(office))
+            drawio = bool(app.get("drawio"))
+            self.drawio_label.setText("draw.io: " + ("set up" if drawio else "not set up"))
+            self.drawio_setup.setText("Repair" if drawio else "Set Up")
+            self.drawio_remove.setVisible(drawio)
 
     def _save_settings(self) -> None:
         site = self.site
@@ -405,6 +441,7 @@ class SiteDetail(QWidget):
         def done(result: dict) -> None:
             self.show_site(result["site"])
             self.manager.refresh_databases()
+            self._extras_failed(result, "set up", "Try again with Set Up in the site's Application box.")
             dialogs.CredentialsDialog(
                 f"{label} Deployed",
                 f"{label} is installed. Save the admin password now — it isn't shown again.",
@@ -415,6 +452,71 @@ class SiteDetail(QWidget):
 
         self.busy(f"Deploying {label} to {name}…", lambda: self.connection.app_deploy(name, deploy_input), done,
                   f"{label} deployed")
+
+    def _extras_failed(self, result: dict, verb: str, hint: str) -> None:
+        """Nextcloud itself worked, but Nextcloud Office or draw.io didn't."""
+        for key, label in (("office_error", "Nextcloud Office"), ("drawio_error", "draw.io")):
+            if result.get(key):
+                QMessageBox.warning(self, TITLE, f"Nextcloud works, but {label} could not be {verb}. "
+                                                 f"{hint}\n\n{result[key]}")
+
+    def _update_application(self) -> None:
+        app = self.site.get("application") or {}
+        extras = []
+        if app.get("office"):
+            extras.append("Nextcloud Office (its app and Collabora Online's newest image)")
+        if app.get("drawio"):
+            extras.append("the draw.io app")
+        text = ("Nextcloud's own updater backs up the current code, downloads the newest release and upgrades "
+                "the database, one major version at a time until it is current. The site is in maintenance "
+                "mode while it runs. Your files and database are not backed up by this; take a backup first "
+                "for a major update.")
+        if extras:
+            text += f"\n\n{' and '.join(extras).capitalize()} will be updated too."
+        if not _confirm(self, "Update Nextcloud", text + "\n\nUpdate now?"):
+            return
+        name = self.name
+
+        def done(result: dict) -> None:
+            self.show_site(result["site"])
+            if result.get("version") == result.get("previous_version"):
+                message = f"Nextcloud {result.get('version')} is already the newest release."
+            else:
+                message = f"Nextcloud was updated from {result.get('previous_version')} to {result.get('version')}."
+            QMessageBox.information(self, "Update Nextcloud", message)
+            self._extras_failed(result, "updated", "")
+
+        self.busy(f"Updating Nextcloud on {name} (this can take several minutes)…",
+                  lambda: self.connection.app_update(name), done, "Nextcloud updated")
+
+    def _set_office(self, enabled: bool) -> None:
+        name = self.name
+        if enabled:
+            if not _confirm(self, "Set Up Nextcloud Office",
+                            "Nextcloud Office edits documents, spreadsheets and presentations in the browser. "
+                            "Collabora Online runs for it in a container of the site's user (Podman is needed, "
+                            "and about 1 GB of memory).\n\nSet it up now?"):
+                return
+            message = f"Downloading and starting Collabora Online for {name}…"
+        else:
+            if not _confirm(self, "Remove Nextcloud Office",
+                            "Its container is stopped and removed, and the Nextcloud Office app turned off. "
+                            "Documents stay in Nextcloud.\n\nRemove it?"):
+                return
+            message = f"Removing Nextcloud Office from {name}…"
+        self.busy(message, lambda: self.connection.app_office(name, enabled), self.show_site, "Done")
+
+    def _set_drawio(self, enabled: bool) -> None:
+        name = self.name
+        if enabled:
+            text = ("draw.io creates and edits diagrams (.drawio files) in Nextcloud. Its editor is loaded from "
+                    "embed.diagrams.net; diagrams stay in Nextcloud.\n\nSet it up now?")
+        else:
+            text = "The draw.io app is turned off. Diagrams stay in Nextcloud as files.\n\nRemove it?"
+        if not _confirm(self, "Set Up draw.io" if enabled else "Remove draw.io", text):
+            return
+        self.busy(f"{'Setting up' if enabled else 'Removing'} draw.io on {name}…",
+                  lambda: self.connection.app_drawio(name, enabled), self.show_site, "Done")
 
     # -- SSL ------------------------------------------------------------------
 
@@ -428,6 +530,7 @@ class SiteDetail(QWidget):
         http = _button("Get Certificate (HTTP Challenge)", lambda: self._issue("http"))
         dns = _button("Get Certificate (DNS Challenge)", lambda: self._issue("dns"))
         custom = _button("Upload Certificate…", self._custom_certificate)
+        self.self_signed = _button("Use Self-Signed Certificate…", self._self_signed_certificate)
         self.remove_cert = _button("Remove SSL", self._remove_certificate)
         note = QLabel(
             "Let's Encrypt over HTTP needs every domain pointing at this server on port 80. "
@@ -438,7 +541,7 @@ class SiteDetail(QWidget):
         layout = QVBoxLayout(page)
         layout.addWidget(self.https_state)
         layout.addWidget(_group("Let's Encrypt", _row(http), _row(dns, QLabel("Provider:"), self.dns_provider), note))
-        layout.addLayout(_row(custom, self.remove_cert))
+        layout.addLayout(_row(custom, self.self_signed, self.remove_cert))
         layout.addStretch(1)
         return page
 
@@ -452,6 +555,8 @@ class SiteDetail(QWidget):
             text += f"\nDNS provider: {hm.DNS_PROVIDER_LABELS.get(site['dns_provider'], site['dns_provider'])}"
         self.https_state.setText(text)
         self.remove_cert.setEnabled(mode != "none")
+        self.self_signed.setText("Make New Self-Signed Certificate…" if mode == "self-signed"
+                                 else "Use Self-Signed Certificate…")
         if site.get("dns_provider"):
             self.dns_provider.setCurrentIndex(max(0, self.dns_provider.findData(site["dns_provider"])))
 
@@ -473,6 +578,20 @@ class SiteDetail(QWidget):
         cert, key = dialog.certificate.toPlainText(), dialog.private_key.toPlainText()
         self.busy(f"Installing the certificate for {name}…", lambda: self.connection.ssl_custom(name, cert, key),
                   self.show_site, "Certificate installed")
+
+    def _self_signed_certificate(self) -> None:
+        choices = [f"{years} year" + ("" if years == 1 else "s") for years in hm.SELF_SIGNED_YEARS]
+        choice, ok = QInputDialog.getItem(
+            self, "Self-Signed Certificate",
+            f"For {', '.join(self.site.get('domains') or [])}.\n\nBrowsers warn that it isn't trusted: use it for "
+            "testing, internal sites, or behind a proxy such as Cloudflare in \"Full\" mode. It isn't renewed "
+            "automatically.\n\nValid for:", choices, 0, False)
+        if not ok:
+            return
+        days = min(hm.SELF_SIGNED_YEARS[choices.index(choice)] * 365, 3650)
+        name = self.name
+        self.busy(f"Making a self-signed certificate for {name}…",
+                  lambda: self.connection.ssl_self_signed(name, days), self.show_site, "Certificate installed")
 
     def _remove_certificate(self) -> None:
         name = self.name
@@ -707,26 +826,108 @@ class SiteDetail(QWidget):
 
         self.busy("Loading the log…", lambda: self.connection.site_logs(name, log, lines), show)
 
-    # -- Custom nginx ----------------------------------------------------------
+    # -- nginx vhost ------------------------------------------------------------
 
     def _build_nginx_tab(self) -> QWidget:
+        """The site's whole nginx vhost as a template (cockpit-hosting 7+), or
+        on older servers the custom directives added to its server blocks."""
         page = QWidget()
-        note = QLabel("Extra nginx directives for this site's server block. They're checked with "
-                      "nginx -t before being applied, and rolled back if nginx rejects them.")
-        note.setWordWrap(True)
+        self.nginx_note = QLabel()
+        self.nginx_note.setWordWrap(True)
+        self.nginx_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.vhost_outdated = QLabel(
+            "Recent changes to this site are not in your edited vhost: the module's own vhost changed (for "
+            "example SSL, the HTTPS redirect or an application) in lines you edited, so it couldn't be merged "
+            "in. Compare with the generated vhost and carry the change over, or reset to the generated one."
+        )
+        self.vhost_outdated.setWordWrap(True)
+        self.vhost_outdated.setStyleSheet("color: #b35c00;")
+        self.vhost_generated_button = _button("Show Generated Vhost…", self._show_generated_vhost)
+        self.vhost_outdated_row = QWidget()
+        outdated_layout = QVBoxLayout(self.vhost_outdated_row)
+        outdated_layout.setContentsMargins(0, 0, 0, 0)
+        outdated_layout.addWidget(self.vhost_outdated)
+        outdated_layout.addLayout(_row(self.vhost_generated_button))
         self.custom_nginx = QPlainTextEdit()
         self.custom_nginx.setFont(dialogs.monospace())
-        self.custom_nginx.setPlaceholderText("location /downloads/ {\n    autoindex on;\n}")
+        self.custom_nginx.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.vhost_placeholders = _button("Placeholders…", self._show_vhost_placeholders)
+        self.vhost_discard = _button("Discard Changes", self._discard_vhost)
+        self.vhost_reset = _button("Reset to Generated…", self._reset_vhost)
         layout = QVBoxLayout(page)
-        layout.addWidget(note)
+        layout.addWidget(self.nginx_note)
+        layout.addWidget(self.vhost_outdated_row)
         layout.addWidget(self.custom_nginx, 1)
-        layout.addLayout(_row(_button("Save", self._save_nginx)))
+        layout.addLayout(_row(_button("Save", self._save_nginx), self.vhost_discard, self.vhost_reset,
+                              self.vhost_placeholders))
         return page
+
+    def _show_nginx(self, site: dict) -> None:
+        vhost = site.get("vhost")
+        self.vhost = vhost
+        editor = vhost is not None
+        if editor:
+            self.nginx_note.setText(
+                f"Written to {vhost.get('path')}" + (" (edited)" if vhost.get("edited") else " (generated)")
+                + ". Checked with nginx -t before it's applied: if nginx refuses it, nothing changes. Names in "
+                "double braces are filled in from the site's settings, so domain, PHP and certificate changes "
+                "still reach an edited vhost."
+            )
+            self.custom_nginx.setPlainText(vhost.get("template") or "")
+            self.custom_nginx.setPlaceholderText("")
+        else:
+            self.nginx_note.setText(
+                "Extra nginx directives for this site's server block. They're checked with nginx -t before "
+                "being applied, and rolled back if nginx rejects them. (Update cockpit-hosting on the server "
+                "to edit the whole vhost.)"
+            )
+            self.custom_nginx.setPlainText(site.get("custom_nginx") or "")
+            self.custom_nginx.setPlaceholderText("location /downloads/ {\n    autoindex on;\n}")
+        self.vhost_outdated_row.setVisible(editor and bool(vhost.get("outdated")))
+        self.vhost_placeholders.setVisible(editor)
+        self.vhost_discard.setVisible(editor)
+        self.vhost_reset.setVisible(editor and bool(vhost.get("edited")))
+
+    def _after_vhost_change(self, vhost: dict) -> None:
+        # Reload the whole site: the reply only carries the vhost.
+        self.load(self.name)
 
     def _save_nginx(self) -> None:
         name, text = self.name, self.custom_nginx.toPlainText()
-        self.busy("Saving the nginx directives…", lambda: self.connection.site_custom_nginx(name, text),
-                  self.custom_nginx.setPlainText, "nginx reloaded")
+        if self.vhost is None:
+            self.busy("Saving the nginx directives…", lambda: self.connection.site_custom_nginx(name, text),
+                      self.custom_nginx.setPlainText, "nginx reloaded")
+            return
+        if text == self.vhost.get("template"):
+            self.manager.flash("Nothing changed")
+            return
+        if not text.strip():
+            QMessageBox.warning(self, TITLE, "The vhost can't be empty. Use Reset to Generated instead.")
+            return
+        self.busy("Saving the nginx vhost…", lambda: self.connection.site_vhost_set(name, text),
+                  self._after_vhost_change, "Saved and applied")
+
+    def _discard_vhost(self) -> None:
+        if self.vhost is not None:
+            self.custom_nginx.setPlainText(self.vhost.get("template") or "")
+
+    def _reset_vhost(self) -> None:
+        name = self.name
+        if _confirm(self, "Reset Vhost", "Throw away your edits to this site's vhost? The module writes it from "
+                                         "the site's settings again."):
+            self.busy("Resetting the nginx vhost…", lambda: self.connection.site_vhost_set(name, reset=True),
+                      self._after_vhost_change, "Vhost reset")
+
+    def _show_generated_vhost(self) -> None:
+        if self.vhost is not None:
+            self.manager.show_text(f"Generated vhost for {self.name}", self.vhost.get("generated") or "")
+
+    def _show_vhost_placeholders(self) -> None:
+        if self.vhost is not None:
+            values = self.vhost.get("values") or {}
+            width = max((len(key) for key in values), default=0) + 4
+            self.manager.show_text("What the names in double braces stand for", "\n".join(
+                f"{'{{' + key + '}}':<{width}}  {value}" for key, value in values.items()))
 
 
 # -- The manager tab ---------------------------------------------------------------
@@ -746,6 +947,7 @@ class HostingManagerWidget(RemoteHelperTab):
         self.sites: list[dict] = []
         self.databases: list[dict] = []
         self.malware: dict = {}
+        self.fail2ban: dict = {}
 
         self.missing_page = QLabel(
             "This server doesn't have the cockpit-hosting module "
@@ -760,6 +962,7 @@ class HostingManagerWidget(RemoteHelperTab):
         self.tabs.addTab(self._build_sites_tab(), "Sites")
         self.tabs.addTab(self._build_databases_tab(), "Databases")
         self.tabs.addTab(self._build_malware_tab(), "Malware Scanning")
+        self.tabs.addTab(self._build_fail2ban_tab(), "Intrusion Protection")
         self.tabs.addTab(self._build_server_tab(), "Server")
         self.stack.addWidget(self.tabs)
 
@@ -794,6 +997,7 @@ class HostingManagerWidget(RemoteHelperTab):
         self.refresh_sites()
         self.refresh_databases()
         self.refresh_malware()
+        self.refresh_fail2ban()
         if not (status.get("stack") or {}).get("nginx", {}).get("version"):
             self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
@@ -1001,6 +1205,9 @@ class HostingManagerWidget(RemoteHelperTab):
         settings.addRow("", self.malware_enabled)
         settings.addRow("Schedule:", self.malware_schedule)
         settings.addRow("When malware is found:", self.malware_action)
+        self.malware_alerts = QLabel()
+        self.malware_alerts.setWordWrap(True)
+        settings.addRow("Alerts:", _row(self.malware_alerts, _button("Alerts…", self._edit_malware_alerts)))
         settings_box = QGroupBox("Settings")
         settings_layout = QVBoxLayout(settings_box)
         settings_layout.addLayout(settings)
@@ -1040,6 +1247,14 @@ class HostingManagerWidget(RemoteHelperTab):
         self.malware_enabled.setChecked(bool(status.get("enabled")))
         self.malware_schedule.setText(status.get("schedule") or "")
         self.malware_action.setCurrentIndex(max(0, self.malware_action.findData(status.get("action"))))
+        alerts = status.get("alerts") or {}
+        targets = [label for key, label in (("pushover", "Pushover"), ("smtp", "Email"))
+                   if (alerts.get(key) or {}).get("enabled")]
+        text = ", ".join(targets) or "Off"
+        failure = status.get("alert_failure")
+        if failure:
+            text += f"\nLast alert failed ({when_label(failure.get('at'))}): {failure.get('message')}"
+        self.malware_alerts.setText(text)
         fill_table(self.scans_table, [
             [when_label(scan.get("started_at")), when_label(scan.get("finished_at")),
              scan.get("failure") or scan.get("state"), scan.get("sites"), scan.get("files_scanned"),
@@ -1060,6 +1275,18 @@ class HostingManagerWidget(RemoteHelperTab):
             "action": self.malware_action.currentData(),
         }
         self.busy("Saving malware scan settings…", lambda: self.connection.malware_settings(settings),
+                  self.show_malware, "Saved")
+
+    def _edit_malware_alerts(self) -> None:
+        def send_test(target: str, changes: dict, dialog: QDialog) -> None:
+            self.busy("Sending a test alert…", lambda: self.connection.malware_alert_test(target, changes),
+                      lambda _: QMessageBox.information(dialog, TITLE, "Test alert sent."), "Test alert sent")
+
+        dialog = dialogs.MalwareAlertsDialog(self.malware.get("alerts") or {}, send_test, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        pushover, smtp = dialog.pushover_changes(), dialog.smtp_changes()
+        self.busy("Saving malware alerts…", lambda: self.connection.malware_alerts(pushover, smtp),
                   self.show_malware, "Saved")
 
     def _scan_now(self) -> None:
@@ -1086,6 +1313,112 @@ class HostingManagerWidget(RemoteHelperTab):
             return
         self.busy("Updating the finding…", lambda: self.connection.malware_finding(finding["id"], action),
                   self.show_malware, "Done")
+
+    # -- Intrusion protection (fail2ban) ------------------------------------------
+
+    def _build_fail2ban_tab(self) -> QWidget:
+        page = QWidget()
+        self.fail2ban_info = QLabel()
+        self.fail2ban_info.setWordWrap(True)
+        self.fail2ban_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.fail2ban_install = _button("Install fail2ban", self._install_fail2ban)
+        self.fail2ban_settings_button = _button("Settings…", self._edit_fail2ban)
+        self.jails_table = make_table(["Watching for", "State", "Failures", "Banned now", "Banned in total"])
+        self.bans_table = make_table(["Banned address", "For", "Until"])
+        self.bans_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.bans_table.customContextMenuRequested.connect(self._bans_menu)
+        self.fail2ban_tables = QSplitter(Qt.Orientation.Vertical)
+        self.fail2ban_tables.addWidget(_group("Jails", self.jails_table))
+        self.fail2ban_tables.addWidget(_group("Banned addresses (right-click to unban)", self.bans_table))
+        layout = QVBoxLayout(page)
+        layout.addWidget(self.fail2ban_info)
+        layout.addLayout(_row(self.fail2ban_install, self.fail2ban_settings_button,
+                              _button("Refresh", self.refresh_fail2ban)))
+        layout.addWidget(self.fail2ban_tables, 1)
+        return page
+
+    def refresh_fail2ban(self) -> None:
+        self.busy("Loading intrusion protection status…", self.connection.fail2ban_status, self.show_fail2ban)
+
+    def show_fail2ban(self, status: dict) -> None:
+        self.fail2ban = status
+        installed = bool(status.get("installed"))
+        self.fail2ban_install.setVisible(not installed)
+        self.fail2ban_install.setEnabled(bool(self.server_status.get("supported", True))
+                                         and not self.server_status.get("usr_readonly"))
+        self.fail2ban_settings_button.setVisible(installed)
+        self.fail2ban_tables.setVisible(installed)
+        if not installed:
+            self.fail2ban_info.setText(
+                "fail2ban bans addresses that keep failing to log in over SSH, SFTP, WordPress or Nextcloud, "
+                "or that probe the sites for weak spots. It isn't installed on this server.")
+            self.jails_table.setRowCount(0)
+            self.bans_table.setRowCount(0)
+            return
+
+        jails = status.get("jails") or []
+        bans = [{**ban, "jail": jail["id"]} for jail in jails for ban in jail.get("banned") or []]
+        maxretry = status.get("maxretry")
+        lines = [
+            f"fail2ban {status.get('version') or ''} — protection {'on' if status.get('enabled') else 'off'}"
+            + ("" if status.get("active") else " — fail2ban is stopped"),
+            f"Bans: after {maxretry} failure{'' if maxretry == 1 else 's'} within "
+            f"{hm.duration_label(int(status.get('findtime') or 0))}, for "
+            f"{hm.duration_label(int(status.get('bantime') or 0))}"
+            + (", longer for repeat offenders" if status.get("increment") else ""),
+            "Never banned: " + ", ".join(["127.0.0.1", "::1", *(status.get("ignoreip") or [])]),
+            f"Banned now: {len(bans)}",
+        ]
+        if status.get("sync_failure"):
+            lines.append(f"The jails could not be updated for the current sites: {status['sync_failure']}")
+        self.fail2ban_info.setText("\n".join(lines))
+
+        def state(jail: dict) -> str:
+            if not jail.get("enabled"):
+                return "Off"
+            if jail.get("waiting"):
+                return "Waiting for a site"
+            if not status.get("active") or not jail.get("running"):
+                return "Not running"
+            return "Watching"
+
+        shown = [jail for jail in jails if jail.get("enabled") or jail.get("running")]
+        fill_table(self.jails_table, [
+            [hm.jail_label(jail["id"]) + ("" if jail.get("managed") else " (set up outside cockpit-hosting)"),
+             state(jail), jail.get("failed", 0), jail.get("banned_count", 0), jail.get("total_banned", 0)]
+            for jail in shown
+        ], [jail["id"] for jail in shown])
+        fill_table(self.bans_table, [[ban["ip"], hm.jail_label(ban["jail"]), ban.get("until") or ""] for ban in bans],
+                   bans)
+
+    def _install_fail2ban(self) -> None:
+        def done(_):
+            self.refresh_status()
+            self.refresh_fail2ban()
+
+        self.busy("Installing fail2ban (this can take several minutes)…",
+                  lambda: self.connection.stack_install(["fail2ban"], []), done, "fail2ban installed")
+
+    def _edit_fail2ban(self) -> None:
+        dialog = dialogs.Fail2banSettingsDialog(self.fail2ban, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings()
+        self.busy("Saving intrusion protection settings…", lambda: self.connection.fail2ban_settings(settings),
+                  self.show_fail2ban, "Saved")
+
+    def _bans_menu(self, pos) -> None:
+        ban = selected_data(self.bans_table)
+        if ban is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Unban").triggered.connect(lambda: self._unban(ban, False))
+        menu.addAction("Unban and Never Ban Again").triggered.connect(lambda: self._unban(ban, True))
+        menu.exec(self.bans_table.viewport().mapToGlobal(pos))
+
+    def _unban(self, ban: dict, allow: bool) -> None:
+        self.busy(f"Unbanning {ban['ip']}…", lambda: self.connection.fail2ban_unban(ban["jail"], ban["ip"], allow),
+                  self.show_fail2ban, "Unbanned")
 
     # -- Server -----------------------------------------------------------------
 
@@ -1145,7 +1478,7 @@ class HostingManagerWidget(RemoteHelperTab):
         rows = []
         for key, label in (("nginx", "nginx"), ("mariadb", "MariaDB"), ("certbot", "Certbot"),
                            ("node", "Node.js"), ("python", "Python"), ("podman", "Podman"),
-                           ("clamav", "ClamAV")):
+                           ("clamav", "ClamAV"), ("fail2ban", "fail2ban")):
             tool = stack.get(key) or {}
             version = tool.get("version") or "Not installed"
             if key == "python" and tool.get("version") and not tool.get("venv"):
@@ -1172,6 +1505,7 @@ class HostingManagerWidget(RemoteHelperTab):
         def done(_):
             self.refresh_status()
             self.refresh_malware()
+            self.refresh_fail2ban()
 
         self.busy("Installing server components (this can take several minutes)…",
                   lambda: self.connection.stack_install(components, php), done, "Components installed")
