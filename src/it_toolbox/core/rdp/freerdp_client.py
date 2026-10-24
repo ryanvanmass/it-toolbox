@@ -21,6 +21,7 @@ was validated via a standalone CLI before any Qt code depended on it.
 """
 
 import ctypes
+import logging
 import os
 import platform
 
@@ -47,6 +48,8 @@ from it_toolbox.core.rdp._freerdp3_bindings import (
 )
 from it_toolbox.core.rdp.cliprdr import CLIPRDR_FLAG_DEFAULT_MASK, ClipboardChannel, CliprdrClientContext
 from it_toolbox.core.rdp.disp import DispClientContext, DisplayChannel
+
+_log = logging.getLogger(__name__)
 
 RDP_CLIENT_INTERFACE_VERSION = 1  # freerdp/client.h
 
@@ -77,6 +80,13 @@ KEYBOARD_LAYOUT_ENGLISH_US = 0x0409
 PIXEL_FORMAT_BGRX32 = (32 << 24) | (4 << 16) | (0 << 12) | (8 << 8) | (8 << 4) | 8
 
 _IS_WINDOWS = platform.system() == "Windows"
+_IS_MACOS = platform.system() == "Darwin"
+
+# Homebrew's lib dirs (Apple Silicon, then Intel). An app launched from
+# Finder/the Dock gets neither Homebrew's PATH nor any DYLD_* variables, and
+# dlopen's default search path doesn't include them, so on macOS each
+# library is tried by absolute path in these first, then by bare name.
+_MACOS_LIB_DIRS = ("/opt/homebrew/lib", "/usr/local/lib")
 
 # Set this to the folder holding freerdp3.dll/freerdp-client3.dll/winpr3.dll
 # (e.g. a vcpkg installed/x64-windows/bin, or wherever you extracted a
@@ -90,7 +100,7 @@ if _IS_WINDOWS:
     _freerdp_dir = os.environ.get(_FREERDP_DIR_ENV)
     if _freerdp_dir:
         # add_dll_directory is what actually matters for *dependency*
-        # resolution (e.g. freerdp3.dll pulling in winpr3.dll) — ctypes.WinDLL
+        # resolution (e.g. freerdp3.dll pulling in winpr3.dll) — ctypes.CDLL
         # loading freerdp3.dll by an absolute path does not, on its own, add
         # that DLL's own folder to the search path Windows uses to resolve
         # its dependencies (a deliberate post-3.7 hardening against DLL
@@ -110,32 +120,50 @@ def _load(candidates: list[str]) -> ctypes.CDLL:
     errors = []
     for name in candidates:
         try:
-            return ctypes.WinDLL(name) if _IS_WINDOWS else ctypes.CDLL(name)
+            # CDLL on Windows too, not WinDLL: FreeRDP exports are cdecl,
+            # and WinDLL marks every function stdcall, which makes ctypes
+            # refuse calls with more arguments than argtypes, i.e. the
+            # variadic PubSub_Subscribe handler ("this function takes 2
+            # arguments (3 given)").
+            return ctypes.CDLL(name)
         except OSError as exc:
             errors.append(f"  {name}: {exc}")
     tried = "\n".join(errors)
-    hint = (
-        f"Set {_FREERDP_DIR_ENV} to the folder containing these DLLs — see "
-        "docs/windows-freerdp-setup.md."
-        if _IS_WINDOWS
-        else "Is the freerdp/libfreerdp3 package installed?"
-    )
+    if _IS_WINDOWS:
+        hint = f"Set {_FREERDP_DIR_ENV} to the folder containing these DLLs — see docs/windows-freerdp-setup.md."
+    elif _IS_MACOS:
+        hint = "Is FreeRDP installed? Run 'brew install freerdp'."
+    else:
+        hint = "Is the freerdp/libfreerdp3 package installed?"
     raise OSError(f"Could not load any of:\n{tried}\n{hint}")
+
+
+def _library_candidates(base: str, system: str) -> list[str]:
+    """Names to try for one FreeRDP3 library (`base` is e.g. "freerdp3") on
+    `system` (a platform.system() value), most specific first.
+
+    Windows naming is unverified — CMake shared libraries don't get a "lib"
+    prefix there by default, but some FreeRDP Windows builds have
+    historically kept it, so both are tried. macOS (Homebrew) installs a
+    versioned `lib<base>.3.dylib` plus an unversioned symlink; see
+    _MACOS_LIB_DIRS for why absolute paths come first.
+    """
+    if system == "Windows":
+        return [f"{base}.dll", f"lib{base}.dll"]
+    if system == "Darwin":
+        names = [f"lib{base}.3.dylib", f"lib{base}.dylib"]
+        return [os.path.join(d, n) for d in _MACOS_LIB_DIRS for n in names] + names
+    return [f"lib{base}.so.3"]
 
 
 # libfreerdp-client3 provides the client-context scaffolding functions;
 # libfreerdp3 provides the core connect/disconnect/settings API. Two
-# separate shared objects on Linux (confirmed via `nm -D`); Windows naming
-# is unverified — CMake shared libraries don't get a "lib" prefix there by
-# default, but some FreeRDP Windows builds have historically kept it, so
-# both are tried.
-_client_lib = _load(
-    ["libfreerdp-client3.so.3"] if not _IS_WINDOWS else ["freerdp-client3.dll", "libfreerdp-client3.dll"]
-)
-_core_lib = _load(["libfreerdp3.so.3"] if not _IS_WINDOWS else ["freerdp3.dll", "libfreerdp3.dll"])
+# separate shared objects on Linux (confirmed via `nm -D`).
+_client_lib = _load(_library_candidates("freerdp-client3", platform.system()))
+_core_lib = _load(_library_candidates("freerdp3", platform.system()))
 # winpr3 provides PubSub_Subscribe, used to learn when a virtual channel
 # (disp/cliprdr/...) has connected — see FreeRdpSession._on_channel_connected.
-_winpr_lib = _load(["libwinpr3.so.3"] if not _IS_WINDOWS else ["winpr3.dll", "libwinpr3.dll"])
+_winpr_lib = _load(_library_candidates("winpr3", platform.system()))
 
 # rdpContext* freerdp_client_context_new(const RDP_CLIENT_ENTRY_POINTS* pEntryPoints);
 _client_lib.freerdp_client_context_new.argtypes = [ctypes.POINTER(RdpClientEntryPointsV1)]
@@ -226,6 +254,20 @@ _core_lib.gdi_init.restype = ctypes.c_int32
 _client_lib.freerdp_client_load_channels.argtypes = [ctypes.POINTER(RdpFreerdp)]
 _client_lib.freerdp_client_load_channels.restype = ctypes.c_int32
 
+# BOOL freerdp_client_add_device_channel(rdpSettings* settings, size_t count,
+#                                       const char* const* params);  (freerdp/client/cmdline.h)
+# The same call the /drive:<name>,<path> command-line option makes --
+# params is ["drive", name, path]. It registers the drive device and turns
+# on DeviceRedirection itself, so freerdp_client_load_channels() then
+# loads the rdpdr static channel that carries it. Confirmed exported from
+# libfreerdp-client3 via `nm -D` against the installed 3.31.1.
+_client_lib.freerdp_client_add_device_channel.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_char_p),
+]
+_client_lib.freerdp_client_add_device_channel.restype = ctypes.c_int32
+
 # BOOL freerdp_check_event_handles(rdpContext* context);
 _core_lib.freerdp_check_event_handles.argtypes = [ctypes.POINTER(RdpContext)]
 _core_lib.freerdp_check_event_handles.restype = ctypes.c_int32
@@ -239,11 +281,17 @@ _core_lib.gdi_resize.argtypes = [ctypes.POINTER(RdpGdi), ctypes.c_uint32, ctypes
 _core_lib.gdi_resize.restype = ctypes.c_int32
 
 # int PubSub_Subscribe(wPubSub* pubSub, const char* EventName, ...);
-# Declared variadic in winpr/collections.h, but every real call site (via
-# the DEFINE_EVENT_SUBSCRIBE macro) passes exactly one further argument, a
-# specific event-handler function pointer — fixed 3-arg ctypes argtypes
-# below match that actual calling pattern.
-_winpr_lib.PubSub_Subscribe.argtypes = [ctypes.POINTER(WPubSub), ctypes.c_char_p, ctypes.c_void_p]
+# Declared variadic in winpr/collections.h; every real call site (via the
+# DEFINE_EVENT_SUBSCRIBE macro) passes exactly one further argument, the
+# event-handler function pointer. Only the two fixed parameters go in
+# argtypes: ctypes treats any argument past argtypes as variadic
+# (ffi_prep_cif_var), which matters on Apple Silicon, where variadic
+# arguments are passed on the stack, not in registers. Listing the handler
+# here made it a register argument, so on macOS PubSub_Subscribe read a
+# garbage handler pointer off the stack (issue #115). Callers must pass the
+# handler as a ctypes.c_void_p instance, since untyped extras get no
+# conversion.
+_winpr_lib.PubSub_Subscribe.argtypes = [ctypes.POINTER(WPubSub), ctypes.c_char_p]
 _winpr_lib.PubSub_Subscribe.restype = ctypes.c_int32
 
 # rdpInput is treated as opaque here — every call below only ever passes the
@@ -348,6 +396,7 @@ def _configure_settings(
     domain: str,
     ignore_certificate: bool,
     keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
+    shared_folder: str | None = None,
 ) -> None:
     settings = context.contents.settings  # c_void_p, opaque — accessed via accessors only
     _core_lib.freerdp_settings_set_string(settings, SETTING_SERVER_HOSTNAME, host.encode())
@@ -397,6 +446,23 @@ def _configure_settings(
     # that case.
     keyboard_layout_key = _settings_key_for_name("FreeRDP_KeyboardLayout")
     _core_lib.freerdp_settings_set_uint32(settings, keyboard_layout_key, keyboard_layout)
+    if shared_folder:
+        _add_shared_drive(settings, shared_folder)
+
+
+def shared_drive_name(folder: str) -> str:
+    """What the shared folder is called inside the Windows session (shown
+    as "<name> on <this computer>" under This PC, or \\tsclient\<name>)."""
+    return os.path.basename(os.path.normpath(folder)) or "Shared"
+
+
+def _add_shared_drive(settings: ctypes.c_void_p, folder: str) -> None:
+    params = (ctypes.c_char_p * 3)(b"drive", shared_drive_name(folder).encode(), os.fsencode(folder))
+    if not _client_lib.freerdp_client_add_device_channel(settings, 3, params):
+        # Not raised: a FreeRDP build without the drive channel (the
+        # self-built Windows DLLs are unverified here) should still connect,
+        # just without the shared folder.
+        _log.warning("couldn't share %r with the RDP session", folder)
 
 
 def _settings_key_for_name(name: str) -> int:
@@ -556,12 +622,21 @@ class FreeRdpSession:
         ignore_certificate: bool = True,
         desktop_size: tuple[int, int] | None = None,
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
+        shared_folder: str | None = None,
     ) -> None:
         context = _new_context()
         self._context = context
         try:
             _configure_settings(
-                context, host, port, username, password, domain, ignore_certificate, keyboard_layout
+                context,
+                host,
+                port,
+                username,
+                password,
+                domain,
+                ignore_certificate,
+                keyboard_layout,
+                shared_folder,
             )
             if desktop_size is not None:
                 _apply_desktop_size(context, *desktop_size)
@@ -603,6 +678,18 @@ class FreeRdpSession:
         if self._context is None:
             return False
         return bool(_core_lib.freerdp_check_event_handles(self._context))
+
+    def last_error_text(self) -> str | None:
+        """FreeRDP's description of the last error on this connection, or
+        None if it hasn't recorded one."""
+        if self._context is None:
+            return None
+        code = _core_lib.freerdp_get_last_error(self._context)
+        if not code:
+            return None
+        message = _core_lib.freerdp_get_last_error_string(code)
+        text = message.decode(errors="replace") if message else "unknown error"
+        return f"{text} (code {code:#x})"
 
     def get_frame(self) -> tuple[bytes, int, int, int]:
         """Returns (bgrx_pixels, width, height, stride) — a copy of the

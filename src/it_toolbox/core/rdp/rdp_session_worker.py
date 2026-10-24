@@ -41,6 +41,7 @@ class RdpSessionWorker:
         domain: str = "",
         desktop_size: tuple[int, int] | None = None,
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
+        shared_folder: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -49,10 +50,12 @@ class RdpSessionWorker:
         self._domain = domain
         self._desktop_size = desktop_size
         self._keyboard_layout = keyboard_layout
+        self._shared_folder = shared_folder
         self.signals = RdpSessionSignals()
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
         self._stop_requested = threading.Event()
+        self._got_frame = False  # set from the session thread by _on_frame
         # Input events arrive on the Qt thread but libfreerdp expects a
         # session to be driven from a single thread — queue them here and
         # apply them from _run()'s own loop, same thread as pump_once().
@@ -131,6 +134,7 @@ class RdpSessionWorker:
                 domain=self._domain,
                 desktop_size=self._desktop_size,
                 keyboard_layout=self._keyboard_layout,
+                shared_folder=self._shared_folder,
             )
         except Exception as exc:  # noqa: BLE001 - see comment below
             # Deliberately broader than FreeRdpError: an uncaught exception
@@ -149,6 +153,14 @@ class RdpSessionWorker:
             while not self._stop_requested.is_set():
                 self._drain_input_queue()
                 if not self._session.pump_once():
+                    if not self._got_frame:
+                        # The session ended before showing anything, so to
+                        # the user it failed; say why if FreeRDP knows.
+                        reason = self._session.last_error_text()
+                        if reason:
+                            self.signals.error.emit(
+                                f"The connection closed before the remote desktop appeared: {reason}"
+                            )
                     break
                 # freerdp_check_event_handles() is non-blocking — it processes
                 # whatever's ready and returns immediately, so this loop needs
@@ -163,6 +175,7 @@ class RdpSessionWorker:
             self.signals.disconnected.emit()
 
     def _on_frame(self) -> None:
+        self._got_frame = True
         # Runs on the background thread — reads the ctypes GDI surface here
         # (same thread that owns the connection) and hands plain bytes
         # across via emit(), never a raw pointer.

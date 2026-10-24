@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 from it_toolbox.core import (
     linux_backend,
@@ -42,6 +43,7 @@ def _make_view(
     virt_install_available=False,
     default_rdp_resolution=None,
     rdp_keyboard_layout=0x0409,
+    rdp_shared_folder="/home/alice/Downloads",
     terminal_font_size=None,
     default_double_click_action="ask",
     jumpcloud_key_configured=False,
@@ -63,6 +65,7 @@ def _make_view(
     monkeypatch.setattr(settings, "load_rclone_path", lambda: rclone_override)
     monkeypatch.setattr(settings, "load_default_rdp_resolution", lambda: default_rdp_resolution)
     monkeypatch.setattr(settings, "load_rdp_keyboard_layout", lambda: rdp_keyboard_layout)
+    monkeypatch.setattr(settings, "load_rdp_shared_folder", lambda: rdp_shared_folder)
     monkeypatch.setattr(settings, "load_terminal_font_size", lambda: terminal_font_size)
     monkeypatch.setattr(settings, "load_disabled_modules", lambda: disabled_modules)
     monkeypatch.setattr(
@@ -288,6 +291,61 @@ def test_install_update_button_shown_on_windows_with_installer_asset(qtbot, monk
     qtbot.waitUntil(lambda: "Update available" in view._update_status_label.text())
     assert not view._install_update_button.isHidden()
     assert view._pending_installer_url == "https://example.com/setup.exe"
+
+
+def _offer_macos_update(qtbot, monkeypatch, bundle):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Darwin")
+    monkeypatch.setattr(update_checker, "running_app_bundle", lambda: bundle)
+    monkeypatch.setattr(
+        update_checker,
+        "get_latest_release",
+        lambda include_prerelease=False: update_checker.ReleaseInfo(
+            version="2.0.0",
+            html_url="https://example.com/v2",
+            windows_installer_url="https://example.com/setup.exe",
+            macos_dmg_url="https://example.com/IT-Toolbox-2.0.0-arm64.dmg",
+        ),
+    )
+    view._check_updates_button.click()
+    qtbot.waitUntil(lambda: "Update available" in view._update_status_label.text())
+    return view
+
+
+def test_install_update_button_shown_on_macos_inside_the_app_bundle(qtbot, monkeypatch):
+    view = _offer_macos_update(qtbot, monkeypatch, bundle=Path("/Applications/IT Toolbox.app"))
+
+    assert not view._install_update_button.isHidden()
+    assert view._pending_installer_url == "https://example.com/IT-Toolbox-2.0.0-arm64.dmg"
+
+
+def test_install_update_button_hidden_on_macos_source_install(qtbot, monkeypatch):
+    view = _offer_macos_update(qtbot, monkeypatch, bundle=None)
+
+    assert view._install_update_button.isHidden()
+
+
+def test_install_update_on_macos_uses_the_macos_installer(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, installed_version="1.0.0", platform_system="Darwin")
+    view._pending_installer_url = "https://example.com/IT-Toolbox-2.0.0-arm64.dmg"
+    view._install_update_button.show()
+    monkeypatch.setattr(
+        settings_main_view.QMessageBox,
+        "question",
+        lambda *a, **k: settings_main_view.QMessageBox.StandardButton.Yes,
+    )
+    calls = []
+    monkeypatch.setattr(
+        update_checker,
+        "download_and_install_macos_update",
+        lambda url, on_progress=None: calls.append(url),
+    )
+    quit_calls = []
+    monkeypatch.setattr(view, "_quit_application", lambda: quit_calls.append(True))
+
+    view._install_update_button.click()
+
+    qtbot.waitUntil(lambda: quit_calls == [True])
+    assert calls == ["https://example.com/IT-Toolbox-2.0.0-arm64.dmg"]
 
 
 def test_install_update_declined_does_not_download(qtbot, monkeypatch):
@@ -1015,6 +1073,15 @@ def test_freerdp_section_shows_not_found_status_on_windows(qtbot, monkeypatch):
     assert "not found" in view._freerdp_status_label.text()
 
 
+def test_freerdp_section_points_at_homebrew_on_macos(qtbot, monkeypatch):
+    monkeypatch.setattr(settings_main_view, "freerdp_client", None)
+
+    view = _make_view(qtbot, monkeypatch, platform_system="Darwin")
+
+    assert "brew install freerdp" in view._freerdp_status_label.text()
+    assert not hasattr(view, "_freerdp_fetch_button")
+
+
 def test_fetch_freerdp_shows_error_when_script_missing(qtbot, monkeypatch):
     monkeypatch.setattr(settings_main_view, "freerdp_client", None)
     monkeypatch.setattr(
@@ -1305,3 +1372,36 @@ def test_manage_automations_dialog_is_seeded_from_saved_automations(qtbot, monke
     qtbot.addWidget(dialog)
 
     assert [(a.name, a.content) for a in dialog.automations()] == [("old", "ls")]
+
+
+def test_rdp_shared_folder_section_shows_the_current_folder(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, rdp_shared_folder="/home/alice/Downloads")
+    assert view._rdp_share_checkbox.isChecked() is True
+    assert view._rdp_shared_folder_label.text() == "/home/alice/Downloads"
+
+
+def test_rdp_shared_folder_unchecking_turns_sharing_off(qtbot, monkeypatch):
+    saved = []
+    view = _make_view(qtbot, monkeypatch, rdp_shared_folder="/home/alice/Downloads")
+    monkeypatch.setattr(settings, "save_rdp_shared_folder", lambda folder: saved.append(folder))
+
+    view._rdp_share_checkbox.setChecked(False)
+    view._rdp_share_checkbox.setChecked(True)
+
+    assert saved == [None, "/home/alice/Downloads"]
+
+
+def test_rdp_shared_folder_choosing_a_folder_saves_and_enables_it(qtbot, monkeypatch):
+    import it_toolbox.modules.settings.ui.main_view as module
+
+    saved = []
+    view = _make_view(qtbot, monkeypatch, rdp_shared_folder=None)
+    assert view._rdp_share_checkbox.isChecked() is False
+    monkeypatch.setattr(settings, "save_rdp_shared_folder", lambda folder: saved.append(folder))
+    monkeypatch.setattr(module.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "/srv/transfer"))
+
+    view._on_choose_rdp_shared_folder_clicked()
+
+    assert saved == ["/srv/transfer"]
+    assert view._rdp_share_checkbox.isChecked() is True
+    assert view._rdp_shared_folder_label.text() == "/srv/transfer"

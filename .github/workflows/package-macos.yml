@@ -1,0 +1,36 @@
+name: Package macOS
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  # Also on PRs that touch the macOS bundle itself -- nothing else exercises
+  # it before a release, and a broken bundle otherwise only shows up when a
+  # tag is pushed.
+  pull_request:
+    paths:
+      - "packaging/macos/**"
+      - ".github/workflows/package-macos.yml"
+
+jobs:
+  package:
+    # Apple Silicon runner -- the .app is arm64-only (see
+    # packaging/macos/build.sh).
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build .dmg
+        run: bash packaging/macos/build.sh
+
+      - name: Smoke-test the built app
+        run: bash packaging/macos/smoke_test.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/packages/*.dmg
+          if-no-files-found: error
