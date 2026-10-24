@@ -1,5 +1,5 @@
 """Remote management of a web server set up by the user's cockpit-hosting
-Cockpit module, for the General Tools Hosting Manager.
+Cockpit module, for the Cockpit Hosting Manager.
 
 Everything is done by the module's own privileged helper
 (`cockpit-hosting-helper <subcommand>`, JSON in, one JSON object out),

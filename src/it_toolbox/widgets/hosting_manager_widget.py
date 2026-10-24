@@ -1,4 +1,4 @@
-"""One Hosting Manager tab (General Tools): manages a web server set up by
+"""One Hosting Manager tab (Cockpit module): manages a web server set up by
 the user's cockpit-hosting Cockpit module over SSH, with the same features
 as that module's page -- sites (static, PHP, reverse proxy, Node.js,
 Python, container), SSL, the nginx vhost editor, databases, cron jobs,
@@ -941,8 +941,8 @@ class HostingManagerWidget(RemoteHelperTab):
     SITE_COLUMNS = ("Domain", "Type", "Site user", "SSL", "App")
 
     def __init__(self, server: hm.HostingServer, connection_factory=hm.HostingConnection,
-                 parent: QWidget | None = None) -> None:
-        super().__init__(server, connection_factory, parent)
+                 parent: QWidget | None = None, credentials: dict | None = None) -> None:
+        super().__init__(server, connection_factory, parent, credentials)
         self.server_status: dict = {}
         self.sites: list[dict] = []
         self.databases: list[dict] = []

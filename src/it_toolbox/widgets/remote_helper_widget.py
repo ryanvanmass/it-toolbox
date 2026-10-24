@@ -1,4 +1,4 @@
-"""Shared pieces of the General Tools managers that drive a Cockpit
+"""Shared pieces of the Cockpit managers that drive a Cockpit
 module's helper over SSH (see core/remote_helper.py): the saved-server
 dialog, a background-call runner, and a tab base class that connects on
 construction and prompts for host keys and passwords as needed.
@@ -62,6 +62,51 @@ class Busy:
                 pass
 
         async_utils.run_in_background(fn, on_result=ok, on_error=failed)
+
+
+def prompt_to_retry(parent: QWidget, connection, error: Exception, credentials: dict) -> bool:
+    """Handles a failed connect() that the user can fix: confirms an
+    unknown host key, or asks for the key passphrase, login password or
+    sudo password (stored in `credentials`, in memory only). True when the
+    caller should connect again."""
+    server = connection.server
+    if isinstance(error, UnknownHostKeyError):
+        confirmed = QMessageBox.question(
+            parent,
+            "Unknown Host Key",
+            f"The authenticity of host '{error.hostname}' can't be established.\n"
+            f"{error.key.get_name()} key fingerprint is {error.fingerprint}.\n\n"
+            "Are you sure you want to continue connecting? This adds the key to your "
+            "~/.ssh/known_hosts, the same as accepting it in a regular ssh client would.",
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return False
+        connection.trust_host_key(error.hostname, error.key)
+        return True
+    if isinstance(error, rh.KeyPassphraseRequired):
+        return _ask(parent, credentials, "key_passphrase", "SSH Key Passphrase", f"{error}\nPassphrase:")
+    if isinstance(error, rh.LoginPasswordRequired):
+        return _ask(
+            parent, credentials, "password", "SSH Password",
+            f"{error}\nPassword for {server.username}@{server.host}:",
+        )
+    if isinstance(error, rh.SudoPasswordRequired):
+        return _ask(
+            parent, credentials, "sudo_password", "sudo Password",
+            f"{error}\nsudo password for {server.username}:",
+        )
+    return False
+
+
+def _ask(parent: QWidget, credentials: dict, key: str, title: str, label: str) -> bool:
+    value, ok = QInputDialog.getText(parent, title, label, QLineEdit.EchoMode.Password)
+    if not ok or not value:
+        return False
+    credentials[key] = value
+    # The login password doubles as the likely sudo password.
+    if key == "password":
+        credentials.setdefault("sudo_password", value)
+    return True
 
 
 class ServerDialog(QDialog):
@@ -136,11 +181,20 @@ class RemoteHelperTab(QWidget):
 
     connected = Signal()
 
-    def __init__(self, server: rh.RemoteServer, connection_factory, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        server: rh.RemoteServer,
+        connection_factory,
+        parent: QWidget | None = None,
+        credentials: dict | None = None,
+    ) -> None:
         super().__init__(parent)
         self.server = server
         self._connection_factory = connection_factory
-        self._credentials: dict = {}
+        # Shared, not copied: the Cockpit machine tree passes the dict its
+        # detection already filled in, so passwords typed here or there
+        # are asked for once per machine.
+        self._credentials: dict = credentials if credentials is not None else {}
         self.connection: rh.RemoteHelperConnection | None = None
         self._closed = False
         self.busy = Busy(self, self.TOOL_NAME)
@@ -202,43 +256,10 @@ class RemoteHelperTab(QWidget):
     def _on_connect_error(self, connection, error: Exception) -> None:
         self.reconnect_button.setEnabled(True)
         self.status.setText(f"Not connected — {error}")
-        retry = False
-        if isinstance(error, UnknownHostKeyError):
-            confirmed = QMessageBox.question(
-                self,
-                "Unknown Host Key",
-                f"The authenticity of host '{error.hostname}' can't be established.\n"
-                f"{error.key.get_name()} key fingerprint is {error.fingerprint}.\n\n"
-                "Are you sure you want to continue connecting? This adds the key to your "
-                "~/.ssh/known_hosts, the same as accepting it in a regular ssh client would.",
-            )
-            if confirmed == QMessageBox.StandardButton.Yes:
-                connection.trust_host_key(error.hostname, error.key)
-                retry = True
-        elif isinstance(error, rh.KeyPassphraseRequired):
-            retry = self._ask("key_passphrase", "SSH Key Passphrase", f"{error}\nPassphrase:")
-        elif isinstance(error, rh.LoginPasswordRequired):
-            retry = self._ask(
-                "password", "SSH Password",
-                f"{error}\nPassword for {self.server.username}@{self.server.host}:",
-            )
-        elif isinstance(error, rh.SudoPasswordRequired):
-            prompt = f"{error}\nsudo password for {self.server.username}:"
-            retry = self._ask("sudo_password", "sudo Password", prompt)
-        if retry:
+        if prompt_to_retry(self, connection, error, self._credentials):
             self.connect_to_server()
             return
         self.show_message(f"Couldn't connect to {self.server.host}.\n\n{error}")
-
-    def _ask(self, key: str, title: str, label: str) -> bool:
-        value, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Password)
-        if not ok or not value:
-            return False
-        self._credentials[key] = value
-        # The login password doubles as the likely sudo password.
-        if key == "password":
-            self._credentials.setdefault("sudo_password", value)
-        return True
 
     # -- Hooks ----------------------------------------------------------------
 

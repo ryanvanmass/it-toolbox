@@ -928,7 +928,8 @@ def proftpd_servers_path() -> Path:
 
 
 def load_proftpd_servers() -> list[dict]:
-    """Servers saved in the ProFTPD Manager (General Tools), as raw dicts
+    """Servers saved in the ProFTPD Manager back when it lived under General Tools;
+    now only read once, to migrate them into load_cockpit_machines(). As raw dicts
     (see core/proftpd_manager.ProftpdServer.to_dict). No passwords: SSH
     and sudo passwords are only ever prompted for."""
     path = proftpd_servers_path()
@@ -952,7 +953,8 @@ def hosting_servers_path() -> Path:
 
 
 def load_hosting_servers() -> list[dict]:
-    """Servers saved in the Hosting Manager (General Tools), as raw dicts
+    """Servers saved in the Hosting Manager back when it lived under General Tools;
+    now only read once, to migrate them into load_cockpit_machines(). As raw dicts
     (see core/remote_helper.RemoteServer.to_dict). No passwords: SSH
     and sudo passwords are only ever prompted for."""
     path = hosting_servers_path()
@@ -976,7 +978,8 @@ def scheduler_servers_path() -> Path:
 
 
 def load_scheduler_servers() -> list[dict]:
-    """Servers saved in the Scheduler Manager (General Tools), as raw
+    """Servers saved in the Scheduler Manager back when it lived under General Tools;
+    now only read once, to migrate them into load_cockpit_machines(). As raw
     dicts (see core/remote_helper.RemoteServer.to_dict). No passwords."""
     path = scheduler_servers_path()
     if not path.is_file():
@@ -992,3 +995,28 @@ def load_scheduler_servers() -> list[dict]:
 
 def save_scheduler_servers(servers: list[dict]) -> None:
     scheduler_servers_path().write_text(json.dumps(servers))
+
+
+def cockpit_machines_path() -> Path:
+    return data_dir() / "cockpit_machines.json"
+
+
+def load_cockpit_machines() -> list[dict] | None:
+    """Machines saved in the Cockpit module, as raw dicts (see
+    core/cockpit_machines.CockpitMachine.to_dict). None when the list has
+    never been saved -- the caller then migrates the per-tool server lists
+    above, which the managers used before they moved under Cockpit."""
+    path = cockpit_machines_path()
+    if not path.is_file():
+        return None
+    try:
+        machines = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(machines, list):
+        return []
+    return [m for m in machines if isinstance(m, dict)]
+
+
+def save_cockpit_machines(machines: list[dict]) -> None:
+    cockpit_machines_path().write_text(json.dumps(machines))

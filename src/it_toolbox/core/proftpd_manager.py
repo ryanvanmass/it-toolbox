@@ -1,5 +1,5 @@
 """Remote management of a ProFTPD server set up by the user's
-cockpit-proftpd Cockpit module, for the General Tools ProFTPD Manager.
+cockpit-proftpd Cockpit module, for the Cockpit ProFTPD Manager.
 
 Everything goes over one SSH connection (paramiko) per manager tab. All
 user/group/virtual-directory/setup work is done by running the module's
@@ -32,6 +32,7 @@ from pathlib import Path
 import paramiko
 
 from it_toolbox.core.ftp_client import UnknownHostKeyError, _RaiseUnknownHostKey
+from it_toolbox.core import remote_helper as rh
 
 SSH_PORT = 22
 
@@ -126,30 +127,27 @@ RATE_LIMIT_LABELS = {
 }
 
 
-class ProftpdError(Exception):
+class ProftpdError(rh.RemoteHelperError):
     """Any connection, privilege, or helper-reported failure -- str(exc)
-    is meant to be shown to the user as is."""
+    is meant to be shown to the user as is. The subclasses below are also
+    the shared remote_helper ones, so the Cockpit machine tree's
+    connection prompts handle both families alike."""
 
 
-class LoginPasswordRequired(ProftpdError):
+class LoginPasswordRequired(ProftpdError, rh.LoginPasswordRequired):
     """Key/agent login was refused (or a password was wrong); the caller
     prompts for the SSH password and reconnects with it set."""
 
 
-class KeyPassphraseRequired(ProftpdError):
+class KeyPassphraseRequired(ProftpdError, rh.KeyPassphraseRequired):
     """The configured SSH key is passphrase-protected."""
 
 
-class SudoPasswordRequired(ProftpdError):
+class SudoPasswordRequired(ProftpdError, rh.SudoPasswordRequired):
     """The SSH user needs a password for sudo; `incorrect` is True when
     one was given and sudo rejected it. The caller prompts and reconnects
-    with sudo_password set."""
-
-    def __init__(self, incorrect: bool = False) -> None:
-        self.incorrect = incorrect
-        super().__init__(
-            "The sudo password was incorrect." if incorrect else "sudo needs a password on this server."
-        )
+    with sudo_password set (the message and `incorrect` come from the
+    remote_helper base)."""
 
 
 @dataclass
@@ -357,7 +355,15 @@ class ProftpdConnection:
                 "refusing to connect. If the server was reinstalled, remove its old entry "
                 "from ~/.ssh/known_hosts and try again."
             ) from exc
-        except (paramiko.SSHException, OSError) as exc:
+        except paramiko.SSHException as exc:
+            # No key or agent to try and no password yet: paramiko says so
+            # with a plain SSHException rather than an auth failure.
+            if self._password is None and "No authentication methods available" in str(exc):
+                raise LoginPasswordRequired(
+                    f"{server.username}@{server.host} needs a password (no SSH key was accepted)."
+                ) from exc
+            raise ProftpdError(f"Couldn't connect to {server.host}:{server.port} — {exc}") from exc
+        except OSError as exc:
             raise ProftpdError(f"Couldn't connect to {server.host}:{server.port} — {exc}") from exc
         self._client = client
         try:

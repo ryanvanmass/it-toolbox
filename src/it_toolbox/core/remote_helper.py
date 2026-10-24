@@ -1,5 +1,5 @@
 """An SSH connection that runs a Cockpit module's privileged JSON helper
-on a remote server, as root -- the plumbing behind the General Tools
+on a remote server, as root -- the plumbing behind the Cockpit
 managers for the user's Cockpit modules (see core/hosting_manager.py).
 
 A Cockpit page calls its helper with
@@ -163,7 +163,15 @@ class RemoteHelperConnection:
                 "refusing to connect. If the server was reinstalled, remove its old entry "
                 "from ~/.ssh/known_hosts and try again."
             ) from exc
-        except (paramiko.SSHException, OSError) as exc:
+        except paramiko.SSHException as exc:
+            # No key or agent to try and no password yet: paramiko says so
+            # with a plain SSHException rather than an auth failure.
+            if self._password is None and "No authentication methods available" in str(exc):
+                raise LoginPasswordRequired(
+                    f"{server.username}@{server.host} needs a password (no SSH key was accepted)."
+                ) from exc
+            raise RemoteHelperError(f"Couldn't connect to {server.host}:{server.port} — {exc}") from exc
+        except OSError as exc:
             raise RemoteHelperError(f"Couldn't connect to {server.host}:{server.port} — {exc}") from exc
         self._client = client
         try:
