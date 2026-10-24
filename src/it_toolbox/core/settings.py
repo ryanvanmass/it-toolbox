@@ -351,6 +351,31 @@ def save_rdp_keyboard_layout(layout: int) -> None:
     rdp_keyboard_layout_path().write_text(hex(layout))
 
 
+def rdp_shared_folder_path() -> Path:
+    return data_dir() / "rdp_shared_folder.txt"
+
+
+def load_rdp_shared_folder() -> str | None:
+    """The local folder shared into embedded RDP sessions as a drive (how
+    files get onto a Windows VM, which usually has no SSH/SFTP server --
+    see core/rdp/freerdp_client.py's _add_shared_drive). Defaults to
+    ~/Downloads when nothing has been chosen yet; None means sharing was
+    turned off (stored as an empty file), or the folder no longer exists.
+    """
+    path = rdp_shared_folder_path()
+    if path.is_file():
+        folder = path.read_text().strip()
+    else:
+        folder = str(Path.home() / "Downloads")
+    if not folder or not Path(folder).is_dir():
+        return None
+    return folder
+
+
+def save_rdp_shared_folder(folder: str | None) -> None:
+    rdp_shared_folder_path().write_text(folder or "")
+
+
 def default_double_click_action_path() -> Path:
     return data_dir() / "default_double_click_action.txt"
 

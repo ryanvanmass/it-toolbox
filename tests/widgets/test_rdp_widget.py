@@ -85,7 +85,7 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     captured = {}
 
     class _CapturingWorker(_FakeWorker):
-        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None):
+        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None):
             super().__init__()
             captured["desktop_size"] = desktop_size
 
@@ -102,7 +102,8 @@ def test_keyboard_layout_is_passed_to_the_worker(qtbot, monkeypatch):
 
     class _CapturingWorker(_FakeWorker):
         def __init__(
-            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
+            shared_folder=None,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -120,7 +121,8 @@ def test_keyboard_layout_defaults_to_english_us(qtbot, monkeypatch):
 
     class _CapturingWorker(_FakeWorker):
         def __init__(
-            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
+            shared_folder=None,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -446,3 +448,61 @@ def test_send_text_falls_back_to_unicode_for_non_us_keyboard_characters(rdp_widg
 
     assert rdp_widget._worker.scancode_calls == []
     assert rdp_widget._worker.unicode_calls == [(ord("é"), True), (ord("é"), False)]
+
+
+def test_shared_folder_is_passed_to_the_worker(qtbot, monkeypatch):
+    captured = {}
+
+    class _CapturingWorker(_FakeWorker):
+        def __init__(
+            self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
+            shared_folder=None,
+        ):
+            super().__init__()
+            captured["shared_folder"] = shared_folder
+
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _CapturingWorker)
+
+    widget = RdpWidget("host", 3389, "user", "pass", shared_folder="/home/alice/Downloads")
+    qtbot.addWidget(widget)
+
+    assert captured["shared_folder"] == "/home/alice/Downloads"
+
+
+def _capture_warnings(monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        "it_toolbox.widgets.rdp_widget.QMessageBox.warning",
+        lambda parent, title, text: shown.append(text),
+    )
+    return shown
+
+
+def test_closing_before_the_first_frame_is_reported_as_a_failure(rdp_widget, monkeypatch):
+    shown = _capture_warnings(monkeypatch)
+
+    rdp_widget._on_disconnected()
+
+    assert shown == ["The connection closed before the remote desktop appeared."]
+
+
+def test_an_error_followed_by_the_disconnect_is_reported_once(rdp_widget, monkeypatch):
+    shown = _capture_warnings(monkeypatch)
+
+    rdp_widget._on_error("connect failed")
+    rdp_widget._on_disconnected()
+
+    assert shown == ["connect failed"]
+
+
+def test_failure_detail_explains_the_failure_when_it_knows_why(qtbot, monkeypatch):
+    # e.g. the IAP tunnel's refusal, which FreeRDP only sees as a closed socket.
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _FakeWorker)
+    shown = _capture_warnings(monkeypatch)
+    widget = RdpWidget("host", 3389, "user", "pass", failure_detail=lambda: "IAP tunnel refused")
+    qtbot.addWidget(widget)
+
+    widget._on_disconnected()
+
+    assert shown == ["IAP tunnel refused"]
+    widget.close_session()

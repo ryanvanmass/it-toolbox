@@ -298,6 +298,12 @@ def test_task_dialog_for_a_program(qtbot):
     qtbot.addWidget(dialog)
 
     assert dialog.path_radio.isChecked()
+    form = dialog.general_form
+    assert form.isRowVisible(dialog.program) and not form.isRowVisible(dialog.script)
+    dialog.inline_radio.setChecked(True)
+    assert form.isRowVisible(dialog.script) and not form.isRowVisible(dialog.program)
+    dialog.path_radio.setChecked(True)
+    assert dialog.schedule.minute.text() == "30"
     assert (dialog.command_shell.currentData(), dialog.program.text(), dialog.arguments.text()) == \
         ("/bin/sh", "/opt/clean.sh", "-v")
     assert dialog.schedule.current_kind() == "weekly"
@@ -348,6 +354,9 @@ def test_schedule_picker_presets_and_validation(qtbot):
     picker = dialogs.SchedulePicker("*-*-* 0/6:15:00", validate)
     qtbot.addWidget(picker)
     assert picker.current_kind() == "interval" and picker.schedule() == "*-*-* 0/6:15:00"
+    picker.minute.setValue(5)
+    assert picker.minute_alone.text() == "05"
+    picker.minute.setValue(15)
     qtbot.waitUntil(lambda: picker.valid is True)
     assert "Sun 2026-10-11" in picker.preview.text()
 
