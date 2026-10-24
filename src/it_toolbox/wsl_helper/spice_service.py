@@ -102,3 +102,5 @@ def _pump_input(conn: transport.Connection, runner, stop: threading.Event) -> No
             runner.send_key_scancode(*proto.KEY.unpack(payload))
         elif msg_type == proto.RESIZE:
             runner.send_resize(*proto.SIZE.unpack(payload))
+        elif msg_type == proto.CLIPBOARD_TEXT:
+            runner.send_clipboard_text(payload.decode() or None)
