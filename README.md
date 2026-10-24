@@ -52,6 +52,15 @@ connection manager for RDP, SSH, and Cloud Storage.
     encrypted transfers and passive or active mode, in a fresh
     `it-toolbox-ftp-test-…` folder. Works with servers that lack MLSD
     (vsftpd, IIS) too.
+- **Cockpit** — a module for servers running your Cockpit modules.
+  Add a machine (host, SSH port, user, optional key) and it logs in once
+  over SSH, checks which of the modules below are installed, and lists
+  a manager for each one under the machine — like a GCP project's VMs
+  and buckets in Connection Manager. Passwords are asked for once per
+  machine per session and never saved; right-click a machine to refresh
+  its tools, open it in Cockpit (port 9090), edit or remove it. Servers
+  saved in the managers' old General Tools lists are merged into
+  machines automatically.
   - **ProFTPD Manager** — manages a server set up by the
     [cockpit-proftpd](https://github.com/ryanvanmass/cockpit-proftpd)
     Cockpit module over SSH, through that module's own helper, so both
