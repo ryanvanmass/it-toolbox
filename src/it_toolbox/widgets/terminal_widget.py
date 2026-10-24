@@ -1,20 +1,32 @@
 """A minimal embedded terminal widget.
 
 pyte parses the child process's output into a character-grid screen model;
-that grid is re-rendered here as plain text on every update. There's no
-per-cell color/attribute rendering yet (a real terminal emulator's screen
-is colored text, this one is monochrome) — a known, deliberate simplification
-to get a working embedded shell first rather than a fully-faithful one.
+that grid is re-rendered here as colored text runs (foreground, background,
+bold, italics, underline, strikethrough, reverse video) on every update.
+Full-screen programs (tmux, nano, vim, htop, ...) additionally need the
+alternate screen, cursor-key application mode, replies to terminal queries
+and xterm's key encodings, all of which are handled below.
 """
 
+import inspect
 import logging
 import sys
 import threading
 
 import pyte
-from PySide6.QtCore import QEvent, QSocketNotifier, Qt, Signal
-from PySide6.QtGui import QFontDatabase, QKeyEvent, QKeySequence, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QEvent, QSocketNotifier, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QFontMetricsF,
+    QKeyEvent,
+    QKeySequence,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
+from wcwidth import wcwidth
 
 from it_toolbox.widgets.pty_backend import PtyHandle
 
@@ -23,23 +35,218 @@ _IS_WINDOWS = sys.platform == "win32"
 logger = logging.getLogger(__name__)
 
 # Keys without a meaningful event.text() get translated to the escape
-# sequence a real terminal would send for them.
+# sequence xterm sends for them (pyte emulates an xterm, and TERM is set to
+# xterm-256color for the child, so its terminfo describes these).
 _SPECIAL_KEYS: dict[Qt.Key, bytes] = {
     Qt.Key.Key_Return: b"\r",
     Qt.Key.Key_Enter: b"\r",
     Qt.Key.Key_Backspace: b"\x7f",
     Qt.Key.Key_Tab: b"\t",
+    Qt.Key.Key_Backtab: b"\x1b[Z",
     Qt.Key.Key_Escape: b"\x1b",
-    Qt.Key.Key_Up: b"\x1b[A",
-    Qt.Key.Key_Down: b"\x1b[B",
-    Qt.Key.Key_Right: b"\x1b[C",
-    Qt.Key.Key_Left: b"\x1b[D",
-    Qt.Key.Key_Home: b"\x1b[H",
-    Qt.Key.Key_End: b"\x1b[F",
-    Qt.Key.Key_Delete: b"\x1b[3~",
-    Qt.Key.Key_PageUp: b"\x1b[5~",
-    Qt.Key.Key_PageDown: b"\x1b[6~",
 }
+
+# Cursor keys: final byte of "CSI <x>" (normal mode) / "SS3 <x>" (cursor-key
+# application mode, DECCKM -- what vim/nano/tmux switch on, and what
+# terminfo's kcuu1/khome/... say these keys send).
+_CURSOR_KEYS: dict[Qt.Key, str] = {
+    Qt.Key.Key_Up: "A",
+    Qt.Key.Key_Down: "B",
+    Qt.Key.Key_Right: "C",
+    Qt.Key.Key_Left: "D",
+    Qt.Key.Key_Home: "H",
+    Qt.Key.Key_End: "F",
+}
+
+# F1-F4 are SS3 P..S; everything else here is "CSI <n> ~".
+_SS3_FUNCTION_KEYS: dict[Qt.Key, str] = {
+    Qt.Key.Key_F1: "P",
+    Qt.Key.Key_F2: "Q",
+    Qt.Key.Key_F3: "R",
+    Qt.Key.Key_F4: "S",
+}
+_TILDE_KEYS: dict[Qt.Key, int] = {
+    Qt.Key.Key_Insert: 2,
+    Qt.Key.Key_Delete: 3,
+    Qt.Key.Key_PageUp: 5,
+    Qt.Key.Key_PageDown: 6,
+    Qt.Key.Key_F5: 15,
+    Qt.Key.Key_F6: 17,
+    Qt.Key.Key_F7: 18,
+    Qt.Key.Key_F8: 19,
+    Qt.Key.Key_F9: 20,
+    Qt.Key.Key_F10: 21,
+    Qt.Key.Key_F11: 23,
+    Qt.Key.Key_F12: 24,
+}
+
+# Ctrl+<symbol> control bytes beyond Ctrl+A..Z -- e.g. nano's "^\\ Replace"
+# and "^/ Go To Line", Ctrl+Space for emacs' mark, Ctrl+] for telnet.
+_CTRL_SYMBOL_KEYS: dict[Qt.Key, bytes] = {
+    Qt.Key.Key_Space: b"\x00",
+    Qt.Key.Key_At: b"\x00",
+    Qt.Key.Key_2: b"\x00",
+    Qt.Key.Key_BracketLeft: b"\x1b",
+    Qt.Key.Key_Backslash: b"\x1c",
+    Qt.Key.Key_BracketRight: b"\x1d",
+    Qt.Key.Key_AsciiCircum: b"\x1e",
+    Qt.Key.Key_6: b"\x1e",
+    Qt.Key.Key_Underscore: b"\x1f",
+    Qt.Key.Key_Minus: b"\x1f",
+    Qt.Key.Key_Slash: b"\x1f",
+    Qt.Key.Key_Question: b"\x7f",
+    Qt.Key.Key_Backspace: b"\x08",
+}
+
+_MODE_DECCKM = 1 << 5  # pyte stores private modes shifted left by 5
+_MODE_BRACKETED_PASTE = 2004 << 5
+_ALT_SCREEN_MODES = (47, 1047, 1049)
+
+
+def encode_key(key: int, modifiers: Qt.KeyboardModifier, text: str, app_cursor: bool = False) -> bytes:
+    """Returns the bytes xterm would send to the pty for one key press
+    (b"" for keys that send nothing, e.g. a bare Shift).
+    """
+    ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+    shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+    # Option on macOS composes characters (é, ø, ...) rather than acting
+    # as Meta, so it's left alone there. Ctrl+Alt is how Windows reports
+    # AltGr, which also composes characters -- treated the same way.
+    alt = bool(modifiers & Qt.KeyboardModifier.AltModifier) and sys.platform != "darwin" and not ctrl
+    # xterm's modifier parameter: 1 + Shift(1) + Alt(2) + Ctrl(4).
+    mod_param = 1 + (1 if shift else 0) + (2 if alt else 0) + (4 if ctrl else 0)
+
+    if key in _CURSOR_KEYS:
+        final = _CURSOR_KEYS[key]
+        if mod_param > 1:
+            return f"\x1b[1;{mod_param}{final}".encode()
+        return f"\x1b{'O' if app_cursor else '['}{final}".encode()
+    if key in _SS3_FUNCTION_KEYS:
+        final = _SS3_FUNCTION_KEYS[key]
+        if mod_param > 1:
+            return f"\x1b[1;{mod_param}{final}".encode()
+        return f"\x1bO{final}".encode()
+    if key in _TILDE_KEYS:
+        number = _TILDE_KEYS[key]
+        if mod_param > 1:
+            return f"\x1b[{number};{mod_param}~".encode()
+        return f"\x1b[{number}~".encode()
+
+    prefix = b"\x1b" if alt else b""
+    if ctrl:
+        if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+            return prefix + bytes([key - Qt.Key.Key_A + 1])
+        if key in _CTRL_SYMBOL_KEYS:
+            return prefix + _CTRL_SYMBOL_KEYS[key]
+    if key in _SPECIAL_KEYS:
+        return (b"" if key == Qt.Key.Key_Backtab else prefix) + _SPECIAL_KEYS[key]
+    if text:
+        return prefix + text.encode()
+    return b""
+
+
+def _drop_private_calls(handler):
+    def wrapper(*args, private: bool = False):
+        if not private:
+            handler(*args)
+
+    return wrapper
+
+
+class _TerminalScreen(pyte.Screen):
+    """pyte.Screen plus the alternate screen buffer (private modes
+    47/1047/1049), which pyte itself ignores. Full-screen programs switch
+    to it on start and back on exit, which is what restores the shell's
+    own output afterwards instead of leaving the program's last frame on
+    screen.
+    """
+
+    def __init__(self, columns: int, lines: int) -> None:
+        super().__init__(columns, lines)
+        self._saved_buffer = None
+        # pyte dispatches "CSI ? ..." / "CSI > ..." sequences to the same
+        # handler with private=True, but most handlers don't take that
+        # argument -- vim's "CSI > 4;2 m" (modifyOtherKeys) raised a
+        # TypeError that threw away the rest of that read's output,
+        # leaving holes in vim's first screen. Private variants of those
+        # sequences have no meaning here, so they're dropped instead.
+        for name in set(pyte.Stream.csi.values()):
+            handler = getattr(self, name)
+            parameters = inspect.signature(handler).parameters
+            takes_private = "private" in parameters or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+            )
+            if not takes_private:
+                setattr(self, name, _drop_private_calls(handler))
+
+    @property
+    def in_alternate_screen(self) -> bool:
+        return self._saved_buffer is not None
+
+    def set_mode(self, *modes: int, **kwargs) -> None:
+        if kwargs.get("private") and any(m in _ALT_SCREEN_MODES for m in modes):
+            self._enter_alternate_screen(save_cursor=1049 in modes)
+            modes = tuple(m for m in modes if m not in _ALT_SCREEN_MODES)
+        super().set_mode(*modes, **kwargs)
+
+    def reset_mode(self, *modes: int, **kwargs) -> None:
+        if kwargs.get("private") and any(m in _ALT_SCREEN_MODES for m in modes):
+            self._leave_alternate_screen(restore_cursor=1049 in modes)
+            modes = tuple(m for m in modes if m not in _ALT_SCREEN_MODES)
+        super().reset_mode(*modes, **kwargs)
+
+    def _enter_alternate_screen(self, save_cursor: bool) -> None:
+        if self.in_alternate_screen:
+            return
+        if save_cursor:
+            self.save_cursor()
+        self._saved_buffer = self.buffer
+        self.buffer = type(self.buffer)(self.buffer.default_factory)
+        self.dirty.update(range(self.lines))
+
+    def _leave_alternate_screen(self, restore_cursor: bool) -> None:
+        if not self.in_alternate_screen:
+            return
+        self.buffer = self._saved_buffer
+        self._saved_buffer = None
+        if restore_cursor:
+            self.restore_cursor()
+        self.dirty.update(range(self.lines))
+
+    def reset(self) -> None:
+        self._saved_buffer = None
+        super().reset()
+
+
+# xterm-ish 16-color palette, keyed by pyte's color names (pyte calls ANSI
+# yellow "brown"). 256-color and truecolor values arrive as hex strings.
+_ANSI_COLORS: dict[str, str] = {
+    "black": "#000000",
+    "red": "#cd3131",
+    "green": "#0dbc79",
+    "brown": "#e5e510",
+    "blue": "#2472c8",
+    "magenta": "#bc3fbc",
+    "cyan": "#11a8cd",
+    "white": "#e5e5e5",
+    "brightblack": "#666666",
+    "brightred": "#f14c4c",
+    "brightgreen": "#23d18b",
+    "brightbrown": "#f5f543",
+    "brightblue": "#3b8eea",
+    "brightmagenta": "#d670d6",
+    "brightcyan": "#29b8db",
+    "brightwhite": "#ffffff",
+}
+
+
+def _resolve_color(name: str, default: QColor) -> QColor:
+    if name == "default":
+        return default
+    if name in _ANSI_COLORS:
+        return QColor(_ANSI_COLORS[name])
+    color = QColor(f"#{name}")
+    return color if color.isValid() else default
 
 
 class TerminalWidget(QPlainTextEdit):
@@ -86,9 +293,25 @@ class TerminalWidget(QPlainTextEdit):
 
         self._cols = cols
         self._rows = rows
-        self._screen = pyte.Screen(cols, rows)
-        self._stream = pyte.Stream(self._screen)
+        self._screen = _TerminalScreen(cols, rows)
+        # ByteStream decodes UTF-8 incrementally -- decoding each pty read
+        # on its own garbled any multi-byte character (tmux's and htop's
+        # box-drawing borders, for one) split across two reads.
+        self._stream = pyte.ByteStream(self._screen)
         self._pty = PtyHandle(argv, cols=cols, rows=rows)
+        # Replies to the program's own queries (device attributes, cursor
+        # position) -- pyte generates them but drops them by default, and
+        # programs like vim and tmux ask on startup.
+        self._screen.write_process_input = lambda reply: self._pty.write(reply.encode())
+        self._formats: dict[tuple, QTextCharFormat] = {}
+
+        # Rendering is coalesced: a full-screen redraw usually arrives as
+        # several pty reads in a row, and rebuilding the document for each
+        # one made tmux/vim visibly lag.
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(5)
+        self._render_timer.timeout.connect(self._render)
 
         self._notifier: QSocketNotifier | None = None
         self._reader_thread: threading.Thread | None = None
@@ -128,14 +351,15 @@ class TerminalWidget(QPlainTextEdit):
                 self._notifier.setEnabled(False)
             self.finished.emit()
             return
-        self._stream.feed(data.decode(errors="replace"))
-        self._render()
+        self._stream.feed(data)
+        if not self._render_timer.isActive():
+            self._render_timer.start()
 
     def _render(self) -> None:
-        # pyte's rows are already padded to exactly `cols` characters wide —
-        # rstrip()-ing them here would shorten lines and misalign the
-        # cursor's column index against the (now-shorter) rendered text.
-        self.setPlainText("\n".join(self._screen.display))
+        # Rows are rendered padded to exactly `cols` characters wide, same
+        # as pyte's own Screen.display -- trimming them would shorten lines
+        # and misalign the cursor's column index against the rendered text.
+        self._render_document()
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         cursor.movePosition(QTextCursor.MoveOperation.Down, n=self._screen.cursor.y)
@@ -143,6 +367,63 @@ class TerminalWidget(QPlainTextEdit):
         self.setTextCursor(cursor)
         self.ensureCursorVisible()
         self._paint_cursor_block(cursor)
+
+    def _render_document(self) -> None:
+        screen = self._screen
+        document = self.document()
+        document.clear()
+        cursor = QTextCursor(document)
+        cursor.beginEditBlock()
+        for y in range(screen.lines):
+            if y:
+                cursor.insertText("\n", self._char_format(None))
+            line = screen.buffer[y]
+            run_text: list[str] = []
+            run_key = None
+            skip_next = False
+            for x in range(screen.columns):
+                if skip_next:  # the right half of a wide character
+                    skip_next = False
+                    continue
+                char = line[x]
+                skip_next = bool(char.data) and wcwidth(char.data[0]) == 2
+                key = (char.fg, char.bg, char.bold, char.italics, char.underscore, char.strikethrough, char.reverse)
+                if key != run_key and run_text:
+                    cursor.insertText("".join(run_text), self._char_format(run_key))
+                    run_text = []
+                run_key = key
+                run_text.append(char.data or " ")
+            if run_text:
+                cursor.insertText("".join(run_text), self._char_format(run_key))
+        cursor.endEditBlock()
+
+    def _char_format(self, key: tuple | None) -> QTextCharFormat:
+        fmt = self._formats.get(key)
+        if fmt is not None:
+            return fmt
+        fmt = QTextCharFormat()
+        if key is not None:
+            fg_name, bg_name, bold, italics, underscore, strikethrough, reverse = key
+            palette = self.palette()
+            fg = _resolve_color(fg_name, palette.text().color())
+            bg = _resolve_color(bg_name, palette.base().color())
+            if reverse:
+                fg, bg = bg, fg
+            fmt.setForeground(fg)
+            if bg_name != "default" or reverse:
+                fmt.setBackground(bg)
+            if bold:
+                fmt.setFontWeight(QFont.Weight.Bold)
+            fmt.setFontItalic(italics)
+            fmt.setFontUnderline(underscore)
+            fmt.setFontStrikeOut(strikethrough)
+        self._formats[key] = fmt
+        return fmt
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:
+            self._formats.clear()  # default colors follow the palette
 
     def _paint_cursor_block(self, cursor: QTextCursor) -> None:
         # Qt's native blinking text cursor turned out unreliable to see here
@@ -206,17 +487,9 @@ class TerminalWidget(QPlainTextEdit):
             self._paste_clipboard()
             return
 
-        if modifiers & Qt.KeyboardModifier.ControlModifier and Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
-            self._pty.write(bytes([key - Qt.Key.Key_A + 1]))
-            return
-
-        if key in _SPECIAL_KEYS:
-            self._pty.write(_SPECIAL_KEYS[key])
-            return
-
-        text = event.text()
-        if text:
-            self._pty.write(text.encode())
+        data = encode_key(key, modifiers, event.text(), app_cursor=_MODE_DECCKM in self._screen.mode)
+        if data:
+            self._pty.write(data)
 
     def send_text(self, text: str) -> None:
         """Types text into the session as if entered at the keyboard --
@@ -230,7 +503,14 @@ class TerminalWidget(QPlainTextEdit):
 
     def _paste_clipboard(self) -> None:
         text = QApplication.clipboard().text()
-        if text:
+        if not text:
+            return
+        if _MODE_BRACKETED_PASTE in self._screen.mode:
+            # Programs that ask for bracketed paste (vim, nano, bash's
+            # readline) then take the text literally instead of
+            # auto-indenting or running it line by line.
+            self._pty.write(b"\x1b[200~" + text.encode() + b"\x1b[201~")
+        else:
             self._pty.write(text.encode())
 
     def contextMenuEvent(self, event) -> None:
@@ -269,9 +549,14 @@ class TerminalWidget(QPlainTextEdit):
         # how large the widget itself has grown to. Without this, the
         # rendered content stays pinned to its size at construction time,
         # leaving the rest of the widget as dead, unused space.
-        metrics = self.fontMetrics()
-        char_width = metrics.horizontalAdvance("M") or 1
-        char_height = metrics.height() or 1
+        # Fractional metrics: a monospace advance is rarely a whole number
+        # of pixels (7.19px, say), and rounding it down to QFontMetrics'
+        # int made cols too large -- the rightmost columns (tmux's status
+        # bar clock, vim's ruler) ended up clipped behind a horizontal
+        # scrollbar. Line height stays the integer one: QPlainTextEdit lays
+        # each line out at a whole number of pixels.
+        char_width = QFontMetricsF(self.font()).horizontalAdvance("M") or 1
+        char_height = self.fontMetrics().height() or 1
         # QPlainTextEdit's document has its own margin around the text
         # (QTextDocument.documentMargin(), 4px on each side by default) --
         # real usable space for character cells is inside that, not the
@@ -283,7 +568,7 @@ class TerminalWidget(QPlainTextEdit):
         rows = max(1, int(available_height // char_height))
         logger.debug(
             "terminal-resize: widget=%dx%d viewport=%dx%d margin=%.1f "
-            "char=%dx%d -> cols=%d rows=%d (was %d,%d)",
+            "char=%.2fx%d -> cols=%d rows=%d (was %d,%d)",
             self.width(),
             self.height(),
             self.viewport().width(),
@@ -300,6 +585,7 @@ class TerminalWidget(QPlainTextEdit):
             self.resizeTerminal(cols, rows)
 
     def close_session(self) -> None:
+        self._render_timer.stop()
         if self._notifier is not None:
             self._notifier.setEnabled(False)
         self._pty.close()
