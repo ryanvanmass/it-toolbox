@@ -1,11 +1,18 @@
+import shutil
+import subprocess
 import sys
 
+import pyte
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent, QKeySequence
 from PySide6.QtWidgets import QApplication, QLineEdit, QVBoxLayout, QWidget
 
-from it_toolbox.widgets.terminal_widget import TerminalWidget
+from it_toolbox.widgets.terminal_widget import (
+    TerminalWidget,
+    _TerminalScreen,
+    encode_key,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="ptyprocess is POSIX-only")
 
@@ -286,3 +293,116 @@ def test_send_text_runs_the_script_in_the_shell(qtbot):
 
     qtbot.waitUntil(lambda: "from_automation_42" in term.toPlainText(), timeout=3000)
     term.close_session()
+
+
+# -- Full-screen programs (tmux, nano, vim) ---------------------------------
+
+
+
+_NO_MOD = Qt.KeyboardModifier.NoModifier
+_CTRL = Qt.KeyboardModifier.ControlModifier
+
+
+def test_cursor_keys_follow_application_cursor_mode():
+    assert encode_key(Qt.Key.Key_Up, _NO_MOD, "") == b"\x1b[A"
+    assert encode_key(Qt.Key.Key_Up, _NO_MOD, "", app_cursor=True) == b"\x1bOA"
+    assert encode_key(Qt.Key.Key_Home, _NO_MOD, "", app_cursor=True) == b"\x1bOH"
+
+
+def test_modified_cursor_and_function_keys_use_xterm_encoding():
+    assert encode_key(Qt.Key.Key_Left, _CTRL, "") == b"\x1b[1;5D"
+    assert encode_key(Qt.Key.Key_F1, _NO_MOD, "") == b"\x1bOP"
+    assert encode_key(Qt.Key.Key_F5, _NO_MOD, "") == b"\x1b[15~"
+    assert encode_key(Qt.Key.Key_PageUp, Qt.KeyboardModifier.ShiftModifier, "") == b"\x1b[5;2~"
+    assert encode_key(Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier, "") == b"\x1b[Z"
+
+
+def test_ctrl_symbol_keys_send_control_bytes():
+    # nano's "^\ Replace" and "^/ Go To Line", plus Ctrl+Space.
+    assert encode_key(Qt.Key.Key_Backslash, _CTRL, "") == b"\x1c"
+    assert encode_key(Qt.Key.Key_Slash, _CTRL, "") == b"\x1f"
+    assert encode_key(Qt.Key.Key_Space, _CTRL, "") == b"\x00"
+    assert encode_key(Qt.Key.Key_B, _CTRL, "") == b"\x02"  # tmux prefix
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="Option composes characters on macOS")
+def test_alt_prefixes_escape():
+    assert encode_key(Qt.Key.Key_U, Qt.KeyboardModifier.AltModifier, "u") == b"\x1bu"
+
+
+def test_alternate_screen_restores_the_shell_output():
+    screen = _TerminalScreen(20, 5)
+    stream = pyte.ByteStream(screen)
+    stream.feed(b"$ before")
+    stream.feed(b"\x1b[?1049h\x1b[2J\x1b[Hfull screen app")
+    assert "full screen app" in screen.display[0]
+    stream.feed(b"\x1b[?1049l")
+    assert screen.display[0].rstrip() == "$ before"
+    assert (screen.cursor.x, screen.cursor.y) == (8, 0)
+
+
+def test_unsupported_private_sequences_do_not_drop_output():
+    # vim sends "CSI > 4;2 m"; pyte raised on it and lost the rest of the read.
+    screen = _TerminalScreen(20, 5)
+    pyte.ByteStream(screen).feed(b"\x1b[>4;2m\x1b[?6nafter")
+    assert screen.display[0].rstrip() == "after"
+
+
+def test_utf8_split_across_reads_is_decoded(qtbot):
+    term = TerminalWidget(["/bin/sh", "-c", "sleep 5"], cols=20, rows=5)
+    qtbot.addWidget(term)
+    box = "┌─┐".encode()
+    term._on_output(box[:4])
+    term._on_output(box[4:])
+    assert term._screen.display[0].startswith("┌─┐")
+    term.close_session()
+
+
+def test_device_attribute_queries_are_answered(qtbot, monkeypatch):
+    term = TerminalWidget(["/bin/sh", "-c", "sleep 5"], cols=20, rows=5)
+    qtbot.addWidget(term)
+    writes = []
+    monkeypatch.setattr(term._pty, "write", lambda data: writes.append(data))
+    term._on_output(b"\x1b[c")
+    assert writes == [b"\x1b[?6c"]
+    term.close_session()
+
+
+def test_bracketed_paste_wraps_clipboard_text(qtbot, monkeypatch):
+    QApplication.clipboard().setText("pasted")
+    term = TerminalWidget(["/bin/sh", "-c", "sleep 5"], cols=20, rows=5)
+    qtbot.addWidget(term)
+    writes = []
+    monkeypatch.setattr(term._pty, "write", lambda data: writes.append(data))
+    term._on_output(b"\x1b[?2004h")
+    _press_paste_shortcut(term)
+    assert writes == [b"\x1b[200~pasted\x1b[201~"]
+    term.close_session()
+
+
+def test_colored_output_is_rendered_with_its_color(qtbot):
+    term = TerminalWidget(["/bin/sh", "-c", "sleep 5"], cols=20, rows=5)
+    qtbot.addWidget(term)
+    term._on_output(b"\x1b[31mred\x1b[0m")
+    term._render()
+    block = term.document().firstBlock()
+    fmt = block.begin().fragment().charFormat()
+    assert block.begin().fragment().text() == "red"
+    assert fmt.foreground().color().name() == "#cd3131"
+    term.close_session()
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_tmux_starts_inside_the_terminal(qtbot, monkeypatch, tmp_path):
+    # The bug from issue #123: launched from a desktop entry TERM is unset,
+    # and tmux refused to start ("terminal does not support clear").
+    monkeypatch.delenv("TERM", raising=False)
+    socket = str(tmp_path / "tmux.sock")
+    term = TerminalWidget(["tmux", "-S", socket, "-f", "/dev/null", "new"], cols=80, rows=24)
+    qtbot.addWidget(term)
+    try:
+        qtbot.waitUntil(lambda: "[0]" in term.toPlainText(), timeout=5000)
+        assert "open terminal failed" not in term.toPlainText()
+    finally:
+        term.close_session()
+        subprocess.run(["tmux", "-S", socket, "kill-server"], check=False, capture_output=True)
