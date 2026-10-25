@@ -36,3 +36,74 @@ def test_a_session_ending_before_its_first_frame_reports_freerdps_reason(qtbot, 
         "ERRCONNECT_CONNECT_TRANSPORT_FAILED (code 0x2000d)"
     ]
     assert disconnects == [True]
+
+
+class _RecordingSession:
+    on_frame = None
+
+    def __init__(self):
+        self.calls = []
+        self.frames_read = 0
+
+    def send_mouse_move(self, x, y):
+        self.calls.append(("move", x, y))
+
+    def send_mouse_button(self, x, y, button, down):
+        self.calls.append(("button", x, y, button, down))
+
+    def get_frame(self):
+        self.frames_read += 1
+        return b"\0" * 16, 2, 2, 8
+
+
+def _worker_with(monkeypatch, session):
+    monkeypatch.setattr(rdp_session_worker, "FreeRdpSession", lambda: session)
+    return rdp_session_worker.RdpSessionWorker("host", 3389, "user", "pass")
+
+
+def test_consecutive_mouse_moves_collapse_into_the_last_one(qtbot, monkeypatch):
+    session = _RecordingSession()
+    worker = _worker_with(monkeypatch, session)
+    for x in range(5):
+        worker.send_mouse_move(x, 0)
+    worker.send_mouse_button(4, 0, "left", True)
+    worker.send_mouse_move(7, 1)
+    worker.send_mouse_move(8, 1)
+
+    worker._drain_input_queue()
+
+    assert session.calls == [("move", 4, 0), ("button", 4, 0, "left", True), ("move", 8, 1)]
+
+
+def test_frames_are_held_back_until_the_previous_one_is_consumed(qtbot, monkeypatch):
+    session = _RecordingSession()
+    worker = _worker_with(monkeypatch, session)
+    delivered = []
+    worker.signals.frame_ready.connect(lambda *frame: delivered.append(frame))
+
+    worker._on_frame()
+    worker._on_frame()
+    worker._deliver_frame()
+    worker._on_frame()
+    worker._deliver_frame()  # previous frame not consumed yet: held back
+    assert (len(delivered), session.frames_read) == (1, 1)
+
+    worker.frame_consumed()
+    worker._last_frame_at = 0.0  # past the ~60 fps cap
+    worker._deliver_frame()
+    worker._deliver_frame()  # nothing new painted since
+    assert (len(delivered), session.frames_read) == (2, 2)
+
+
+def test_frames_are_capped_at_about_60_per_second(qtbot, monkeypatch):
+    session = _RecordingSession()
+    worker = _worker_with(monkeypatch, session)
+    worker._on_frame()
+    worker._deliver_frame()
+    worker.frame_consumed()
+    worker._on_frame()
+
+    wait_ms = worker._deliver_frame()  # straight after the last one: too soon
+
+    assert session.frames_read == 1
+    assert 1 <= wait_ms <= 17

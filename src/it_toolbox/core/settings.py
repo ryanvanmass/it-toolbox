@@ -351,6 +351,28 @@ def save_rdp_keyboard_layout(layout: int) -> None:
     rdp_keyboard_layout_path().write_text(hex(layout))
 
 
+def rdp_graphics_pipeline_path() -> Path:
+    return data_dir() / "rdp_graphics_pipeline.txt"
+
+
+def load_rdp_graphics_pipeline() -> bool:
+    """Whether embedded RDP sessions offer the server the RDP 8+ graphics
+    pipeline (RemoteFX progressive codec) instead of plain bitmap updates
+    -- off by default. It's what mstsc uses, but against xrdp it measured
+    several times *more* bandwidth than plain bitmap updates, so
+    it's opt-in until it has been compared against real Windows servers.
+    See core/rdp/freerdp_client.py's _configure_performance."""
+    return rdp_graphics_pipeline_path().is_file()
+
+
+def save_rdp_graphics_pipeline(enabled: bool) -> None:
+    path = rdp_graphics_pipeline_path()
+    if enabled:
+        path.write_text("1")
+    else:
+        path.unlink(missing_ok=True)
+
+
 def rdp_shared_folder_path() -> Path:
     return data_dir() / "rdp_shared_folder.txt"
 
