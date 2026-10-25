@@ -58,6 +58,7 @@ from it_toolbox.core import (
 from it_toolbox.core.async_utils import run_in_background
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
+from it_toolbox.core.connection_list_events import connection_list_events
 from it_toolbox.core.linux_tools_events import linux_tools_events
 from it_toolbox.core.subprocess_utils import no_window_kwargs
 from it_toolbox.core.wsl import transport
@@ -199,6 +200,7 @@ class SettingsView(QWidget):
                     self._build_updates_section(),
                     self._build_modules_section(),
                     self._build_double_click_action_section(),
+                    self._build_manual_connections_section(),
                     self._build_backup_section(),
                 ],
             ),
@@ -1512,6 +1514,34 @@ class SettingsView(QWidget):
     def _on_double_click_action_changed(self, index: int) -> None:
         _, action = DOUBLE_CLICK_ACTION_PRESETS[index]
         settings.save_default_double_click_action(action)
+
+    # -- Manual connections -----------------------------------------------
+
+    def _build_manual_connections_section(self) -> QGroupBox:
+        box = QGroupBox("Manual Connections")
+        layout = QVBoxLayout(box)
+
+        self._group_manual_by_type_checkbox = QCheckBox(
+            "Group manual connections by type (RDP, SSH, SFTP, FTP)"
+        )
+        self._group_manual_by_type_checkbox.setToolTip(
+            "Shows one folder per connection type under Connection Manager's "
+            "Manual list, like Cloud Storage groups remotes by type."
+        )
+        self._group_manual_by_type_checkbox.setChecked(
+            settings.load_group_manual_connections_by_type()
+        )
+        self._group_manual_by_type_checkbox.checkStateChanged.connect(
+            self._on_group_manual_by_type_changed
+        )
+        layout.addWidget(self._group_manual_by_type_checkbox)
+        return box
+
+    def _on_group_manual_by_type_changed(self) -> None:
+        settings.save_group_manual_connections_by_type(
+            self._group_manual_by_type_checkbox.isChecked()
+        )
+        connection_list_events.layout_changed.emit()
 
     # -- FreeRDP (Windows) ------------------------------------------------
 
