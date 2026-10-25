@@ -96,7 +96,7 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     captured = {}
 
     class _CapturingWorker(_FakeWorker):
-        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None, graphics_pipeline=False):
+        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None, graphics_pipeline=False, h264=False):
             super().__init__()
             captured["desktop_size"] = desktop_size
 
@@ -114,7 +114,7 @@ def test_keyboard_layout_is_passed_to_the_worker(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None, graphics_pipeline=False,
+            shared_folder=None, graphics_pipeline=False, h264=False,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -133,7 +133,7 @@ def test_keyboard_layout_defaults_to_english_us(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None, graphics_pipeline=False,
+            shared_folder=None, graphics_pipeline=False, h264=False,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -467,7 +467,7 @@ def test_shared_folder_is_passed_to_the_worker(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None, graphics_pipeline=False,
+            shared_folder=None, graphics_pipeline=False, h264=False,
         ):
             super().__init__()
             captured["shared_folder"] = shared_folder

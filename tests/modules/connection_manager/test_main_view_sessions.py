@@ -1479,7 +1479,7 @@ class _FakeRdpWidget(QWidget):
 
     def __init__(
         self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None,
-        graphics_pipeline=False, gpu_rendering=True, failure_detail=None,
+        graphics_pipeline=False, h264=False, gpu_rendering=True, failure_detail=None,
     ):
         super().__init__()
         self.host, self.port, self.username, self.password = host, port, username, password
@@ -1489,6 +1489,7 @@ class _FakeRdpWidget(QWidget):
         self.shared_folder = shared_folder
         self.graphics_pipeline = graphics_pipeline
         self.gpu_rendering = gpu_rendering
+        self.h264 = h264
 
     def close_session(self):
         pass
@@ -1605,6 +1606,18 @@ def test_rdp_connect_passes_the_gpu_rendering_setting(qtbot, monkeypatch):
     view._on_tunnel_ready(_FakeTunnel(), "test-vm", "rdp", "alice", "secret")
 
     assert view._tabs.widget(0).gpu_rendering is False
+
+
+def test_rdp_connect_passes_the_h264_setting(qtbot, monkeypatch):
+    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
+
+    monkeypatch.setattr(main_view_module, "RdpWidget", _FakeRdpWidget)
+    monkeypatch.setattr(main_view_module.settings, "load_rdp_h264", lambda: True)
+    view = _make_view(qtbot, monkeypatch)
+
+    view._on_tunnel_ready(_FakeTunnel(), "test-vm", "rdp", "alice", "secret")
+
+    assert view._tabs.widget(0).h264 is True
 
 
 def test_rdp_widget_finishing_disconnects_and_stops_tunnel(qtbot, monkeypatch):

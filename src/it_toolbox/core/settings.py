@@ -373,6 +373,27 @@ def save_rdp_graphics_pipeline(enabled: bool) -> None:
         path.unlink(missing_ok=True)
 
 
+def rdp_h264_path() -> Path:
+    return data_dir() / "rdp_h264.txt"
+
+
+def load_rdp_h264() -> bool:
+    """Whether embedded RDP sessions also offer the server H.264
+    (AVC420/AVC444) inside the graphics pipeline -- off by default, and
+    only takes effect with load_rdp_graphics_pipeline() on. Even then it's
+    only offered once core/rdp/freerdp_client.py's h264_decoder() has
+    proved the installed FreeRDP can decode it."""
+    return rdp_h264_path().is_file()
+
+
+def save_rdp_h264(enabled: bool) -> None:
+    path = rdp_h264_path()
+    if enabled:
+        path.write_text("1")
+    else:
+        path.unlink(missing_ok=True)
+
+
 def rdp_gpu_rendering_disabled_path() -> Path:
     return data_dir() / "rdp_gpu_rendering_disabled.txt"
 

@@ -20,12 +20,14 @@ out the connect/disconnect lifecycle, mirroring how core/iap_tunnel.py
 was validated via a standalone CLI before any Qt code depended on it.
 """
 
+import base64
 import ctypes
 import logging
 import os
 import platform
 import threading
 import time
+from typing import NamedTuple
 
 from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_rdp_client_context as RdpClientContext,
@@ -47,6 +49,9 @@ from it_toolbox.core.rdp._freerdp3_bindings import (
 )
 from it_toolbox.core.rdp._freerdp3_bindings import (
     struct_s_wPubSub as WPubSub,
+)
+from it_toolbox.core.rdp._freerdp3_bindings import (
+    struct_RECTANGLE_16 as Rectangle16,
 )
 from it_toolbox.core.rdp.cliprdr import CLIPRDR_FLAG_DEFAULT_MASK, ClipboardChannel, CliprdrClientContext
 from it_toolbox.core.rdp.disp import DispClientContext, DisplayChannel
@@ -288,6 +293,35 @@ for _name in ("rdp_update_lock", "rdp_update_unlock"):
     getattr(_core_lib, _name).argtypes = [ctypes.c_void_p]
     getattr(_core_lib, _name).restype = None
 
+# H264_CONTEXT* h264_context_new(BOOL Compressor); BOOL h264_context_reset(H264_CONTEXT*, UINT32 width, UINT32 height);
+# void h264_context_free(H264_CONTEXT*); UINT32 h264_context_get_option(H264_CONTEXT*, H264_CONTEXT_OPTION);
+# INT32 avc420_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize, BYTE* pDstData,
+#                         DWORD DstFormat, UINT32 nDstStep, UINT32 nDstWidth, UINT32 nDstHeight,
+#                         const RECTANGLE_16* regionRects, UINT32 numRegionRect);
+# (freerdp/codec/h264.h) Only used by h264_decoder()'s probe -- the real
+# decoding happens inside FreeRDP's graphics pipeline.
+_core_lib.h264_context_new.argtypes = [ctypes.c_int32]
+_core_lib.h264_context_new.restype = ctypes.c_void_p
+_core_lib.h264_context_reset.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
+_core_lib.h264_context_reset.restype = ctypes.c_int32
+_core_lib.h264_context_free.argtypes = [ctypes.c_void_p]
+_core_lib.h264_context_free.restype = None
+_core_lib.h264_context_get_option.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_core_lib.h264_context_get_option.restype = ctypes.c_uint32
+_core_lib.avc420_decompress.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+    ctypes.c_uint32,
+    ctypes.c_void_p,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.POINTER(Rectangle16),
+    ctypes.c_uint32,
+]
+_core_lib.avc420_decompress.restype = ctypes.c_int32
+
 # DWORD freerdp_get_event_handles(rdpContext* context, HANDLE* events, DWORD count);
 # The handles freerdp_check_event_handles() services (the socket, channel
 # queues, timers) -- waited on in FreeRdpSession.wait_for_activity so the
@@ -489,6 +523,7 @@ def _configure_settings(
     keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
     shared_folder: str | None = None,
     graphics_pipeline: bool = False,
+    h264: bool = False,
 ) -> None:
     settings = context.contents.settings  # c_void_p, opaque — accessed via accessors only
     _core_lib.freerdp_settings_set_string(settings, SETTING_SERVER_HOSTNAME, host.encode())
@@ -538,7 +573,7 @@ def _configure_settings(
     # that case.
     keyboard_layout_key = _settings_key_for_name("FreeRDP_KeyboardLayout")
     _core_lib.freerdp_settings_set_uint32(settings, keyboard_layout_key, keyboard_layout)
-    _configure_performance(settings, graphics_pipeline)
+    _configure_performance(settings, graphics_pipeline, h264)
     if shared_folder:
         _add_shared_drive(settings, shared_folder)
 
@@ -550,20 +585,97 @@ def _configure_settings(
 # FreeRDP's own channel handler hooks it up (see _CLIENT_CHANNEL_HANDLERS),
 # and frame-acknowledged, so the server paces itself to how fast frames are
 # consumed. Not the default because against xrdp it used several times the
-# bandwidth (and ~3x the client CPU) of plain bitmap updates. H.264
-# (GfxH264/AVC444) stays off: whether it decodes depends on how FreeRDP was
-# built (openh264/ffmpeg), and advertising it without a working decoder
-# gives a black screen.
+# bandwidth (and ~3x the client CPU) of plain bitmap updates.
+#
+# H.264 (AVC420/AVC444) on top of it is a second opt-in, and is only
+# advertised once h264_decoder() has proved this FreeRDP build can really
+# decode it: which decoder exists depends entirely on how FreeRDP was built
+# (see h264_decoder), and advertising H.264 without a working one gives a
+# black screen.
 #
 # Two other things a fresh rdpSettings leaves off that xfreerdp turns on
 # were tried and left off on purpose: BitmapCacheEnabled turned the whole
 # screen white after the first resize against xrdp (on main too, so not an
 # interaction with anything here), and the offscreen cache
 # (OffscreenSupportLevel) did the same together with it.
-def _configure_performance(settings: ctypes.c_void_p, graphics_pipeline: bool) -> None:
-    if graphics_pipeline:
-        _core_lib.freerdp_settings_set_bool(settings, _settings_key_for_name("FreeRDP_SupportGraphicsPipeline"), 1)
-        _core_lib.freerdp_settings_set_bool(settings, _settings_key_for_name("FreeRDP_GfxProgressive"), 1)
+def _configure_performance(settings: ctypes.c_void_p, graphics_pipeline: bool, h264: bool) -> None:
+    if not graphics_pipeline:
+        return
+    _core_lib.freerdp_settings_set_bool(settings, _settings_key_for_name("FreeRDP_SupportGraphicsPipeline"), 1)
+    _core_lib.freerdp_settings_set_bool(settings, _settings_key_for_name("FreeRDP_GfxProgressive"), 1)
+    if h264:
+        decoder = h264_decoder()
+        if not decoder.works:
+            _log.warning("not offering H.264 to the RDP server: %s", decoder.detail)
+            return
+        _log.info("offering H.264 to the RDP server (%s)", decoder.detail)
+        for name in ("FreeRDP_GfxH264", "FreeRDP_GfxAVC444", "FreeRDP_GfxAVC444v2"):
+            _core_lib.freerdp_settings_set_bool(settings, _settings_key_for_name(name), 1)
+
+
+class H264Decoder(NamedTuple):
+    works: bool
+    hardware: bool  # FreeRDP reports hardware decoding (only known on 3.11+)
+    detail: str
+
+
+# A single 64x64 frame of solid #2060C0, H.264 Annex B (SPS, PPS, IDR) --
+# encoded with `ffmpeg -f lavfi -i color=c=0x2060C0:s=64x64 -frames:v 1
+# -c:v libopenh264 -f h264`. The same bitstream format RDP's AVC420 carries.
+_H264_PROBE_FRAME = base64.b64decode(
+    "AAAAAWdCwBSMaEJMBAeEQjUAAAABaM48gAAAAAFluAAECeIxQABBzjgACCNHAAECWTk5OuuuuuuuupK668A="
+)
+_H264_PROBE_COLOR = (0x20, 0x60, 0xC0)  # R, G, B
+_H264_OPTION_HW_ACCEL = 5  # H264_CONTEXT_OPTION_HW_ACCEL, freerdp/codec/h264.h
+_h264_decoder: H264Decoder | None = None
+
+
+def h264_decoder() -> H264Decoder:
+    """Whether this FreeRDP build can decode H.264, found by decoding a
+    tiny embedded frame and checking its color -- checked once, then cached.
+
+    FreeRDP picks its decoder at build time, first match wins: Media
+    Foundation on Windows (hardware, when the GPU driver provides it),
+    OpenH264 (software), then FFmpeg -- which uses VAAPI (Linux) or
+    VideoToolbox (macOS) hardware decoding when built with them. A decoder
+    can also exist yet fail at runtime (e.g. an OpenH264 stub library), so
+    only an actual decode is trusted.
+    """
+    global _h264_decoder
+    if _h264_decoder is None:
+        try:
+            _h264_decoder = _probe_h264()
+        except Exception as exc:  # noqa: BLE001 - any failure just means "no"
+            _h264_decoder = H264Decoder(False, False, f"probe failed: {type(exc).__name__}: {exc}")
+    return _h264_decoder
+
+
+def _probe_h264() -> H264Decoder:
+    context = _core_lib.h264_context_new(0)
+    if not context:
+        return H264Decoder(False, False, "this FreeRDP build has no H.264 decoder")
+    try:
+        size = 64
+        if not _core_lib.h264_context_reset(context, size, size):
+            return H264Decoder(False, False, "the H.264 decoder failed to initialize")
+        stride = size * 4
+        pixels = (ctypes.c_ubyte * (stride * size))()
+        rect = Rectangle16(left=0, top=0, right=size, bottom=size)
+        status = _core_lib.avc420_decompress(
+            context, _H264_PROBE_FRAME, len(_H264_PROBE_FRAME), pixels,
+            PIXEL_FORMAT_BGRX32, stride, size, size, ctypes.byref(rect), 1,
+        )
+        if status < 0:
+            return H264Decoder(False, False, f"the H.264 decoder couldn't decode a test frame (status {status})")
+        center = (size // 2) * stride + (size // 2) * 4
+        blue, green, red = pixels[center], pixels[center + 1], pixels[center + 2]
+        # Lossy codec plus YUV conversion: close, not exact.
+        if any(abs(got - want) > 24 for got, want in zip((red, green, blue), _H264_PROBE_COLOR)):
+            return H264Decoder(False, False, f"the H.264 decoder produced the wrong picture ({red}, {green}, {blue})")
+        hardware = bool(_core_lib.h264_context_get_option(context, _H264_OPTION_HW_ACCEL))
+        return H264Decoder(True, hardware, "hardware decoding" if hardware else "decoding works")
+    finally:
+        _core_lib.h264_context_free(context)
 
 
 def shared_drive_name(folder: str) -> str:
@@ -768,6 +880,7 @@ class FreeRdpSession:
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         shared_folder: str | None = None,
         graphics_pipeline: bool = False,
+        h264: bool = False,
     ) -> None:
         context = _new_context()
         self._context = context
@@ -783,6 +896,7 @@ class FreeRdpSession:
                 keyboard_layout,
                 shared_folder,
                 graphics_pipeline,
+                h264,
             )
             if desktop_size is not None:
                 _apply_desktop_size(context, *desktop_size)
