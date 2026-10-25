@@ -1270,10 +1270,25 @@ class SettingsView(QWidget):
             self._on_rdp_graphics_pipeline_changed
         )
         layout.addWidget(self._rdp_graphics_pipeline_checkbox)
+
+        self._rdp_gpu_rendering_checkbox = QCheckBox(
+            "Draw sessions with the GPU (applies to new sessions)"
+        )
+        self._rdp_gpu_rendering_checkbox.setToolTip(
+            "Scales and displays the remote desktop on the graphics card. Falls back "
+            "to the CPU automatically when no usable GPU is available; turn it off "
+            "if a session shows a blank or garbled picture."
+        )
+        self._rdp_gpu_rendering_checkbox.setChecked(settings.load_rdp_gpu_rendering())
+        self._rdp_gpu_rendering_checkbox.checkStateChanged.connect(self._on_rdp_gpu_rendering_changed)
+        layout.addWidget(self._rdp_gpu_rendering_checkbox)
         return box
 
     def _on_rdp_graphics_pipeline_changed(self) -> None:
         settings.save_rdp_graphics_pipeline(self._rdp_graphics_pipeline_checkbox.isChecked())
+
+    def _on_rdp_gpu_rendering_changed(self) -> None:
+        settings.save_rdp_gpu_rendering(self._rdp_gpu_rendering_checkbox.isChecked())
 
     def _on_rdp_resolution_changed(self, index: int) -> None:
         _, resolution = RDP_RESOLUTION_PRESETS[index]
