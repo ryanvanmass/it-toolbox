@@ -59,6 +59,16 @@ def _drain_background_tasks(monkeypatch):
         QCoreApplication.processEvents()
 
 
+@pytest.fixture(autouse=True)
+def _reset_key_install_offers():
+    """offer_key_install asks once per machine per run; start each test
+    with nothing offered yet."""
+    yield
+    from it_toolbox.widgets import remote_helper_widget
+
+    remote_helper_widget._key_install_offered.clear()
+
+
 # -- Shared sample data ------------------------------------------------------
 
 
