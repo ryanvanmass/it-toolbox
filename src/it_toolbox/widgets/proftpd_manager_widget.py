@@ -804,6 +804,7 @@ class ProftpdManagerWidget(QWidget):
         self.stack = QStackedWidget()
         self.message_page = QLabel()
         self.message_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self.message_page, "muted")
         self.message_page.setWordWrap(True)
         self.stack.addWidget(self.message_page)
         self.helper_page = self._build_helper_page()

@@ -23,6 +23,7 @@ from it_toolbox.modules.connection_manager import gcp_client
 from it_toolbox.modules.connection_manager.models import GcpIamBinding, GcpProject
 from it_toolbox.modules.identity_management import jumpcloud_client
 from it_toolbox.modules.identity_management.models import Device, DeviceUser, User
+from it_toolbox.ui import theme
 
 IS_JUMPCLOUD_ROOT_ROLE = Qt.ItemDataRole.UserRole
 CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -173,6 +174,7 @@ class IdentityManagementView(QWidget):
             "jump straight to one."
         )
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self._placeholder_label, "muted")
         self._placeholder_label.setWordWrap(True)
 
         self._stack = QStackedWidget()

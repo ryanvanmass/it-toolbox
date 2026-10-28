@@ -77,6 +77,11 @@ DARK = Tokens(
 )
 
 
+# The embedded terminal stays dark in both modes (see TerminalWidget).
+TERMINAL_BACKGROUND = "#101318"
+TERMINAL_FOREGROUND = "#d8dce4"
+
+
 class _ThemeEvents(QObject):
     #: Emitted after the palette/stylesheet change, for widgets that cache
     #: tinted icons or custom-painted colors.
@@ -221,6 +226,9 @@ QTreeView, QListView, QTableView {{ background: {t.surface}; border: 1px solid {
 QTreeView::item, QListView::item {{ padding: 4px 2px; border-radius: 4px; }}
 QTreeView::item:hover, QListView::item:hover {{ background: {t.raised}; }}
 QTreeView::item:selected, QListView::item:selected {{ background: {t.accent_soft}; color: {t.text}; }}
+QTableView {{ gridline-color: {t.raised}; }}
+QTableView::item {{ padding: 2px 6px; }}
+QTableView::item:selected {{ background: {t.accent_soft}; color: {t.text}; }}
 QHeaderView::section {{ background: {t.window}; color: {t.muted}; border: none;
     border-bottom: 1px solid {t.border}; padding: 6px 8px; font-weight: 600; }}
 
@@ -306,6 +314,11 @@ QScrollBar::handle {{ background: {t.border}; border-radius: 3px; min-height: 24
 QScrollBar::handle:hover {{ background: {t.muted}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+/* Embedded terminal (widgets/terminal_widget.py) */
+QPlainTextEdit#Terminal {{ background: {TERMINAL_BACKGROUND}; color: {TERMINAL_FOREGROUND};
+    border: none; border-radius: 0; padding: 4px 6px;
+    selection-background-color: {t.accent}; selection-color: {t.accent_text}; }}
 
 /* Semantic text colors -- see set_tone() */
 *[tone="muted"] {{ color: {t.muted}; }}

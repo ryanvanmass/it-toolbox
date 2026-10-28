@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import scheduler_manager as sm
+from it_toolbox.ui import theme
 from it_toolbox.widgets import scheduler_dialogs as dialogs
 from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.hosting_dialogs import monospace
@@ -196,6 +197,7 @@ class SchedulerManagerWidget(RemoteHelperTab):
         )
         self.missing_page.setWordWrap(True)
         self.missing_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self.missing_page, "muted")
         self.stack.addWidget(self.missing_page)
 
         self.server_label = QLabel()
