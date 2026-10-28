@@ -7,7 +7,7 @@ Everything visual hangs off a small set of named colors (Tokens): a
 QPalette for the widgets that only read the palette, plus one app-wide
 stylesheet for the shapes (radii, padding, tab/nav styling) the palette
 can't express. Widgets that need a semantic color (an error label, a muted
-hint) ask for it via label_style()/color() rather than hardcoding one, so
+hint) ask for it via set_tone()/color() rather than hardcoding one, so
 it stays readable in both light and dark mode.
 
 Mode is "system" (follow the OS light/dark setting, live), "light" or
@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QImageReader, QPalette, QPixmap
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 _ICON_DIR = Path(__file__).resolve().parent.parent / "resources" / "icons" / "ui"
 
@@ -101,10 +101,16 @@ def color(name: str) -> QColor:
     return QColor(getattr(_current, name))
 
 
-def label_style(name: str) -> str:
-    """Stylesheet for a QLabel showing a semantic color ("muted",
-    "danger", "warning", "success", "accent")."""
-    return f"color: {getattr(_current, name)};"
+def set_tone(widget: QWidget, tone: str | None) -> None:
+    """Gives a label (or any widget's text) a semantic color -- "muted",
+    "danger", "warning", "success" or "accent" -- or back to the normal
+    text color with None. Done through a dynamic property the app
+    stylesheet matches on, rather than a per-widget color, so it follows
+    light/dark switches on its own."""
+    widget.setProperty("tone", tone or "")
+    # Qt only re-matches property selectors on a re-polish.
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 def icon(name: str, color_name: str = "text", size: int = 64) -> QIcon:
@@ -300,6 +306,13 @@ QScrollBar::handle {{ background: {t.border}; border-radius: 3px; min-height: 24
 QScrollBar::handle:hover {{ background: {t.muted}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+/* Semantic text colors -- see set_tone() */
+*[tone="muted"] {{ color: {t.muted}; }}
+*[tone="danger"] {{ color: {t.danger}; }}
+*[tone="warning"] {{ color: {t.warning}; }}
+*[tone="success"] {{ color: {t.success}; }}
+*[tone="accent"] {{ color: {t.accent}; }}
 
 /* Empty state shown in place of the session-tab pane */
 #EmptyState QLabel#EmptyTitle {{ font-size: 13pt; font-weight: 600; }}

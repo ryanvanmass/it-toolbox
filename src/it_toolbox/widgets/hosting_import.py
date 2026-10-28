@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import hosting_manager as hm
+from it_toolbox.ui import theme
 from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.hosting_dialogs import monospace
 from it_toolbox.widgets.remote_helper_widget import fill_table, make_table, table_item
@@ -154,7 +155,7 @@ class _ImportDialog(QDialog):
         self.status: dict = {}
         self.pages = QStackedWidget()
         self.error = _label()
-        self.error.setStyleSheet("color: #c9190b;")
+        theme.set_tone(self.error, "danger")
         self.error.hide()
         self.buttons = QHBoxLayout()
         layout = QVBoxLayout(self)
@@ -583,7 +584,7 @@ class ZabbixImportDialog(_ImportDialog):
                               "the import. Its database is kept aside and put back if the import fails. Once this "
                               "Zabbix runs, it polls the same hosts and sends the same alerts as the old one until "
                               "that is switched off.")
-        self.warning.setStyleSheet("color: #b35c00;")
+        theme.set_tone(self.warning, "warning")
         scan = QVBoxLayout(self.scan_page)
         scan.addWidget(self.scan_summary)
         self.options_box = QGroupBox("What comes across")

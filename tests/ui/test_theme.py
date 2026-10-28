@@ -1,5 +1,4 @@
 from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication
 
 import pytest
 
@@ -52,9 +51,22 @@ def test_stylesheet_glyphs_are_written_for_each_tint(qapp):
         assert "#123456" in f.read()
 
 
-def test_label_style_uses_the_current_tokens(qapp):
-    theme.apply(QApplication.instance(), "dark")
+def test_set_tone_follows_theme_switches(qtbot, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    label = QLabel("problem")
+    qtbot.addWidget(label)
     try:
-        assert theme.label_style("danger") == f"color: {theme.DARK.danger};"
+        theme.apply(qapp, "light")
+        theme.set_tone(label, "danger")
+        label.ensurePolished()
+        assert label.palette().color(QPalette.ColorRole.WindowText).name() == theme.LIGHT.danger
+
+        theme.apply(qapp, "dark")
+        label.ensurePolished()
+        assert label.palette().color(QPalette.ColorRole.WindowText).name() == theme.DARK.danger
+
+        theme.set_tone(label, None)
+        assert label.palette().color(QPalette.ColorRole.WindowText).name() == theme.DARK.text
     finally:
         theme.apply(qapp, "light")

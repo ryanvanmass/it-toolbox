@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import hosting_manager as hm
+from it_toolbox.ui import theme
 from it_toolbox.widgets import hosting_dialogs as dialogs
 from it_toolbox.widgets.hosting_import import ZabbixImportDialog
 from it_toolbox.widgets.remote_helper_widget import (
@@ -120,7 +121,7 @@ class RepoCard(_Card):
         self.sftp: dict = {}
         self.info = _label()
         self.problem = _label()
-        self.problem.setStyleSheet("color: #c9190b;")
+        theme.set_tone(self.problem, "danger")
         self.packages = make_table(["File", "Type", "Size", "Added"])
         self.waiting = _label()
         layout = QVBoxLayout(self)
@@ -245,7 +246,7 @@ class ForgejoCard(_Card):
         super().__init__("Forgejo", detail)
         self.info = _label()
         self.warning = _label()
-        self.warning.setStyleSheet("color: #b35c00;")
+        theme.set_tone(self.warning, "warning")
         self.update_button = _button("Update…", self._update)
         self.admin_button = _button("Create Admin…", self._create_admin)
         self.password_button = _button("New Admin Password…", self._new_password)
@@ -413,7 +414,7 @@ class ZabbixCard(_Card):
         self.status: dict = {}
         self.info = _label()
         self.importing = _label()
-        self.importing.setStyleSheet("color: #0066cc;")
+        theme.set_tone(self.importing, "accent")
         self.update_button = _button("Update…", self._update)
         self.admin_button = _button("Set Admin Password…", self._set_admin)
         self.password_button = _button("New Password…", self._new_password)
