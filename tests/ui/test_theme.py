@@ -1,29 +1,37 @@
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
+import pytest
+
 from it_toolbox.ui import theme
 
 
-def test_explicit_modes_pick_their_palette(qapp):
-    try:
-        theme.apply(qapp, "dark")
-        assert theme.is_dark()
-        window = qapp.palette().color(QPalette.ColorRole.Window).name()
-        assert window == theme.DARK.window
+@pytest.fixture(autouse=True)
+def _restore_unthemed_app(qapp):
+    """Undo apply() after each test: the rest of the suite runs unthemed,
+    and leaving the app stylesheet behind makes every later widget test
+    noticeably slower (and timing-sensitive ones flaky)."""
+    style = qapp.style().name()
+    palette = qapp.palette()
+    yield
+    qapp.setStyleSheet("")
+    qapp.setStyle(style)
+    qapp.setPalette(palette)
 
-        theme.apply(qapp, "light")
-        assert not theme.is_dark()
-        assert qapp.palette().color(QPalette.ColorRole.Window).name() == theme.LIGHT.window
-    finally:
-        theme.apply(qapp, "light")
+
+def test_explicit_modes_pick_their_palette(qapp):
+    theme.apply(qapp, "dark")
+    assert theme.is_dark()
+    assert qapp.palette().color(QPalette.ColorRole.Window).name() == theme.DARK.window
+
+    theme.apply(qapp, "light")
+    assert not theme.is_dark()
+    assert qapp.palette().color(QPalette.ColorRole.Window).name() == theme.LIGHT.window
 
 
 def test_unknown_mode_falls_back_to_system(qapp):
-    try:
-        theme.apply(qapp, "purple")
-        assert theme._mode == "system"
-    finally:
-        theme.apply(qapp, "light")
+    theme.apply(qapp, "purple")
+    assert theme._mode == "system"
 
 
 def test_apply_announces_the_change(qapp):
