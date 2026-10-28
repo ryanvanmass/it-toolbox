@@ -420,6 +420,24 @@ def save_default_double_click_action(action: str) -> None:
     default_double_click_action_path().write_text(action)
 
 
+def appearance_path() -> Path:
+    return data_dir() / "appearance.txt"
+
+
+def load_appearance() -> str:
+    """"system" (the default -- follow the OS light/dark setting), "light"
+    or "dark". See ui/theme.py."""
+    path = appearance_path()
+    if not path.is_file():
+        return "system"
+    value = path.read_text().strip()
+    return value if value in ("system", "light", "dark") else "system"
+
+
+def save_appearance(mode: str) -> None:
+    appearance_path().write_text(mode)
+
+
 def terminal_font_size_path() -> Path:
     return data_dir() / "terminal_font_size.txt"
 

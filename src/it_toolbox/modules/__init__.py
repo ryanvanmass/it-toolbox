@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMenu, QWidget
 
+from it_toolbox.ui import theme
+
 
 class ToolModule(ABC):
     """Base class for a pluggable tool module shown in the sidebar."""
@@ -19,10 +21,18 @@ class ToolModule(ABC):
     #: pane for those and gives the module's own view the space instead.
     uses_shared_tabs: bool = True
 
+    #: Bundled line icon (resources/icons/ui/<icon_name>.svg) shown beside
+    #: the sidebar entry, tinted to the current theme. Empty for none.
+    icon_name: str = ""
+
+    #: One-line hint shown in the empty session-tab pane while this module
+    #: is selected and nothing is open yet.
+    empty_hint: str = "Pick something from the sidebar to open it here."
+
     @property
     def icon(self) -> QIcon:
-        """Sidebar icon. Defaults to no icon; override to customize."""
-        return QIcon()
+        """Sidebar icon, from icon_name. Override to customize."""
+        return theme.icon(self.icon_name) if self.icon_name else QIcon()
 
     @abstractmethod
     def create_widget(self) -> QWidget:
