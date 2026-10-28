@@ -1154,6 +1154,7 @@ class HostingManagerWidget(RemoteHelperTab):
         )
         self.missing_page.setWordWrap(True)
         self.missing_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self.missing_page, "muted")
         self.stack.addWidget(self.missing_page)
 
         self.tabs = QTabWidget()
