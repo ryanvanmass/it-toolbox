@@ -26,6 +26,7 @@ from it_toolbox.modules.connection_manager import qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost, StorageVolume, VmCreateSpec
 from it_toolbox.modules.connection_manager.ui.memory_size_widget import MemorySizeWidget
 from it_toolbox.modules.connection_manager.ui.searchable_combo import make_searchable, resolve_data
+from it_toolbox.ui import theme
 
 _NONE_ISO_LABEL = "(None — boot the new disk directly)"
 _DEFAULT_OS_VARIANT = "generic"
@@ -102,7 +103,7 @@ class CreateVmDialog(QDialog):
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color: red;")
+        theme.set_tone(self._error_label, "danger")
         self._error_label.setVisible(False)
 
         form = QFormLayout()

@@ -45,6 +45,7 @@ from it_toolbox.modules.connection_manager.models import (
     SSH_PORT,
     ManualConnection,
 )
+from it_toolbox.ui import theme
 
 CONNECTION_ROLE = Qt.ItemDataRole.UserRole
 NEW_PASSWORD_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -134,7 +135,7 @@ class _ConnectionEditDialog(QDialog):
             "text (this app has no credential vault)."
         )
         gateway_password_note.setWordWrap(True)
-        gateway_password_note.setStyleSheet("color: gray;")
+        theme.set_tone(gateway_password_note, "muted")
 
         self._gateway_prompt_password_checkbox = QCheckBox("Prompt for it instead of storing it")
         self._gateway_prompt_password_checkbox.setChecked(

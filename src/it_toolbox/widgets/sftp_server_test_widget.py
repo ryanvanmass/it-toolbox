@@ -42,6 +42,7 @@ from it_toolbox.core.sftp_stress_test import (
     StressTestConfig,
     format_bytes,
 )
+from it_toolbox.ui import theme
 from it_toolbox.widgets import status_bar
 
 POLL_INTERVAL_MS = 500
@@ -575,7 +576,7 @@ class SftpServerTestWidget(QWidget):
         labels["rate"].setText(f"{sum(r for n, r in rates.items() if n != 'connect'):.1f}")
         labels["ops"].setText(f"{snapshot.total_ops:,}")
         labels["errors"].setText(f"{snapshot.total_errors:,}")
-        labels["errors"].setStyleSheet("color: #c0392b;" if snapshot.total_errors else "")
+        theme.set_tone(labels["errors"], "danger" if snapshot.total_errors else None)
         labels["uploaded"].setText(format_bytes(snapshot.bytes_uploaded))
         labels["downloaded"].setText(format_bytes(snapshot.bytes_downloaded))
         workers = self._test.config.workers if self._test is not None else snapshot.active_workers

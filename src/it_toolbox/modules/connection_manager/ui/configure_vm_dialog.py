@@ -69,6 +69,7 @@ from it_toolbox.modules.connection_manager import qemu_provisioning
 from it_toolbox.modules.connection_manager.models import QemuHost, QemuVm, VmDisk, VmNetworkInterface
 from it_toolbox.modules.connection_manager.ui.memory_size_widget import MemorySizeWidget
 from it_toolbox.modules.connection_manager.ui.searchable_combo import make_searchable, resolve_data
+from it_toolbox.ui import theme
 
 DISK_TARGET_ROLE = Qt.ItemDataRole.UserRole
 BOOT_DEVICE_ROLE = Qt.ItemDataRole.UserRole
@@ -117,7 +118,7 @@ class ConfigureVmDialog(QDialog):
             # doesn't unlock anything extra, so say so plainly.
             resize_note = QLabel("vCPU/memory changes apply the next time this VM restarts.")
             resize_note.setWordWrap(True)
-            resize_note.setStyleSheet("color: gray;")
+            theme.set_tone(resize_note, "muted")
             resource_form.addRow("", resize_note)
 
         # -- Display device (SPICE/VNC) ------------------------------------
@@ -147,7 +148,7 @@ class ConfigureVmDialog(QDialog):
             # just stages the new device for the VM's next restart.
             display_note = QLabel("Display device changes apply the next time this VM restarts.")
             display_note.setWordWrap(True)
-            display_note.setStyleSheet("color: gray;")
+            theme.set_tone(display_note, "muted")
             display_form.addRow("", display_note)
         self._display_box = QGroupBox("Display")
         self._display_box.setLayout(display_form)
@@ -186,7 +187,7 @@ class ConfigureVmDialog(QDialog):
             "devices are skipped. Applies the next time this VM restarts."
         )
         boot_order_note.setWordWrap(True)
-        boot_order_note.setStyleSheet("color: gray;")
+        theme.set_tone(boot_order_note, "muted")
 
         boot_order_layout = QVBoxLayout()
         boot_order_layout.addWidget(self._boot_order_list)
@@ -225,7 +226,7 @@ class ConfigureVmDialog(QDialog):
                 "disappear until this VM restarts."
             )
             remove_note.setWordWrap(True)
-            remove_note.setStyleSheet("color: gray;")
+            theme.set_tone(remove_note, "muted")
             disks_layout.addWidget(remove_note)
         add_disk_form = QFormLayout()
         add_disk_form.addRow("", self._add_disk_checkbox)
@@ -278,7 +279,7 @@ class ConfigureVmDialog(QDialog):
                 "fully disappear until this VM restarts."
             )
             network_note.setWordWrap(True)
-            network_note.setStyleSheet("color: gray;")
+            theme.set_tone(network_note, "muted")
             network_form.addRow("", network_note)
         self._network_box = QGroupBox("Network")
         self._network_box.setLayout(network_form)
@@ -286,7 +287,7 @@ class ConfigureVmDialog(QDialog):
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color: red;")
+        theme.set_tone(self._error_label, "danger")
         self._error_label.setVisible(False)
 
         self._buttons = QDialogButtonBox(

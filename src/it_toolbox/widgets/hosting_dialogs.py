@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import hosting_manager as hm
+from it_toolbox.ui import theme
 
 TITLE = "Hosting Manager"
 
@@ -567,7 +568,7 @@ class ScheduleEdit(QWidget):
                 text = f"systemd: {reply.get('on_calendar', '')}"
                 if reply.get("next_run"):
                     text += f" — {self._next_label}: {reply['next_run']}"
-                self.result.setStyleSheet("")
+                theme.set_tone(self.result, None)
                 self.result.setText(text)
             except RuntimeError:
                 pass
@@ -577,7 +578,7 @@ class ScheduleEdit(QWidget):
                 if schedule != self.text():
                     return
                 self._checked = (schedule, str(error))
-                self.result.setStyleSheet("color: #c9190b;")
+                theme.set_tone(self.result, "danger")
                 self.result.setText(str(error))
             except RuntimeError:
                 pass
