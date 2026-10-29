@@ -6,19 +6,19 @@ TLS websocket server speaking the middleware's JSON-RPC 2.0 dialect
         connection = TrueNasConnection(nas.url, nas.api_key, fingerprint=nas.fingerprint).open()
 """
 
+import asyncio
 import copy
 import datetime
 import hashlib
 import json
 import ssl
 import threading
-import time
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-from websockets.sync.server import serve
+from websockets.asyncio.server import serve
 
 from it_toolbox.core import pinned_tls
 
@@ -198,19 +198,31 @@ class FakeTrueNas:
         self.url = ""
 
     def __enter__(self):
+        # An asyncio server in its own thread: the sync server reads and
+        # writes one TLS socket from two threads, which Python 3.14's ssl
+        # module occasionally corrupts mid-handshake.
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(self._cert, self._key)
-        self._server = serve(self._handle, "127.0.0.1", 0, ssl=context, process_request=self._route)
-        port = self._server.socket.getsockname()[1]
-        self.url = f"https://127.0.0.1:{port}"
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._loop = asyncio.new_event_loop()
+        started = threading.Event()
+
+        async def main():
+            self._stop = asyncio.Event()
+            async with serve(self._handle, "127.0.0.1", 0, ssl=context, process_request=self._route) as server:
+                port = next(iter(server.sockets)).getsockname()[1]
+                self.url = f"https://127.0.0.1:{port}"
+                started.set()
+                await self._stop.wait()
+
+        self._thread = threading.Thread(target=self._loop.run_until_complete, args=(main(),), daemon=True)
         self._thread.start()
-        time.sleep(0.02)  # let serve_forever start before a quick test shuts it down
+        started.wait(5)
         return self
 
     def __exit__(self, *exc):
-        self._server.shutdown()
+        self._loop.call_soon_threadsafe(self._stop.set)
         self._thread.join(5)
+        self._loop.close()
 
     def methods_called(self):
         return [method for method, _ in self.calls]
@@ -221,37 +233,37 @@ class FakeTrueNas:
             return connection.respond(404, "Not Found\n")
         return None
 
-    def _handle(self, ws):
+    async def _handle(self, ws):
         logged_in = False
-        for raw in ws:
+        async for raw in ws:
             message = json.loads(raw)
             method, params, request_id = message["method"], message.get("params", []), message["id"]
             self.calls.append((method, params))
 
-            def reply(result=None, error=None):
+            async def reply(result=None, error=None):
                 body = {"jsonrpc": "2.0", "id": request_id}
                 body["error" if error else "result"] = error or result
-                ws.send(json.dumps(body))
+                await ws.send(json.dumps(body))
 
             if method == "auth.login_with_api_key":
                 logged_in = params == [self.api_key]
-                reply(logged_in)
+                await reply(logged_in)
                 continue
             if not logged_in:
-                reply(error={"code": -32001, "message": "Not authenticated", "data": {"errname": "EACCES", "reason": "Not authenticated"}})
+                await reply(error={"code": -32001, "message": "Not authenticated", "data": {"errname": "EACCES", "reason": "Not authenticated"}})
                 continue
             if method in self.errors:
-                reply(error=self.errors[method])
+                await reply(error=self.errors[method])
             elif method == "core.get_jobs":
                 job_id = params[0][0][2]
-                reply([self._jobs[job_id]] if job_id in self._jobs else [])
+                await reply([self._jobs[job_id]] if job_id in self._jobs else [])
             elif method == "core.subscribe":
-                reply(f"sub-{params[0]}")
+                await reply(f"sub-{params[0]}")
                 if params[0] == "reporting.realtime":
                     fields = REALTIME_FIELDS
                 else:
                     fields = {"data": "line one\n"}
-                ws.send(json.dumps({
+                await ws.send(json.dumps({
                     "jsonrpc": "2.0",
                     "method": "collection_update",
                     "params": {"msg": "added", "collection": params[0], "fields": fields},
@@ -266,10 +278,10 @@ class FakeTrueNas:
                     "progress": {"percent": 100, "description": "done"},
                     "result": None,
                 }
-                reply(job_id)
+                await reply(job_id)
             elif method in self.results:
-                reply(self.results[method])
+                await reply(self.results[method])
             elif method in OK_METHODS:
-                reply(True)
+                await reply(True)
             else:
-                reply(error={"code": -32601, "message": "Method does not exist"})
+                await reply(error={"code": -32601, "message": "Method does not exist"})

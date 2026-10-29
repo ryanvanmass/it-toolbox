@@ -3,10 +3,14 @@ logged in with a user-linked API key. TrueNAS 25.04 and later only: the
 older REST API is deprecated and due to be removed, and /api/current
 doesn't exist before 25.04.
 
-No Qt here. A TrueNasConnection is one websocket plus a reader thread
-that hands each reply to whichever call is waiting for its id, and each
-event (core.subscribe) to its subscriber -- so several background calls
-from one dashboard can be in flight on one connection at once.
+No Qt here. A TrueNasConnection is one websocket owned by its own
+asyncio thread (the "reader thread"): it hands each reply to whichever
+call is waiting for its id, and each event (core.subscribe) to its
+subscriber -- so several background calls from one dashboard can be in
+flight on one connection at once. Callers stay synchronous; only that
+thread ever touches the TLS socket. (websockets' sync client reads and
+writes one TLS socket from two threads, which Python 3.14's ssl module
+occasionally corrupts mid-handshake.)
 
 Self-signed certificates are pinned the same way as core/pinned_tls's
 requests sessions: the socket skips CA checks, and the certificate's
@@ -16,6 +20,7 @@ ever sent.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import re
@@ -25,8 +30,8 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
+from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI, WebSocketException
-from websockets.sync.client import connect as ws_connect
 
 from it_toolbox.core import pinned_tls
 
@@ -124,14 +129,13 @@ class TrueNasConnection:
         api_key: str,
         verify_ssl: bool = False,
         fingerprint: str | None = None,
-        connect: Callable[..., Any] = ws_connect,
     ) -> None:
         self.url = url
         self._api_key = api_key
         self._verify_ssl = verify_ssl
         self._fingerprint = fingerprint
-        self._connect = connect
         self._ws = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         self._pending: dict[int, _Pending] = {}
@@ -157,35 +161,15 @@ class TrueNasConnection:
         if urlsplit(self.url).scheme == "http":
             # TrueNAS revokes an API key that's ever sent in the clear.
             raise TrueNasError("TrueNAS API keys must only be sent over HTTPS -- use an https:// URL.")
+        self._loop = asyncio.new_event_loop()
+        self._reader = threading.Thread(target=self._loop.run_forever, name="truenas-reader", daemon=True)
+        self._reader.start()
         try:
-            # Entered by hand: newer websockets releases want connect() used
-            # as a context manager, older ones return the connection itself
-            # (whose __enter__ returns itself) -- this works with both.
-            self._ws = self._connect(
-                websocket_url(self.url),
-                ssl=pinned_tls.ssl_context_for(self._verify_ssl),
-                open_timeout=CONNECT_TIMEOUT_SEC,
-                max_size=MAX_MESSAGE_BYTES,
-            ).__enter__()
-        except InvalidStatus as error:
-            status = getattr(getattr(error, "response", None), "status_code", None)
-            if status in (404, 405):
-                raise TrueNasUnsupportedError(
-                    f"{self.url} has no /api/current endpoint. The TrueNAS tool needs TrueNAS 25.04 or later."
-                ) from error
-            raise TrueNasError(f"{self.url} refused the websocket (HTTP {status}).") from error
-        except (OSError, InvalidURI, WebSocketException, TimeoutError) as error:
-            raise TrueNasError(f"Couldn't connect to {self.url}: {error}") from error
-
-        try:
-            self._check_fingerprint()
-        except Exception:
-            self._ws.close()
-            self._ws = None
+            self._on_loop(self._async_open(), CONNECT_TIMEOUT_SEC + 5)
+        except BaseException:
+            self._stop_loop()
             raise
         self._closed_error = None
-        self._reader = threading.Thread(target=self._read_loop, name="truenas-reader", daemon=True)
-        self._reader.start()
 
         try:
             self._login()
@@ -201,11 +185,45 @@ class TrueNasConnection:
             )
         return self
 
-    def _check_fingerprint(self) -> None:
+    def _on_loop(self, coroutine, timeout: float):
+        """Runs `coroutine` on the connection's own thread and waits for it."""
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        try:
+            return future.result(timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
+
+    async def _async_open(self) -> None:
+        try:
+            ws = await ws_connect(
+                websocket_url(self.url),
+                ssl=pinned_tls.ssl_context_for(self._verify_ssl),
+                open_timeout=CONNECT_TIMEOUT_SEC,
+                max_size=MAX_MESSAGE_BYTES,
+            )
+        except InvalidStatus as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            if status in (404, 405):
+                raise TrueNasUnsupportedError(
+                    f"{self.url} has no /api/current endpoint. The TrueNAS tool needs TrueNAS 25.04 or later."
+                ) from error
+            raise TrueNasError(f"{self.url} refused the websocket (HTTP {status}).") from error
+        except (OSError, InvalidURI, WebSocketException, TimeoutError) as error:
+            raise TrueNasError(f"Couldn't connect to {self.url}: {error}") from error
+        try:
+            self._check_fingerprint(ws)
+        except Exception:
+            await ws.close()
+            raise
+        self._ws = ws
+        self._loop.create_task(self._read_loop(ws))
+
+    def _check_fingerprint(self, ws) -> None:
         if self._verify_ssl:
             return
-        sock = getattr(self._ws, "socket", None)
-        der = sock.getpeercert(binary_form=True) if sock is not None else None
+        ssl_object = ws.transport.get_extra_info("ssl_object") if ws.transport is not None else None
+        der = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
         if not der:
             raise TrueNasError(f"Couldn't read the certificate {self.url} presented.")
         actual = pinned_tls.fingerprint_of(der)
@@ -224,26 +242,36 @@ class TrueNasConnection:
 
     def close(self) -> None:
         ws, self._ws = self._ws, None
-        if ws is not None:
+        if ws is not None and self._loop is not None and self._loop.is_running():
             try:
-                ws.close()
+                self._on_loop(ws.close(), 5)
             except Exception:  # noqa: BLE001 - already gone is fine
                 pass
         self._fail_pending(TrueNasError("The connection was closed."))
+        self._stop_loop()
+
+    def _stop_loop(self) -> None:
+        loop, self._loop = self._loop, None
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(loop.stop)
+        if self._reader is not None and self._reader is not threading.current_thread():
+            self._reader.join(5)
+            if not loop.is_running():
+                loop.close()
 
     # -- Reader thread -------------------------------------------------------
 
-    def _read_loop(self) -> None:
-        ws = self._ws
+    async def _read_loop(self, ws) -> None:
         try:
-            while ws is not None:
-                raw = ws.recv()
+            async for raw in ws:
                 try:
                     message = json.loads(raw)
                 except (TypeError, ValueError):
                     continue
                 if isinstance(message, dict):
                     self._dispatch(message)
+            self._fail_pending(TrueNasError(f"The connection to {self.url} closed."))
         except ConnectionClosed:
             self._fail_pending(TrueNasError(f"The connection to {self.url} closed."))
         except Exception as error:  # noqa: BLE001 - reported to every waiting call
@@ -299,9 +327,12 @@ class TrueNasConnection:
                 raise self._closed_error
             request_id = next(self._ids)
             self._pending[request_id] = pending
+        if self._reader is threading.current_thread():
+            raise TrueNasError("Can't wait for a call from inside an event callback.")
+        payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": list(params)})
         try:
-            self._ws.send(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": list(params)}))
-        except (ConnectionClosed, OSError) as error:
+            self._on_loop(self._ws.send(payload), timeout)
+        except (ConnectionClosed, OSError, TimeoutError, AttributeError) as error:
             with self._lock:
                 self._pending.pop(request_id, None)
             raise TrueNasError(f"The connection to {self.url} closed.") from error
