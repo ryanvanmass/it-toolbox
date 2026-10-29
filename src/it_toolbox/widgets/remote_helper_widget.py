@@ -375,6 +375,12 @@ def fill_table(table: QTableWidget, rows: list[list], data: list | None = None) 
         for column, value in enumerate(values):
             table.setItem(row, column, table_item(value, data[row] if data and column == 0 else None))
     table.resizeColumnsToContents()
+    # resizeColumnsToContents() also sizes the last column to its contents,
+    # silently undoing make_table's stretch -- turn it back on.
+    header = table.horizontalHeader()
+    if header.stretchLastSection():
+        header.setStretchLastSection(False)
+        header.setStretchLastSection(True)
 
 
 def selected_data(table: QTableWidget):

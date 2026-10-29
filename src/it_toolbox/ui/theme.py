@@ -106,6 +106,20 @@ def color(name: str) -> QColor:
     return QColor(getattr(_current, name))
 
 
+def set_primary(button: QWidget, primary: bool = True) -> None:
+    """Fills a button with the accent color: the one main action of a
+    page or card (e.g. Save), as opposed to a dialog's default button."""
+    button.setProperty("primary", primary)
+    button.style().unpolish(button)
+    button.style().polish(button)
+
+
+def set_role(label: QWidget, role: str) -> None:
+    """Text roles the stylesheet sizes/colors: "heading", "subheading", or
+    "key" (the muted left column of a key/value grid)."""
+    label.setProperty("role", role)
+
+
 def set_tone(widget: QWidget, tone: str | None) -> None:
     """Gives a label (or any widget's text) a semantic color -- "muted",
     "danger", "warning", "success" or "accent" -- or back to the normal
@@ -229,6 +243,7 @@ QTreeView::item:selected, QListView::item:selected {{ background: {t.accent_soft
 QTableView {{ gridline-color: {t.raised}; }}
 QTableView::item {{ padding: 2px 6px; }}
 QTableView::item:selected {{ background: {t.accent_soft}; color: {t.text}; }}
+QHeaderView {{ qproperty-defaultAlignment: "AlignLeft|AlignVCenter"; }}
 QHeaderView::section {{ background: {t.window}; color: {t.muted}; border: none;
     border-bottom: 1px solid {t.border}; padding: 6px 8px; font-weight: 600; }}
 
@@ -270,6 +285,10 @@ QPushButton, QToolButton {{ background: {t.surface}; border: 1px solid {t.border
 QPushButton:hover, QToolButton:hover {{ background: {t.raised}; }}
 QPushButton:pressed, QToolButton:pressed {{ background: {t.border}; }}
 QPushButton:default {{ background: {t.accent}; color: {t.accent_text}; border-color: {t.accent}; }}
+QPushButton[primary="true"] {{ background: {t.accent}; color: {t.accent_text}; border-color: {t.accent}; }}
+QPushButton[primary="true"]:hover {{ background: {t.accent}; border-color: {t.text}; }}
+QPushButton[tone="danger"] {{ border-color: {t.danger}; }}
+QPushButton[tone="danger"]:hover {{ background: {t.danger}; color: {t.accent_text}; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {t.muted}; background: {t.window}; }}
 QToolButton {{ padding: 4px 8px; }}
 QToolButton[autoRaise="true"] {{ border: none; background: transparent; }}
@@ -277,7 +296,7 @@ QToolButton[autoRaise="true"]:hover {{ background: {t.raised}; }}
 
 /* Group boxes as cards */
 QGroupBox {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 10px;
-    margin-top: 26px; padding: 12px 10px 10px 10px; }}
+    margin-top: 26px; padding: 4px 6px 6px 6px; }}
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left;
     left: 4px; top: 4px; padding: 0 2px; font-weight: 600; font-size: 10.5pt; }}
 
@@ -319,6 +338,11 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QPlainTextEdit#Terminal {{ background: {TERMINAL_BACKGROUND}; color: {TERMINAL_FOREGROUND};
     border: none; border-radius: 0; padding: 4px 6px;
     selection-background-color: {t.accent}; selection-color: {t.accent_text}; }}
+
+/* Section headings and key/value grids inside cards */
+QLabel[role="heading"] {{ font-size: 13pt; font-weight: 600; }}
+QLabel[role="subheading"] {{ color: {t.muted}; }}
+QLabel[role="key"] {{ color: {t.muted}; }}
 
 /* Semantic text colors -- see set_tone() */
 *[tone="muted"] {{ color: {t.muted}; }}
