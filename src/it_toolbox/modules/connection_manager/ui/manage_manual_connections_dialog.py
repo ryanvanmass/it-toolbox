@@ -1,8 +1,8 @@
 """CRUD dialog for manually-configured RDP/SSH/SFTP/FTP connections — no
 account, project, or host discovery involved; the user just registers a
 host, port, and protocol directly. Mirrors manage_hosts_dialog.py's
-shape, plus (for SFTP/FTP only) an optional remembered password field
-shaped like manage_glinet_hosts_dialog.py's: this dialog never imports
+shape, plus (for SFTP/FTP only) an optional remembered password field:
+this dialog never imports
 core/settings's encryption helpers, and a blank password field when
 editing an existing connection means "keep the currently-stored
 password" — the caller (ConnectionManagerView) encrypts and persists

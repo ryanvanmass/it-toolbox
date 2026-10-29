@@ -9,7 +9,6 @@ from it_toolbox.modules.connection_manager.models import (
     SSH_PORT,
     GcpProject,
     GcsBucket,
-    GlinetHost,
     Instance,
     ManualConnection,
     QemuHost,
@@ -57,11 +56,9 @@ def _make_view(
     monkeypatch,
     qemu_hosts=(),
     manual_connections=(),
-    glinet_hosts=(),
     instances=(),
     buckets=(),
     qemu_available=True,
-    glinet_available=True,
     instance_ssh_username_overrides=None,
     instance_rdp_credentials=None,
 ):
@@ -69,22 +66,16 @@ def _make_view(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
     )
-    # The QEMU/GL.iNet roots only appear when their respective dependency
-    # (virsh / python-glinet) is available — default True here so existing
-    # tests (written before this gating existed) don't depend on whether
-    # this sandbox happens to have either installed.
+    # The QEMU root only appears when virsh is available — default True
+    # here so existing tests (written before this gating existed) don't
+    # depend on whether this sandbox happens to have it installed.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.qemu_client.is_available",
         lambda: qemu_available,
     )
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.glinet_client.is_available",
-        lambda: glinet_available,
-    )
-    # QEMU hosts, manual connections, and GL.iNet hosts are loaded
-    # unconditionally (independent of GCP sign-in) — stub all three out so
-    # tests don't depend on this machine's real qemu_hosts.json/
-    # manual_connections.json/glinet_hosts.json.
+    # QEMU hosts and manual connections are loaded unconditionally
+    # (independent of GCP sign-in) — stub both out so tests don't depend on
+    # this machine's real qemu_hosts.json/manual_connections.json.
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.settings.load_qemu_hosts",
         lambda: list(qemu_hosts),
@@ -92,10 +83,6 @@ def _make_view(
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.settings.load_manual_connections",
         lambda: list(manual_connections),
-    )
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.settings.load_glinet_hosts",
-        lambda: list(glinet_hosts),
     )
     # Same hermeticity reasoning as above — stub both the load (so a
     # stale real instance_ssh_username_overrides.json on this machine
@@ -170,10 +157,9 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
 
     view._apply_project_selection({"p1"})
 
-    # GCP, QEMU, Manual, and GL.iNet are independent top-level roots
-    # (QEMU/Manual/GL.iNet lists are empty here, but the roots themselves
-    # are always present).
-    assert view._tree.topLevelItemCount() == 4
+    # GCP, QEMU and Manual are independent top-level roots (QEMU/Manual
+    # lists are empty here, but the roots themselves are always present).
+    assert view._tree.topLevelItemCount() == 3
     gcp_category = view._tree.topLevelItem(0)
     assert gcp_category.text(0) == "GCP"
     assert gcp_category.isExpanded()
@@ -186,10 +172,6 @@ def test_projects_are_nested_under_a_gcp_category(qtbot, monkeypatch):
 
     manual_category = view._tree.topLevelItem(2)
     assert manual_category.text(0) == "Manual"
-
-    glinet_category = view._tree.topLevelItem(3)
-    assert glinet_category.text(0) == "GL.iNet"
-
 
 def test_projects_are_listed_alphabetically_case_insensitive(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
@@ -1160,10 +1142,10 @@ def test_account_changed_to_none_signs_out(qtbot, monkeypatch):
 
     assert view._account is None
     assert view._all_projects == []
-    # Only the GCP root goes away — QEMU/Manual/GL.iNet don't depend on
+    # Only the GCP root goes away — QEMU/Manual don't depend on
     # gcloud sign-in, so they must survive a sign-out (e.g. from Settings).
     roots = [view._tree.topLevelItem(i).text(0) for i in range(view._tree.topLevelItemCount())]
-    assert roots == ["QEMU", "Manual", "GL.iNet"]
+    assert roots == ["QEMU", "Manual"]
 
 
 def test_category_results_arriving_after_the_tree_was_cleared_are_dropped(qtbot, monkeypatch):
@@ -1622,7 +1604,7 @@ def test_populate_qemu_hosts_creates_lazy_loading_host_items(qtbot, monkeypatch)
     host = QemuHost(name="lab", uri="qemu+ssh://user@lab-host/system")
     view = _make_view(qtbot, monkeypatch, qemu_hosts=[{"name": host.name, "uri": host.uri}])
 
-    assert view._tree.topLevelItemCount() == 3  # gcloud unavailable, so QEMU + Manual + GL.iNet only
+    assert view._tree.topLevelItemCount() == 2  # gcloud unavailable, so QEMU + Manual only
     qemu_root = view._tree.topLevelItem(0)
     assert qemu_root.text(0) == "QEMU"
     assert qemu_root.childCount() == 1
@@ -1640,10 +1622,9 @@ def test_qemu_root_is_hidden_when_virsh_unavailable(qtbot, monkeypatch):
         monkeypatch,
         qemu_hosts=[{"name": host.name, "uri": host.uri}],
         qemu_available=False,
-        glinet_available=False,
     )
 
-    # gcloud/GL.iNet unavailable too, so Manual is the only root left.
+    # gcloud unavailable too, so Manual is the only root left.
     assert view._tree.topLevelItemCount() == 1
     assert view._tree.topLevelItem(0).text(0) == "Manual"
     assert view._qemu_root_item is None
@@ -3037,228 +3018,6 @@ def test_manual_gateway_connect_skips_host_key_checking_for_ssh(qtbot, monkeypat
 
 
 
-# -- GL.iNet hosts / dashboard ------------------------------------------------
-
-
-def test_populate_glinet_hosts_creates_items(qtbot, monkeypatch):
-    from it_toolbox.modules.connection_manager.ui.main_view import GLINET_HOST_ROLE
-
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
-    view = _make_view(
-        qtbot,
-        monkeypatch,
-        glinet_hosts=[
-            {"name": host.name, "url": host.url, "username": host.username,
-             "verify_ssl": host.verify_ssl, "password_encrypted": None}
-        ],
-    )
-
-    glinet_root = None
-    for i in range(view._tree.topLevelItemCount()):
-        if view._tree.topLevelItem(i).text(0) == "GL.iNet":
-            glinet_root = view._tree.topLevelItem(i)
-    assert glinet_root is not None
-    assert glinet_root.childCount() == 1
-    item = glinet_root.child(0)
-    assert item.text(0) == "Travel Router"
-    assert item.data(0, GLINET_HOST_ROLE) == host
-
-
-def test_glinet_root_is_hidden_when_pyglinet_unavailable(qtbot, monkeypatch):
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
-    view = _make_view(
-        qtbot,
-        monkeypatch,
-        glinet_hosts=[
-            {"name": host.name, "url": host.url, "username": host.username,
-             "verify_ssl": host.verify_ssl, "password_encrypted": None}
-        ],
-        glinet_available=False,
-    )
-
-    for i in range(view._tree.topLevelItemCount()):
-        assert view._tree.topLevelItem(i).text(0) != "GL.iNet"
-    assert view._glinet_root_item is None
-
-
-def test_glinet_root_disappears_if_pyglinet_becomes_unavailable_on_repopulate(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch, glinet_available=True)
-    assert view._glinet_root_item is not None
-
-    monkeypatch.setattr(
-        "it_toolbox.modules.connection_manager.ui.main_view.glinet_client.is_available",
-        lambda: False,
-    )
-    view._populate_glinet_hosts()
-
-    assert view._glinet_root_item is None
-    for i in range(view._tree.topLevelItemCount()):
-        assert view._tree.topLevelItem(i).text(0) != "GL.iNet"
-
-
-def test_glinet_hosts_roundtrip_through_settings(qtbot, monkeypatch):
-    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
-
-    saved = {}
-    monkeypatch.setattr(
-        main_view_module.settings, "save_glinet_hosts", lambda hosts: saved.setdefault("hosts", hosts)
-    )
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
-
-    view = _make_view(qtbot, monkeypatch)
-    view._save_glinet_hosts([host])
-
-    assert saved["hosts"] == [
-        {"name": "Travel Router", "url": "https://192.168.8.1/rpc", "username": "root",
-         "verify_ssl": False, "password_encrypted": None}
-    ]
-
-
-def test_load_glinet_hosts_decodes_base64_password(qtbot, monkeypatch):
-    import base64
-
-    view = _make_view(
-        qtbot,
-        monkeypatch,
-        glinet_hosts=[
-            {"name": "Travel Router", "url": "https://192.168.8.1/rpc", "username": "root",
-             "verify_ssl": False, "password_encrypted": base64.b64encode(b"ciphertext").decode()}
-        ],
-    )
-
-    (host,) = view._load_glinet_hosts()
-
-    assert host.password_encrypted == b"ciphertext"
-
-
-def test_opening_glinet_dashboard_uses_stored_decrypted_password(qtbot, monkeypatch):
-    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
-
-    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
-    monkeypatch.setattr(
-        main_view_module.settings, "decrypt_glinet_password", lambda encrypted: "routerpass"
-    )
-
-    captured = {}
-
-    class _FakeDashboard(QWidget):
-        def __init__(self, host, password):
-            super().__init__()
-            captured["host"] = host
-            captured["password"] = password
-
-    monkeypatch.setattr(main_view_module, "GlinetDashboardWidget", _FakeDashboard)
-
-    view = _make_view(qtbot, monkeypatch)
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc", password_encrypted=b"x")
-
-    view._open_glinet_dashboard(host)
-
-    assert view._tabs.count() == 1
-    assert view._tabs.tabText(0) == "Travel Router"
-    assert captured["password"] == "routerpass"
-
-
-def test_opening_glinet_dashboard_prompts_when_decryption_fails(qtbot, monkeypatch):
-    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
-
-    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
-
-    def raise_decrypt_error(encrypted):
-        raise main_view_module.settings.SecretDecryptionError("no key")
-
-    monkeypatch.setattr(main_view_module.settings, "decrypt_glinet_password", raise_decrypt_error)
-    monkeypatch.setattr(
-        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("typedpass", True))
-    )
-
-    captured = {}
-
-    class _FakeDashboard(QWidget):
-        def __init__(self, host, password):
-            super().__init__()
-            captured["password"] = password
-
-    monkeypatch.setattr(main_view_module, "GlinetDashboardWidget", _FakeDashboard)
-
-    view = _make_view(qtbot, monkeypatch)
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc", password_encrypted=b"x")
-
-    view._open_glinet_dashboard(host)
-
-    assert captured["password"] == "typedpass"
-
-
-def test_opening_glinet_dashboard_cancelled_prompt_opens_no_tab(qtbot, monkeypatch):
-    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
-
-    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
-    monkeypatch.setattr(
-        main_view_module.QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False))
-    )
-
-    view = _make_view(qtbot, monkeypatch)
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
-
-    view._open_glinet_dashboard(host)
-
-    assert view._tabs.count() == 0
-
-
-def test_opening_glinet_dashboard_warns_when_pyglinet_not_installed(qtbot, monkeypatch):
-    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
-
-    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", None)
-    warnings = []
-    monkeypatch.setattr(
-        main_view_module.QMessageBox,
-        "warning",
-        staticmethod(lambda *a, **k: warnings.append(a)),
-    )
-
-    view = _make_view(qtbot, monkeypatch)
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc")
-
-    view._open_glinet_dashboard(host)
-
-    assert len(warnings) == 1
-    assert view._tabs.count() == 0
-
-
-def test_double_clicking_a_glinet_host_opens_its_dashboard(qtbot, monkeypatch):
-    import it_toolbox.modules.connection_manager.ui.main_view as main_view_module
-    from it_toolbox.modules.connection_manager.ui.main_view import GLINET_HOST_ROLE
-
-    class _FakeDashboard(QWidget):
-        def __init__(self, host, password):
-            super().__init__()
-
-    monkeypatch.setattr(main_view_module.glinet_client, "GlInet", object())
-    monkeypatch.setattr(main_view_module.settings, "decrypt_glinet_password", lambda enc: "p")
-    monkeypatch.setattr(main_view_module, "GlinetDashboardWidget", _FakeDashboard)
-
-    host = GlinetHost(name="Travel Router", url="https://192.168.8.1/rpc", password_encrypted=b"x")
-    view = _make_view(qtbot, monkeypatch)
-    item = QTreeWidgetItem(["Travel Router"])
-    item.setData(0, GLINET_HOST_ROLE, host)
-
-    view._on_tree_item_double_clicked(item, 0)
-
-    assert view._tabs.count() == 1
-
-
-def test_glinet_dashboard_tab_closes_via_try_close_tab(qtbot, monkeypatch):
-    view = _make_view(qtbot, monkeypatch)
-    widget = QWidget()
-    view._owned_tab_widgets.add(widget)
-    index = view._tabs.addTab(widget, "Travel Router")
-    view._tabs.setCurrentIndex(index)
-
-    assert view.try_close_tab(widget) is True
-    assert view._tabs.count() == 0
-    assert widget not in view._owned_tab_widgets
-
-
 # -- Per-VM RDP credentials (GCP) --------------------------------------------
 
 _VM_KEY = ("p1", "us-central1-a", "vm-1")
@@ -3657,24 +3416,6 @@ def test_instance_menu_offers_rdp_credentials_for_windows_and_linux_alike(qtbot,
     # OS-specific Set Password…/Upload Public Key… gating is unchanged.
     assert "RDP Credentials…" in windows_texts and "Upload Public Key…" not in windows_texts
     assert "RDP Credentials…" in linux_texts and "Set Password…" not in linux_texts
-
-
-def test_search_filters_glinet_hosts_and_survives_repopulating(qtbot, monkeypatch):
-    hosts = [
-        {"name": "Travel Router", "url": "https://192.168.8.1/rpc", "username": "root",
-         "verify_ssl": True, "password_encrypted": None},
-        {"name": "Office Router", "url": "https://10.0.0.1/rpc", "username": "root",
-         "verify_ssl": True, "password_encrypted": None},
-    ]
-    view = _make_view(qtbot, monkeypatch, glinet_hosts=hosts)
-    view._search_box.setText("travel")
-
-    view._populate_glinet_hosts()  # e.g. after editing hosts
-
-    root = view._glinet_root_item
-    assert root.isHidden() is False
-    assert root.child(0).isHidden() is False
-    assert root.child(1).isHidden() is True
 
 
 def test_project_menu_opens_the_project_in_the_gcp_console(qtbot, monkeypatch):
