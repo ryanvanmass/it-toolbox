@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from PySide6.QtWidgets import QMenu, QTreeWidgetItem, QWidget
 
-from it_toolbox.modules.infrastructure.hosts import InfrastructureHost
+from it_toolbox.core.infrastructure_hosts import InfrastructureHost
 
 if TYPE_CHECKING:
     from it_toolbox.modules.infrastructure.ui.main_view import InfrastructureView

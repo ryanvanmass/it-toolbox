@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from it_toolbox.core import session_launcher, settings
-from it_toolbox.modules.infrastructure.hosts import InfrastructureHost
+from it_toolbox.core.infrastructure_hosts import InfrastructureHost
 from it_toolbox.modules.infrastructure.product import InfrastructureProduct
 from it_toolbox.modules.infrastructure.products import PRODUCT_CLASSES
 from it_toolbox.modules.infrastructure.ui.host_dialog import HostDialog

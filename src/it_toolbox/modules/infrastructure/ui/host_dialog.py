@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from it_toolbox.core import async_utils, pinned_tls
-from it_toolbox.modules.infrastructure.hosts import InfrastructureHost, normalize_url
+from it_toolbox.core.infrastructure_hosts import InfrastructureHost, normalize_url
 from it_toolbox.modules.infrastructure.product import InfrastructureProduct
 
 

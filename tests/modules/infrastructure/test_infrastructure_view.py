@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QDialog, QInputDialog, QMenu, QMessageBox, QWidget
 
 from it_toolbox.core import async_utils, pinned_tls, settings
 from it_toolbox.modules.infrastructure import products
-from it_toolbox.modules.infrastructure.hosts import InfrastructureHost, normalize_url
+from it_toolbox.core.infrastructure_hosts import InfrastructureHost, normalize_url
 from it_toolbox.modules.infrastructure.product import InfrastructureProduct
 from it_toolbox.modules.infrastructure.ui import host_dialog, main_view
 from it_toolbox.modules.infrastructure.ui.host_dialog import HostDialog
