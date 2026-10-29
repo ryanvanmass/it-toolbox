@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QW
 from it_toolbox.core.rdp.freerdp_client import KEYBOARD_LAYOUT_ENGLISH_US
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionWorker
 from it_toolbox.core.rdp.scancodes import SCANCODES
+from it_toolbox.widgets.rdp_gpu_view import RdpGpuView, gpu_rendering_usable
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class RdpWidget(QWidget):
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         shared_folder: str | None = None,
         graphics_pipeline: bool = False,
+        gpu_rendering: bool = True,
         failure_detail: Callable[[], str | None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -117,6 +119,16 @@ class RdpWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._status_label)
+
+        # Draws the frame on the GPU when one is usable (see rdp_gpu_view.py);
+        # until the first frame, after a failure, or once it reports itself
+        # unavailable, this widget paints with QPainter instead. Outside the
+        # layout: it always covers the whole widget, sized in resizeEvent.
+        self._gpu_view: RdpGpuView | None = None
+        if gpu_rendering and gpu_rendering_usable():
+            self._gpu_view = RdpGpuView(self._scaled_image_rect, self._on_gpu_frame_rendered, self)
+            self._gpu_view.unavailable.connect(self._on_gpu_unavailable)
+            self._gpu_view.hide()
 
         # Debounced so a window drag doesn't fire a resize request per
         # pixel — restarted on every resizeEvent, only actually sent once
@@ -163,7 +175,27 @@ class RdpWidget(QWidget):
     def _on_frame_ready(self, pixels: bytes, width: int, height: int, stride: int) -> None:
         self._frame_bytes = pixels  # QImage below wraps this buffer without copying it
         self._image = QImage(self._frame_bytes, width, height, stride, QImage.Format.Format_RGB32)
+        if self._gpu_view is not None and not self._failure_shown:
+            self._gpu_view.set_image(self._image)
+            if self._gpu_view.isHidden():
+                self._gpu_view.setGeometry(self.rect())
+                self._gpu_view.show()
+            return
         self._frame_unpainted = True
+        self.update()
+
+    def _on_gpu_frame_rendered(self) -> None:
+        self._worker.frame_consumed()
+
+    def _on_gpu_unavailable(self, reason: str) -> None:
+        view, self._gpu_view = self._gpu_view, None
+        if view is None:
+            return
+        view.hide()
+        view.deleteLater()
+        # Whatever frame the view was given may never have been drawn, and
+        # the worker is waiting for that before sending another.
+        self._frame_unpainted = self._image is not None
         self.update()
 
     def _emit_finished_once(self) -> None:
@@ -174,6 +206,8 @@ class RdpWidget(QWidget):
     def _show_failure(self, message: str) -> None:
         message = self._failure_detail() or message
         self._failure_shown = True
+        if self._gpu_view is not None:
+            self._gpu_view.hide()  # would cover the status label
         self._status_label.setText(f"Connection failed: {message}")
         self._status_label.show()
         # main_view.py tears this tab down as soon as `finished` fires
@@ -207,7 +241,7 @@ class RdpWidget(QWidget):
         return QRect(QPoint(x, y), scaled)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override signature
-        if self._image is None:
+        if self._image is None or (self._gpu_view is not None and self._gpu_view.isVisible()):
             return
         painter = QPainter(self)
         target = self._scaled_image_rect()
@@ -234,6 +268,8 @@ class RdpWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        if self._gpu_view is not None:
+            self._gpu_view.setGeometry(self.rect())
         # A fixed desktop_size never changes after connect — window
         # resizes just restretch the existing image (see paintEvent), no
         # server round trip needed or wanted.
