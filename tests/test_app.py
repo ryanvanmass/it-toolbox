@@ -111,7 +111,8 @@ def test_module_list_height_is_capped_to_fit_its_rows(qtbot, monkeypatch):
     window = MainWindow()
     qtbot.addWidget(window)
 
-    row_height = window._module_list.sizeHintForRow(0)
+    # +2 per row: the theme's 1px item margins (see MainWindow).
+    row_height = window._module_list.sizeHintForRow(0) + 2
     frame = 2 * window._module_list.frameWidth()
     expected = row_height * window._module_list.count() + frame
 
@@ -133,9 +134,9 @@ def test_session_tabs_hidden_and_stack_stretched_for_a_module_without_tabs(qtbot
     assert window._modules[settings_row].display_name == "Settings"
     window._module_list.setCurrentRow(settings_row)
 
-    assert window._session_tabs.isHidden() is True
+    assert window._session_area.isHidden() is True
     assert window._content_layout.stretch(0) == 1  # self._stack
-    assert window._content_layout.stretch(1) == 0  # self._session_tabs
+    assert window._content_layout.stretch(1) == 0  # self._session_area
 
 
 def test_session_tabs_stays_visible_and_stretched_for_a_module_with_tabs(qtbot, monkeypatch):
@@ -149,9 +150,36 @@ def test_session_tabs_stays_visible_and_stretched_for_a_module_with_tabs(qtbot, 
     window._module_list.setCurrentRow(window._module_list.count() - 1)
     window._module_list.setCurrentRow(0)
 
-    assert window._session_tabs.isHidden() is False
+    assert window._session_area.isHidden() is False
     assert window._content_layout.stretch(0) == 0  # self._stack
-    assert window._content_layout.stretch(1) == 1  # self._session_tabs
+    assert window._content_layout.stretch(1) == 1  # self._session_area
+
+
+def test_empty_state_shows_until_a_session_tab_opens(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._session_area.currentWidget() is window._empty_state
+    assert "Connection Manager" in window._empty_state._title.text()
+
+    tab = QWidget()
+    window._session_tabs.addTab(tab, "session")
+    assert window._session_area.currentWidget() is window._session_tabs
+
+    window._session_tabs.removeTab(0)
+    assert window._session_area.currentWidget() is window._empty_state
+
+
+def test_every_module_has_a_bundled_sidebar_icon(qtbot, monkeypatch):
+    _disable_external_tools(monkeypatch)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    for row in range(window._module_list.count()):
+        assert not window._module_list.item(row).icon().isNull(), window._modules[row].id
 
 
 def test_stack_size_hint_reflects_only_the_current_page(qtbot, monkeypatch):

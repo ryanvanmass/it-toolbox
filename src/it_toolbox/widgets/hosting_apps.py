@@ -7,6 +7,9 @@ SiteDetail it belongs to (its connection, busy runner and show_site)."""
 
 from __future__ import annotations
 
+import html
+import re
+
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -25,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import hosting_manager as hm
+from it_toolbox.ui import theme
 from it_toolbox.widgets import hosting_dialogs as dialogs
 from it_toolbox.widgets.hosting_import import ZabbixImportDialog
 from it_toolbox.widgets.remote_helper_widget import (
@@ -41,6 +45,33 @@ def _label() -> QLabel:
     label.setWordWrap(True)
     label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     return label
+
+
+_KEY_LINE = re.compile(r"^([A-Z][\w .'-]{0,24}): (.+)$")
+
+
+def info_html(lines: list[str]) -> str:
+    """A card's facts as rich text: runs of "Key: value" lines become a
+    two-column grid with muted keys, anything else a paragraph."""
+    muted = theme.color("muted").name()
+    parts: list[str] = []
+    rows: list[str] = []
+
+    def flush() -> None:
+        if rows:
+            parts.append(f'<table cellspacing="0" cellpadding="1">{"".join(rows)}</table>')
+            rows.clear()
+
+    for line in lines:
+        match = _KEY_LINE.match(line)
+        if match:
+            key, value = (html.escape(part) for part in match.groups())
+            rows.append(f'<tr><td style="color:{muted}; padding-right:16px">{key}</td><td>{value}</td></tr>')
+        else:
+            flush()
+            parts.append(f'<p style="margin-top:4px">{html.escape(line)}</p>')
+    flush()
+    return "".join(parts)
 
 
 def _button(text: str, slot) -> QPushButton:
@@ -120,7 +151,7 @@ class RepoCard(_Card):
         self.sftp: dict = {}
         self.info = _label()
         self.problem = _label()
-        self.problem.setStyleSheet("color: #c9190b;")
+        theme.set_tone(self.problem, "danger")
         self.packages = make_table(["File", "Type", "Size", "Added"])
         self.waiting = _label()
         layout = QVBoxLayout(self)
@@ -154,7 +185,7 @@ class RepoCard(_Card):
         commands = repo.get("commands") or {}
         rpms = sum(1 for p in repo.get("packages") or [] if p.get("kind") == "rpm")
         debs = len(repo.get("packages") or []) - rpms
-        self.info.setText("\n".join([
+        self.info.setText(info_html([
             f"dnf: {commands.get('dnf', '')}",
             f"apt: {commands.get('apt', '')}",
             f"Signing key: {repo.get('fingerprint', '')}  ({repo.get('key_url', '')})",
@@ -245,11 +276,12 @@ class ForgejoCard(_Card):
         super().__init__("Forgejo", detail)
         self.info = _label()
         self.warning = _label()
-        self.warning.setStyleSheet("color: #b35c00;")
+        theme.set_tone(self.warning, "warning")
         self.update_button = _button("Update…", self._update)
         self.admin_button = _button("Create Admin…", self._create_admin)
         self.password_button = _button("New Admin Password…", self._new_password)
         self.runners = make_table(["Runner", "Labels", "Jobs at once", "Status"])
+        self.runners.setMaximumHeight(160)
         self.add_runner_button = _button("Add Runner…", self._add_runner)
         self.no_runners = _label()
         layout = QVBoxLayout(self)
@@ -276,7 +308,7 @@ class ForgejoCard(_Card):
         ssh = f"ssh://git@{site.get('primary_domain')}:{app.get('ssh_port')}/OWNER/REPO.git"
         admin = (f"{base}{app.get('admin_path') or ''} ({app['admin_user']})" if app.get("admin_user")
                  else "No admin user yet")
-        self.info.setText("\n".join([
+        self.info.setText(info_html([
             f"Version: {app.get('version') or 'not known yet'}",
             f"Admin: {admin}",
             f"Git over SSH: {ssh}",
@@ -413,7 +445,7 @@ class ZabbixCard(_Card):
         self.status: dict = {}
         self.info = _label()
         self.importing = _label()
-        self.importing.setStyleSheet("color: #0066cc;")
+        theme.set_tone(self.importing, "accent")
         self.update_button = _button("Update…", self._update)
         self.admin_button = _button("Set Admin Password…", self._set_admin)
         self.password_button = _button("New Password…", self._new_password)
@@ -479,7 +511,7 @@ class ZabbixCard(_Card):
             lines.append(f"Imported from {imported.get('host')} (Zabbix "
                          f"{imported.get('server_version') or imported.get('release')}), {imported.get('at')}"
                          + ("" if imported.get("history") else " without history"))
-        self.info.setText("\n".join(lines))
+        self.info.setText(info_html(lines))
         running = bool(status.get("import_running"))
         self.importing.setText("An import is running. Open the import to see its progress.")
         self.importing.setVisible(running)

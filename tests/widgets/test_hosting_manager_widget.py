@@ -1225,3 +1225,15 @@ def test_cloudpanel_import_choices(qtbot):
     assert dialog.sites_table.cellWidget(0, 0).isChecked()
     assert dialog.chosen()[0] == {"id": 1, "name": "shop", "php_version": "8.3"}
     assert "Not copied (no equivalent here):\n  • Node.js version" in hosting_import.plan_details(scan["sites"][1])
+
+
+def test_detail_shows_a_placeholder_until_a_site_is_picked(qtbot):
+    widget = _make(qtbot)
+    detail = widget.detail
+
+    assert detail.pages.currentWidget() is detail.placeholder
+    _select(qtbot, widget, 0)
+    assert detail.pages.currentWidget() is detail.content
+    assert "Files: /home/blog/htdocs/blog.com" in detail.overview_text()
+    assert detail.heading.text() == "blog.com"
+    assert "WordPress" in detail.subheading.text()

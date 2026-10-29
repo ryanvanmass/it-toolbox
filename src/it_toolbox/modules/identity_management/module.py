@@ -7,6 +7,8 @@ from it_toolbox.modules.identity_management.ui.main_view import IdentityManageme
 class IdentityManagementModule(ToolModule):
     id = "identity_management"
     display_name = "Identity Management"
+    icon_name = "users"
+    empty_hint = "Choose a provider in the sidebar."
     uses_shared_tabs = False
 
     def __init__(self) -> None:

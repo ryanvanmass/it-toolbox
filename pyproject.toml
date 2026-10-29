@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "it-toolbox"
-version = "0.3.12"
+version = "0.3.13-beta.1"
 description = "Cross-platform IT tooling desktop app — starting with a GCP IAP connection manager for RDP/SSH."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -52,4 +52,6 @@ where = ["src"]
 # The Settings page's "Fetch FreeRDP DLLs" button runs scripts/*.ps1 from
 # here, so it must ship in the wheel too (the Windows installer has no
 # repo checkout to fall back on).
-"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "icons/*.icns", "scripts/*.ps1", "proftpd/*"]
+# shaders/*.qsb: the RDP GPU view's precompiled shaders (widgets/rdp_gpu_view.py).
+"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "icons/*.icns", "icons/ui/*.svg", "scripts/*.ps1", "proftpd/*",
+                          "shaders/*.qsb"]

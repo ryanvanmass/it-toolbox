@@ -1,9 +1,10 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import settings
 from it_toolbox.modules import ToolModule
 from it_toolbox.modules.registry import load_modules
+from it_toolbox.ui import theme
 from it_toolbox.widgets.manage_automations_dialog import SHELL_ANY, Automation, display_name
 from it_toolbox.widgets.terminal_widget import TerminalWidget
 
@@ -39,6 +41,9 @@ except (ImportError, OSError):
 # so this still picks per-platform rather than standardizing on one.
 _ICON_NAME = "it-toolbox.ico" if sys.platform == "win32" else "it-toolbox.svg"
 _ICON_PATH = Path(__file__).resolve().parent / "resources" / "icons" / _ICON_NAME
+# The sidebar header draws the logo itself (rich text, not window chrome),
+# so the SVG works on every platform there.
+_BRAND_ICON_PATH = _ICON_PATH.with_name("it-toolbox.svg")
 
 # Which declared automation shells fit each kind of session tab -- see
 # _build_session_tab_menu.
@@ -65,6 +70,29 @@ class _CurrentPageStackedWidget(QStackedWidget):
     def minimumSizeHint(self):
         widget = self.currentWidget()
         return widget.minimumSizeHint() if widget is not None else super().minimumSizeHint()
+
+
+class _EmptyState(QWidget):
+    """What the session-tab pane shows while nothing is open: the current
+    module's icon and a one-line hint pointing at its sidebar."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("EmptyState")
+        layout = QVBoxLayout(self)
+        layout.addStretch(1)
+        self._icon = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self._title = QLabel(alignment=Qt.AlignmentFlag.AlignCenter, objectName="EmptyTitle")
+        self._hint = QLabel(alignment=Qt.AlignmentFlag.AlignCenter, objectName="EmptyHint")
+        self._hint.setWordWrap(True)
+        for label in (self._icon, self._title, self._hint):
+            layout.addWidget(label)
+        layout.addStretch(2)
+
+    def set_module(self, module: ToolModule) -> None:
+        self._icon.setPixmap(theme.icon(module.icon_name, "muted").pixmap(48, 48))
+        self._title.setText(f"No open {module.display_name} tabs")
+        self._hint.setText(module.empty_hint)
 
 
 class MainWindow(QMainWindow):
@@ -94,6 +122,8 @@ class MainWindow(QMainWindow):
         self._modules: list[ToolModule] = load_modules(self._session_tabs)
 
         self._module_list = QListWidget()
+        self._module_list.setObjectName("ModuleNav")
+        self._module_list.setIconSize(QSize(18, 18))
         self._module_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._module_list.customContextMenuRequested.connect(self._on_module_context_menu)
         # Each module's own navigation content (e.g. a resource browser
@@ -106,10 +136,27 @@ class MainWindow(QMainWindow):
         self._stack = _CurrentPageStackedWidget()
 
         sidebar = QWidget()
+        sidebar.setObjectName("Sidebar")
+        # Styled background so the #Sidebar rule in ui/theme.py paints the
+        # whole column, not just its children.
+        sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
+        brand = QLabel("IT Toolbox")
+        brand.setObjectName("SidebarBrand")
+        if _BRAND_ICON_PATH.is_file():
+            brand.setText(
+                f'<img src="{_BRAND_ICON_PATH.as_posix()}" width="22" height="22" '
+                'style="vertical-align: middle"/>&nbsp;&nbsp;IT Toolbox'
+            )
+        sidebar_layout.addWidget(brand)
         sidebar_layout.addWidget(self._module_list)
+        divider = QWidget()
+        divider.setObjectName("SidebarDivider")
+        divider.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        divider.setFixedHeight(1)
+        sidebar_layout.addWidget(divider)
         sidebar_layout.addWidget(self._sidebar_extras, 1)
 
         for module in self._modules:
@@ -123,15 +170,33 @@ class MainWindow(QMainWindow):
         # claims a chunk of the sidebar column no matter how few modules
         # are registered, leaving a dead gap above self._sidebar_extras.
         if self._module_list.count():
-            row_height = self._module_list.sizeHintForRow(0)
+            # Polish first so the theme stylesheet's item padding is
+            # already part of sizeHintForRow().
+            self._module_list.ensurePolished()
+            # +2 per row for the stylesheet's 1px item margins, which
+            # sizeHintForRow() leaves out.
+            row_height = self._module_list.sizeHintForRow(0) + 2
             frame = 2 * self._module_list.frameWidth()
-            self._module_list.setMaximumHeight(row_height * self._module_list.count() + frame)
+            self._module_list.setFixedHeight(row_height * self._module_list.count() + frame)
+            self._module_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Placeholder shown instead of the session-tab pane while it has no
+        # tabs, rather than a large blank frame.
+        self._empty_state = _EmptyState()
+        self._session_area = QStackedWidget()
+        self._session_area.addWidget(self._empty_state)
+        self._session_area.addWidget(self._session_tabs)
+        self._session_tabs.setDocumentMode(True)
 
         content = QWidget()
         self._content_layout = QVBoxLayout(content)
-        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setContentsMargins(12, 10, 12, 0)
+        self._content_layout.setSpacing(8)
         self._content_layout.addWidget(self._stack)
-        self._content_layout.addWidget(self._session_tabs, 1)
+        self._content_layout.addWidget(self._session_area, 1)
+        self._session_tabs.currentChanged.connect(self._update_session_area)
+        self._update_session_area()
+        theme.events.changed.connect(self._refresh_icons)
 
         self._module_list.currentRowChanged.connect(self._stack.setCurrentIndex)
         self._module_list.currentRowChanged.connect(self._sidebar_extras.setCurrentIndex)
@@ -140,6 +205,7 @@ class MainWindow(QMainWindow):
             self._module_list.setCurrentRow(0)
 
         splitter = QSplitter()
+        splitter.setHandleWidth(1)
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
         splitter.setStretchFactor(1, 1)
@@ -154,7 +220,8 @@ class MainWindow(QMainWindow):
         # its stretch to self._stack instead lets that module's own view
         # use the space, rather than leaving a big empty pane below it.
         module = self._modules[index]
-        self._session_tabs.setVisible(module.uses_shared_tabs)
+        self._session_area.setVisible(module.uses_shared_tabs)
+        self._empty_state.set_module(module)
         self._content_layout.setStretch(0, 0 if module.uses_shared_tabs else 1)
         self._content_layout.setStretch(1, 1 if module.uses_shared_tabs else 0)
         # Qt caches sizeHint()/minimumSizeHint() and only re-queries a
@@ -162,6 +229,15 @@ class MainWindow(QMainWindow):
         # pages wouldn't pick up _CurrentPageStackedWidget's now-different
         # sizeHint() for the new current page.
         self._stack.updateGeometry()
+
+    def _update_session_area(self, _index: int = -1) -> None:
+        has_tabs = self._session_tabs.count() > 0
+        self._session_area.setCurrentWidget(self._session_tabs if has_tabs else self._empty_state)
+
+    def _refresh_icons(self) -> None:
+        for row, module in enumerate(self._modules):
+            self._module_list.item(row).setIcon(module.icon)
+        self._empty_state.set_module(self._modules[max(self._module_list.currentRow(), 0)])
 
     def _on_module_context_menu(self, pos) -> None:
         item = self._module_list.itemAt(pos)

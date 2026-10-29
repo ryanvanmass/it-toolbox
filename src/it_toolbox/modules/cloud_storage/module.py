@@ -7,6 +7,8 @@ from it_toolbox.modules.cloud_storage.ui.main_view import CloudStorageView
 class CloudStorageModule(ToolModule):
     id = "cloud_storage"
     display_name = "Cloud Storage"
+    icon_name = "cloud"
+    empty_hint = "Choose a remote in the sidebar to browse its files."
 
     def __init__(self, tabs: QTabWidget) -> None:
         self._tabs = tabs

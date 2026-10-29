@@ -80,6 +80,7 @@ from PySide6.QtWidgets import (
 )
 
 from it_toolbox.core import async_utils, ftp_client
+from it_toolbox.ui import theme
 from it_toolbox.widgets.bucket_browser_widget import format_size
 
 ENTRY_ROLE = Qt.ItemDataRole.UserRole
@@ -257,7 +258,10 @@ class FtpBrowserWidget(QWidget):
         self._transfer_signals.progress.connect(self._on_transfer_progress)
 
         self._status_label = QLabel(f"Connecting to {display_name}…")
-        self._status_label.setStyleSheet("color: gray; font-style: italic;")
+        theme.set_tone(self._status_label, "muted")
+        status_font = self._status_label.font()
+        status_font.setItalic(True)
+        self._status_label.setFont(status_font)
 
         self._local_pane = _FilePaneWidget("Local", show_permissions=True)
         self._local_pane.path_submitted.connect(self._navigate_local)

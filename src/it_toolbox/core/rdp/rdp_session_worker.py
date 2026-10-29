@@ -54,6 +54,7 @@ class RdpSessionWorker:
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         shared_folder: str | None = None,
         graphics_pipeline: bool = False,
+        h264: bool = False,
     ) -> None:
         self._host = host
         self._port = port
@@ -64,6 +65,7 @@ class RdpSessionWorker:
         self._keyboard_layout = keyboard_layout
         self._shared_folder = shared_folder
         self._graphics_pipeline = graphics_pipeline
+        self._h264 = h264
         self.signals = RdpSessionSignals()
         self._session = FreeRdpSession()
         self._thread: threading.Thread | None = None
@@ -184,6 +186,7 @@ class RdpSessionWorker:
                 keyboard_layout=self._keyboard_layout,
                 shared_folder=self._shared_folder,
                 graphics_pipeline=self._graphics_pipeline,
+                h264=self._h264,
             )
         except Exception as exc:  # noqa: BLE001 - see comment below
             # Deliberately broader than FreeRdpError: an uncaught exception

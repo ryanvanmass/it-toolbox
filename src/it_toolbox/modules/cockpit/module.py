@@ -7,6 +7,8 @@ from it_toolbox.modules.cockpit.ui.main_view import CockpitView
 class CockpitModule(ToolModule):
     id = "cockpit"
     display_name = "Cockpit"
+    icon_name = "server"
+    empty_hint = "Choose a machine in the sidebar to manage it."
 
     def __init__(self, tabs: QTabWidget) -> None:
         self._tabs = tabs

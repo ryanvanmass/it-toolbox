@@ -20,8 +20,10 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -29,8 +31,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
+    QStackedLayout,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -38,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import hosting_manager as hm
+from it_toolbox.ui import theme
 from it_toolbox.widgets import hosting_dialogs as dialogs
 from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.hosting_apps import ForgejoCard, RepoCard, ZabbixCard
@@ -143,17 +148,16 @@ class SiteDetail(QWidget):
         self.vhost: dict | None = None
 
         self.heading = QLabel()
-        font = self.heading.font()
-        font.setPointSize(font.pointSize() + 3)
-        font.setBold(True)
-        self.heading.setFont(font)
+        theme.set_role(self.heading, "heading")
+        self.subheading = QLabel()
+        theme.set_role(self.subheading, "subheading")
         self.disable_button = _button("Disable Site…", self._toggle_disabled)
         self.disabled_note = QLabel(
             "This site is disabled. Visitors get a page saying the site is disabled, and its PHP pool, app or "
             "container, cron jobs and Nextcloud Office are stopped. Its files, databases, SFTP login and backups "
             "are kept.")
         self.disabled_note.setWordWrap(True)
-        self.disabled_note.setStyleSheet("color: #b35c00;")
+        theme.set_tone(self.disabled_note, "warning")
         self.storage_note = QLabel()
         self.storage_note.setWordWrap(True)
         self.storage_dismiss = _button("Dismiss", self._dismiss_storage)
@@ -183,16 +187,31 @@ class SiteDetail(QWidget):
         self.logs_index = self.tabs.addTab(self._build_logs_tab(), "Logs")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        titles.addWidget(self.heading)
+        titles.addWidget(self.subheading)
         header = QHBoxLayout()
-        header.addWidget(self.heading, 1)
-        header.addWidget(self.disable_button)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        header.addLayout(titles, 1)
+        header.addWidget(self.disable_button, 0, Qt.AlignmentFlag.AlignTop)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 0, 0, 0)
         layout.addLayout(header)
         layout.addWidget(self.disabled_note)
         layout.addWidget(self.storage_row)
         layout.addWidget(self.tabs, 1)
-        self.setEnabled(False)
+
+        # Shown until a site is picked, instead of every site type's
+        # (empty, disabled) settings at once.
+        self.placeholder = QLabel("Select a site on the left to see and change its settings.")
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setWordWrap(True)
+        theme.set_tone(self.placeholder, "muted")
+        self.pages = QStackedLayout(self)
+        self.pages.addWidget(self.placeholder)
+        self.pages.addWidget(content)
+        self.content = content
 
     @property
     def connection(self) -> hm.HostingConnection:
@@ -209,9 +228,10 @@ class SiteDetail(QWidget):
         self.stop()
         self.site = None
         self.heading.setText("Select a site")
+        self.subheading.clear()
         self.disabled_note.hide()
         self.storage_row.hide()
-        self.setEnabled(False)
+        self.pages.setCurrentWidget(self.placeholder)
 
     def stop(self) -> None:
         """Stops every poll (on clear and before a reconnect)."""
@@ -227,12 +247,15 @@ class SiteDetail(QWidget):
         """Shows a fresh site-get reply, and passes it on to the list."""
         previous = self.name
         self.site = site
-        self.setEnabled(True)
+        self.pages.setCurrentWidget(self.content)
         disabled = bool(site.get("disabled"))
-        self.heading.setText(
-            f"{site.get('primary_domain') or site['name']} — {hm.SITE_TYPE_LABELS.get(site['type'], site['type'])}"
-            + (" (disabled)" if disabled else "")
-        )
+        self.heading.setText(site.get("primary_domain") or site["name"])
+        subtitle = [hm.SITE_TYPE_LABELS.get(site["type"], site["type"])]
+        if (site.get("application") or {}).get("name"):
+            subtitle.append(hm.APPLICATION_LABELS.get(site["application"]["name"], site["application"]["name"]))
+        if disabled:
+            subtitle.append("disabled")
+        self.subheading.setText("  ·  ".join(subtitle))
         self.disable_button.setText("Enable Site" if disabled else "Disable Site…")
         self._show_settings(site)
         self._show_https(site)
@@ -311,17 +334,17 @@ class SiteDetail(QWidget):
             step = job.get("step") or "Starting"
             progress = f" ({job['progress']}%)" if job.get("progress") is not None else ""
             self.storage_note.setText(f"Moving the files to {job.get('to')}: {step}{progress}")
-            self.storage_note.setStyleSheet("")
+            theme.set_tone(self.storage_note, None)
         elif job.get("state") == "failed":
             self.storage_note.setText(f"The files could not be moved: {job.get('failure')}")
-            self.storage_note.setStyleSheet("color: #c9190b;")
+            theme.set_tone(self.storage_note, "danger")
         else:
             result = job.get("result") or {}
             lines = [f"The files were moved to {job.get('to')}.", *(result.get("problems") or [])]
             if result.get("old_copy"):
                 lines.append(f"The old copy is still in {result['old_copy']}.")
             self.storage_note.setText("\n".join(lines))
-            self.storage_note.setStyleSheet("color: #b35c00;" if result.get("problems") else "")
+            theme.set_tone(self.storage_note, "warning" if result.get("problems") else None)
         if job:
             self.storage_row.show()
             self.storage_dismiss.setVisible(not running)
@@ -358,9 +381,11 @@ class SiteDetail(QWidget):
 
     def _build_settings_tab(self) -> QWidget:
         page = QWidget()
-        self.info = QLabel()
-        self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.info.setWordWrap(True)
+        # Key/value grid of the site's paths and facts, filled by _show_settings.
+        self.overview = QGridLayout()
+        self.overview.setHorizontalSpacing(16)
+        self.overview.setVerticalSpacing(4)
+        self.overview.setColumnStretch(1, 1)
 
         self.domains = QPlainTextEdit()
         self.domains.setFixedHeight(70)
@@ -394,6 +419,7 @@ class SiteDetail(QWidget):
         self.settings_form.addRow("Start command:", self.app_command)
         self.settings_form.addRow("Environment:", self.app_env)
         save = _button("Save Settings", self._save_settings)
+        theme.set_primary(save)
 
         self.app_state = QLabel()
         self.app_buttons = {
@@ -432,41 +458,59 @@ class SiteDetail(QWidget):
         self.zabbix_card = ZabbixCard(self)
 
         delete = _button("Delete Site…", lambda: self.manager.delete_site(self.site))
+        theme.set_tone(delete, "danger")
         self.move_button = _button("Move Files…", self._move_files)
 
+        overview_box = _group("Overview", self.overview, _row(self.move_button))
+        settings_box = _group("Site Settings", self.settings_form, _row(save))
+        delete_note = QLabel("Removes the site's files, databases, SFTP login, certificates and vhost.")
+        delete_note.setWordWrap(True)
+        theme.set_tone(delete_note, "muted")
+        danger_row = QHBoxLayout()
+        danger_row.addWidget(delete_note, 1)
+        danger_row.addWidget(delete)
+        danger_box = _group("Danger Zone", danger_row)
+
         inner = QVBoxLayout(page)
-        inner.addLayout(_row(self.info, self.move_button))
+        inner.setSpacing(12)
+        inner.addWidget(overview_box)
         inner.addWidget(self.app_box)
         inner.addWidget(self.forgejo_card)
         inner.addWidget(self.zabbix_card)
         inner.addWidget(self.application_box)
         inner.addWidget(self.repo_card)
-        inner.addLayout(self.settings_form)
-        inner.addLayout(_row(save, delete))
+        inner.addWidget(settings_box)
+        inner.addWidget(danger_box)
         inner.addStretch(1)
-        return page
+        # The page grows with the app cards (Forgejo's runner table,
+        # Nextcloud's extras...), so it scrolls rather than squeezing them.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
 
     def _show_settings(self, site: dict) -> None:
         site_type = site["type"]
-        lines = [
-            f"Site user: {site['system_user']}    Home: {site['home']}",
-            f"Files: {site['root_dir']}",
-            f"Logs: {site['logs_dir']}",
+        rows = [
+            ("Site user", site["system_user"]),
+            ("Home", site["home"]),
+            ("Files", site["root_dir"]),
+            ("Logs", site["logs_dir"]),
         ]
         if (site.get("application") or {}).get("name") == "nextcloud":
-            lines.append(f"Nextcloud data: {site.get('data_dir')}/nextcloud")
+            rows.append(("Nextcloud data", f"{site.get('data_dir')}/nextcloud"))
         if site.get("storage"):
-            lines.append(f"Stored in: {site.get('storage_dir')}")
+            rows.append(("Stored in", site.get("storage_dir")))
         if site.get("runtime_version"):
-            lines.append(f"Runtime: {site['runtime_version']}")
+            rows.append(("Runtime", site["runtime_version"]))
         if site.get("app_port"):
-            lines.append(f"App port: 127.0.0.1:{site['app_port']}")
+            rows.append(("App port", f"127.0.0.1:{site['app_port']}"))
         info = site.get("container_info")
         if info:
-            lines.append(f"Image ID: {info.get('image_id', '')[:12]}  created {when_label(info.get('created'))}  "
-                         f"{size_label(info.get('size'))}")
-        lines.append(f"Created: {when_label(site.get('created_at'))}")
-        self.info.setText("\n".join(lines))
+            rows.append(("Image ID", f"{info.get('image_id', '')[:12]}  created {when_label(info.get('created'))}  "
+                                     f"{size_label(info.get('size'))}"))
+        rows.append(("Created", when_label(site.get("created_at"))))
+        self._fill_overview(rows)
 
         self.domains.setPlainText("\n".join(site.get("domains") or []))
         self.domains.setToolTip("One per line; the first is the primary domain." + (
@@ -512,7 +556,9 @@ class SiteDetail(QWidget):
         self.settings_form.setRowVisible(self.app_env, runs_app)
 
         self.app_box.setVisible(site_type in hm.APP_SITE_TYPES)
-        self.app_state.setText(f"State: {site.get('app_state') or 'unknown'}")
+        state = site.get("app_state") or "unknown"
+        self.app_state.setText(f"State: {state}")
+        theme.set_tone(self.app_state, {"active": "success", "failed": "danger"}.get(state))
         self.app_buttons["pull"].setVisible(is_container)
 
         for card, application in ((self.repo_card, "repo"), (self.forgejo_card, "forgejo"),
@@ -552,6 +598,29 @@ class SiteDetail(QWidget):
             self.team_folders_label.setText("Team folders: " + ("set up" if team_folders else "not set up"))
             self.team_folders_setup.setText("Repair" if team_folders else "Set Up")
             self.team_folders_remove.setVisible(team_folders)
+
+    def _fill_overview(self, rows: list[tuple[str, str]]) -> None:
+        while self.overview.count():
+            item = self.overview.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for row, (key, value) in enumerate(rows):
+            key_label = QLabel(key)
+            theme.set_role(key_label, "key")
+            value_label = QLabel(str(value))
+            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            value_label.setWordWrap(True)
+            self.overview.addWidget(key_label, row, 0, Qt.AlignmentFlag.AlignTop)
+            self.overview.addWidget(value_label, row, 1)
+
+    def overview_text(self) -> str:
+        """The overview grid as "Key: value" lines (for tests and copying)."""
+        lines = []
+        for row in range(self.overview.rowCount()):
+            key, value = self.overview.itemAtPosition(row, 0), self.overview.itemAtPosition(row, 1)
+            if key and value:
+                lines.append(f"{key.widget().text()}: {value.widget().text()}")
+        return "\n".join(lines)
 
     def _save_settings(self) -> None:
         site = self.site
@@ -1038,7 +1107,7 @@ class SiteDetail(QWidget):
             "in. Compare with the generated vhost and carry the change over, or reset to the generated one."
         )
         self.vhost_outdated.setWordWrap(True)
-        self.vhost_outdated.setStyleSheet("color: #b35c00;")
+        theme.set_tone(self.vhost_outdated, "warning")
         self.vhost_generated_button = _button("Show Generated Vhost…", self._show_generated_vhost)
         self.vhost_outdated_row = QWidget()
         outdated_layout = QVBoxLayout(self.vhost_outdated_row)
@@ -1153,6 +1222,7 @@ class HostingManagerWidget(RemoteHelperTab):
         )
         self.missing_page.setWordWrap(True)
         self.missing_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self.missing_page, "muted")
         self.stack.addWidget(self.missing_page)
 
         self.tabs = QTabWidget()
@@ -1217,6 +1287,17 @@ class HostingManagerWidget(RemoteHelperTab):
         self.site_table.itemSelectionChanged.connect(self._on_site_selected)
         self.site_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.site_table.customContextMenuRequested.connect(self._sites_menu)
+        # The list only needs to pick a site: Site user and App are on the
+        # site's own page (still matched by the filter), and the SSL column
+        # takes what's left, eliding with the full text as a tooltip,
+        # rather than every column running off the pane's right edge.
+        header = self.site_table.horizontalHeader()
+        for column in ("Site user", "App"):
+            self.site_table.setColumnHidden(self.SITE_COLUMNS.index(column), True)
+        for column in ("Domain", "Type"):
+            header.setSectionResizeMode(self.SITE_COLUMNS.index(column), QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(self.SITE_COLUMNS.index("SSL"), QHeaderView.ResizeMode.Stretch)
+        self.site_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -1229,13 +1310,15 @@ class HostingManagerWidget(RemoteHelperTab):
         left_layout.addWidget(self.import_note)
         left_layout.addWidget(self.filter)
         left_layout.addWidget(self.site_table, 1)
+        # Never narrower than the button row above the list.
+        left.setMinimumWidth(left_layout.itemAt(0).sizeHint().width())
         self.detail = SiteDetail(self)
         self.detail.clear()
         splitter = QSplitter()
         splitter.addWidget(left)
         splitter.addWidget(self.detail)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([420, 880])
+        splitter.setSizes([460, 840])
         layout = QVBoxLayout(page)
         layout.addWidget(splitter)
         return page
@@ -1253,6 +1336,7 @@ class HostingManagerWidget(RemoteHelperTab):
         self.sites = sites
         self.site_table.blockSignals(True)
         fill_table(self.site_table, [self._site_row(site) for site in sites], [site["name"] for site in sites])
+        self._set_site_tooltips()
         self.site_table.blockSignals(False)
         self._filter_sites()
         names = [site["name"] for site in sites]
@@ -1266,7 +1350,14 @@ class HostingManagerWidget(RemoteHelperTab):
             if self.site_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == site["name"]:
                 for column, value in enumerate(self._site_row(site)):
                     self.site_table.item(row, column).setText(str(value))
+        self._set_site_tooltips()
         self.sites = [site if s["name"] == site["name"] else s for s in self.sites]
+
+    def _set_site_tooltips(self) -> None:
+        for row in range(self.site_table.rowCount()):
+            for column in range(self.site_table.columnCount()):
+                item = self.site_table.item(row, column)
+                item.setToolTip(item.text())
 
     def _filter_sites(self) -> None:
         needle = self.filter.text().strip().lower()

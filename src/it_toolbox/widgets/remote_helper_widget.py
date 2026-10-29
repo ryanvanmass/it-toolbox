@@ -1,7 +1,8 @@
 """Shared pieces of the Cockpit managers that drive a Cockpit
 module's helper over SSH (see core/remote_helper.py): the saved-server
-dialog, a background-call runner, and a tab base class that connects on
-construction and prompts for host keys and passwords as needed.
+dialog, a background-call runner, a tab base class that connects on
+construction and prompts for host keys and passwords as needed, and the
+offer to install the user's SSH key after a password login.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import remote_helper as rh
+from it_toolbox.core import ssh_key_install
 from it_toolbox.core.ftp_client import UnknownHostKeyError
+from it_toolbox.ui import theme
 from it_toolbox.widgets import status_bar
 
 
@@ -107,6 +110,65 @@ def _ask(parent: QWidget, credentials: dict, key: str, title: str, label: str) -
     if key == "password":
         credentials.setdefault("sudo_password", value)
     return True
+
+
+#: user@host:port targets already offered a key install this run, so
+#: every manager tab on a machine doesn't ask again after a "No".
+_key_install_offered: set[tuple[str, str, int]] = set()
+
+
+def offer_key_install(parent: QWidget, server: rh.RemoteServer, credentials: dict) -> None:
+    """After a connection that only worked with the SSH password, offers
+    (once per machine per run) to put the user's public key in the
+    server's authorized_keys, ssh-copy-id style, generating a key first
+    if they have none. On success the password is dropped from
+    `credentials`, so the next connect proves the key works."""
+    password = credentials.get("password")
+    target = (server.username, server.host.lower(), server.port)
+    if not password or target in _key_install_offered:
+        return
+    _key_install_offered.add(target)
+    local = ssh_key_install.find_local_key(server.key_path)
+    where = f"{server.username}@{server.host}"
+    if local.exists:
+        detail = f"This adds your public key ({local.private_path}.pub) to ~/.ssh/authorized_keys there."
+    else:
+        detail = (
+            f"You don't have an SSH key yet, so a new one is created at {local.private_path} "
+            "(without a passphrase) and its public half added to ~/.ssh/authorized_keys there."
+        )
+    answer = QMessageBox.question(
+        parent,
+        "Use an SSH Key Instead?",
+        f"You signed in to {where} with a password.\n\nInstall your SSH key on it so future "
+        f"connections don't ask for one?\n\n{detail}",
+    )
+    if answer != QMessageBox.StandardButton.Yes:
+        return
+
+    def work() -> bool:
+        key = local if local.exists else ssh_key_install.generate_key(local.private_path)
+        ssh_key_install.install_public_key(server.host, server.port, server.username, password, key.public_key)
+        return ssh_key_install.key_login_works(
+            server.host, server.port, server.username, key.private_path, credentials.get("key_passphrase")
+        )
+
+    def done(works: bool) -> None:
+        if works:
+            credentials.pop("password", None)
+            QMessageBox.information(
+                parent, "SSH Key Installed", f"Your SSH key is installed on {where}; it's used from now on."
+            )
+        else:
+            QMessageBox.warning(
+                parent,
+                "SSH Key Installed",
+                f"Your key was added to {where}'s authorized_keys, but logging in with it still "
+                "failed. The server may not allow key logins (PubkeyAuthentication), or its "
+                "~/.ssh permissions may be too open.",
+            )
+
+    Busy(parent, "SSH Key")(f"Installing your SSH key on {server.host}…", work, done)
 
 
 class ServerDialog(QDialog):
@@ -210,6 +272,7 @@ class RemoteHelperTab(QWidget):
         self.stack = QStackedWidget()
         self.message_page = QLabel()
         self.message_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self.message_page, "muted")
         self.message_page.setWordWrap(True)
         self.stack.addWidget(self.message_page)
 
@@ -245,6 +308,7 @@ class RemoteHelperTab(QWidget):
             self.status.setText(f"Connected to {target}")
             self.connected.emit()
             self.on_connected()
+            offer_key_install(self, self.server, self._credentials)
 
         def failed(error):
             task.finish()
@@ -311,6 +375,12 @@ def fill_table(table: QTableWidget, rows: list[list], data: list | None = None) 
         for column, value in enumerate(values):
             table.setItem(row, column, table_item(value, data[row] if data and column == 0 else None))
     table.resizeColumnsToContents()
+    # resizeColumnsToContents() also sizes the last column to its contents,
+    # silently undoing make_table's stretch -- turn it back on.
+    header = table.horizontalHeader()
+    if header.stretchLastSection():
+        header.setStretchLastSection(False)
+        header.setStretchLastSection(True)
 
 
 def selected_data(table: QTableWidget):

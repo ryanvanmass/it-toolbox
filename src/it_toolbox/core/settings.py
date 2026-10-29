@@ -373,6 +373,47 @@ def save_rdp_graphics_pipeline(enabled: bool) -> None:
         path.unlink(missing_ok=True)
 
 
+def rdp_h264_path() -> Path:
+    return data_dir() / "rdp_h264.txt"
+
+
+def load_rdp_h264() -> bool:
+    """Whether embedded RDP sessions also offer the server H.264
+    (AVC420/AVC444) inside the graphics pipeline -- off by default, and
+    only takes effect with load_rdp_graphics_pipeline() on. Even then it's
+    only offered once core/rdp/freerdp_client.py's h264_decoder() has
+    proved the installed FreeRDP can decode it."""
+    return rdp_h264_path().is_file()
+
+
+def save_rdp_h264(enabled: bool) -> None:
+    path = rdp_h264_path()
+    if enabled:
+        path.write_text("1")
+    else:
+        path.unlink(missing_ok=True)
+
+
+def rdp_gpu_rendering_disabled_path() -> Path:
+    return data_dir() / "rdp_gpu_rendering_disabled.txt"
+
+
+def load_rdp_gpu_rendering() -> bool:
+    """Whether embedded RDP sessions draw the remote desktop on the GPU
+    (widgets/rdp_gpu_view.py) -- on by default, since it falls back to
+    QPainter by itself when no usable GPU renderer exists. Stored inverted
+    (file present means *off*) so the default needs no file."""
+    return not rdp_gpu_rendering_disabled_path().is_file()
+
+
+def save_rdp_gpu_rendering(enabled: bool) -> None:
+    path = rdp_gpu_rendering_disabled_path()
+    if enabled:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text("1")
+
+
 def rdp_shared_folder_path() -> Path:
     return data_dir() / "rdp_shared_folder.txt"
 
@@ -418,6 +459,24 @@ def load_default_double_click_action() -> str:
 
 def save_default_double_click_action(action: str) -> None:
     default_double_click_action_path().write_text(action)
+
+
+def appearance_path() -> Path:
+    return data_dir() / "appearance.txt"
+
+
+def load_appearance() -> str:
+    """"system" (the default -- follow the OS light/dark setting), "light"
+    or "dark". See ui/theme.py."""
+    path = appearance_path()
+    if not path.is_file():
+        return "system"
+    value = path.read_text().strip()
+    return value if value in ("system", "light", "dark") else "system"
+
+
+def save_appearance(mode: str) -> None:
+    appearance_path().write_text(mode)
 
 
 def terminal_font_size_path() -> Path:

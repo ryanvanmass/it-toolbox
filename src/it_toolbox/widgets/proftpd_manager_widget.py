@@ -11,7 +11,7 @@ import datetime
 import time
 
 from PySide6.QtCore import QDate, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtGui import QBrush, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -45,7 +45,9 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils
 from it_toolbox.core import proftpd_manager as pm
 from it_toolbox.core.ftp_client import UnknownHostKeyError
+from it_toolbox.ui import theme
 from it_toolbox.widgets import status_bar
+from it_toolbox.widgets.remote_helper_widget import offer_key_install
 
 MAX_LIVE_ROWS = 5000
 SESSION_POLL_MS = 3000
@@ -659,9 +661,9 @@ class LiveTrafficView(QWidget):
         ]
         color = None
         if event.is_session_event:
-            color = QColor("gray")
+            color = theme.color("muted")
         elif event.code and event.code[:1] in ("4", "5"):
-            color = QColor("#c62828")
+            color = theme.color("danger")
         for column, value in enumerate(values):
             item = _item(value)
             if color is not None:
@@ -803,6 +805,7 @@ class ProftpdManagerWidget(QWidget):
         self.stack = QStackedWidget()
         self.message_page = QLabel()
         self.message_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self.message_page, "muted")
         self.message_page.setWordWrap(True)
         self.stack.addWidget(self.message_page)
         self.helper_page = self._build_helper_page()
@@ -902,6 +905,7 @@ class ProftpdManagerWidget(QWidget):
         where = f" (container {self.server.docker_container})" if self.server.docker_container else ""
         self.status.setText(f"Connected to {self.server.username}@{self.server.host}{where}")
         self.connected.emit()
+        offer_key_install(self, self.server, self._credentials)
         if self.connection.helper_path is None:
             self.stack.setCurrentWidget(self.helper_page)
             return
