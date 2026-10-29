@@ -46,6 +46,7 @@ from it_toolbox.core import async_utils
 from it_toolbox.core import proftpd_manager as pm
 from it_toolbox.core.ftp_client import UnknownHostKeyError
 from it_toolbox.widgets import status_bar
+from it_toolbox.widgets.remote_helper_widget import offer_key_install
 
 MAX_LIVE_ROWS = 5000
 SESSION_POLL_MS = 3000
@@ -902,6 +903,7 @@ class ProftpdManagerWidget(QWidget):
         where = f" (container {self.server.docker_container})" if self.server.docker_container else ""
         self.status.setText(f"Connected to {self.server.username}@{self.server.host}{where}")
         self.connected.emit()
+        offer_key_install(self, self.server, self._credentials)
         if self.connection.helper_path is None:
             self.stack.setCurrentWidget(self.helper_page)
             return

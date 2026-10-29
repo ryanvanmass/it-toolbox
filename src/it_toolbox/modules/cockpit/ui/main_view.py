@@ -21,7 +21,7 @@ from it_toolbox.core.cockpit_machines import CockpitMachine
 from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.hosting_manager_widget import HostingManagerWidget
 from it_toolbox.widgets.proftpd_manager_widget import ProftpdManagerWidget
-from it_toolbox.widgets.remote_helper_widget import ServerDialog, prompt_to_retry
+from it_toolbox.widgets.remote_helper_widget import ServerDialog, offer_key_install, prompt_to_retry
 from it_toolbox.widgets.scheduler_manager_widget import SchedulerManagerWidget
 
 MACHINE_KEY_ROLE = Qt.ItemDataRole.UserRole + 60
@@ -258,6 +258,8 @@ class CockpitView(QWidget):
             task.finish()
             self._detecting.discard(machine.key)
             self._on_detected(machine.key, tools)
+            if shiboken6.isValid(self):
+                offer_key_install(self, machine, credentials)
 
         def failed(error):
             task.finish()
