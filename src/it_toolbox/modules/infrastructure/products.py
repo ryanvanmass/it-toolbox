@@ -5,5 +5,6 @@ roots: TrueNAS, Proxmox, PBS -- each lands with its own PR.
 """
 
 from it_toolbox.modules.infrastructure.product import InfrastructureProduct
+from it_toolbox.modules.infrastructure.proxmox import ProxmoxProduct
 
-PRODUCT_CLASSES: list[type[InfrastructureProduct]] = []
+PRODUCT_CLASSES: list[type[InfrastructureProduct]] = [ProxmoxProduct]
