@@ -1521,13 +1521,15 @@ class SettingsView(QWidget):
         box = QGroupBox("Manual Connections")
         layout = QVBoxLayout(box)
 
-        self._group_manual_by_type_checkbox = QCheckBox(
-            "Group manual connections by type (RDP, SSH, SFTP, FTP)"
+        description = QLabel(
+            "How Connection Manager lists the connections under Manual. Grouping "
+            "puts each type (RDP, SSH, SFTP, FTP) in its own folder, the way Cloud "
+            "Storage groups remotes by type."
         )
-        self._group_manual_by_type_checkbox.setToolTip(
-            "Shows one folder per connection type under Connection Manager's "
-            "Manual list, like Cloud Storage groups remotes by type."
-        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._group_manual_by_type_checkbox = QCheckBox("Group by connection type")
         self._group_manual_by_type_checkbox.setChecked(
             settings.load_group_manual_connections_by_type()
         )
