@@ -373,6 +373,26 @@ def save_rdp_graphics_pipeline(enabled: bool) -> None:
         path.unlink(missing_ok=True)
 
 
+def rdp_gpu_rendering_disabled_path() -> Path:
+    return data_dir() / "rdp_gpu_rendering_disabled.txt"
+
+
+def load_rdp_gpu_rendering() -> bool:
+    """Whether embedded RDP sessions draw the remote desktop on the GPU
+    (widgets/rdp_gpu_view.py) -- on by default, since it falls back to
+    QPainter by itself when no usable GPU renderer exists. Stored inverted
+    (file present means *off*) so the default needs no file."""
+    return not rdp_gpu_rendering_disabled_path().is_file()
+
+
+def save_rdp_gpu_rendering(enabled: bool) -> None:
+    path = rdp_gpu_rendering_disabled_path()
+    if enabled:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text("1")
+
+
 def rdp_shared_folder_path() -> Path:
     return data_dir() / "rdp_shared_folder.txt"
 
