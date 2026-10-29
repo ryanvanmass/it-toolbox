@@ -32,6 +32,7 @@ from it_toolbox.core import async_utils
 from it_toolbox.core import remote_helper as rh
 from it_toolbox.core import ssh_key_install
 from it_toolbox.core.ftp_client import UnknownHostKeyError
+from it_toolbox.ui import theme
 from it_toolbox.widgets import status_bar
 
 
@@ -271,6 +272,7 @@ class RemoteHelperTab(QWidget):
         self.stack = QStackedWidget()
         self.message_page = QLabel()
         self.message_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        theme.set_tone(self.message_page, "muted")
         self.message_page.setWordWrap(True)
         self.stack.addWidget(self.message_page)
 

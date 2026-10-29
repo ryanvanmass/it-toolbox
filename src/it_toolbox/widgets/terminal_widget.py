@@ -269,6 +269,10 @@ class TerminalWidget(QPlainTextEdit):
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        # Always a dark terminal, in light mode too -- _ANSI_COLORS is an
+        # xterm palette tuned for a dark background (bright yellow/white
+        # vanish on white). Colors come from ui/theme.py's #Terminal rule.
+        self.setObjectName("Terminal")
         # QFont("Monospace") is a Linux/fontconfig generic-alias name --
         # Windows has no font literally called that, and Qt's substitution
         # for an unrecognized family name there is not guaranteed to give
