@@ -18,7 +18,10 @@ RESOURCES = [
     {"type": "qemu", "vmid": 9000, "name": "alma10-tmpl", "node": "pve1", "status": "stopped", "template": 1},
     {"type": "storage", "storage": "local", "node": "pve1", "plugintype": "dir", "status": "available",
      "disk": 10 << 30, "maxdisk": 100 << 30, "content": "iso,vztmpl,backup", "shared": 0},
-    {"type": "sdn", "sdn": "lab", "node": "pve1", "status": "ok"},
+    {"type": "network", "network": "lab", "network-type": "zone", "zone-type": "vlan", "node": "pve1",
+     "status": "available", "id": "network/pve1/zone/lab"},
+    {"type": "network", "network": "localnetwork", "network-type": "zone", "node": "pve1", "status": "ok"},
+    {"type": "sdn", "sdn": "old8", "node": "pve1", "status": "ok"},
 ]
 
 
@@ -98,7 +101,7 @@ def test_resources_split_into_nodes_guests_storage_and_sdn(api):
     assert resources.guests[2].type == LXC and resources.guests[2].label == "200 pihole (CT)"
     assert resources.guests[3].template
     assert resources.storages[0].content == ("iso", "vztmpl", "backup")
-    assert resources.sdn_zones == ("lab",)
+    assert resources.sdn_zones == ("lab", "old8")
 
 
 def test_401_says_the_token_was_rejected(api):

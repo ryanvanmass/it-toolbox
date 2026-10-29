@@ -160,7 +160,8 @@ def _parse_guest(item: dict) -> ProxmoxGuest:
         status=str(item.get("status") or "unknown"),
         template=bool(_int(item.get("template"))),
         cpu=_float(item.get("cpu")),
-        maxcpu=_int(item.get("maxcpu")),
+        # status/current says "cpus" where /cluster/resources says "maxcpu".
+        maxcpu=_int(item.get("maxcpu") or item.get("cpus")),
         mem=_int(item.get("mem")),
         maxmem=_int(item.get("maxmem")),
         disk=_int(item.get("disk")),
@@ -204,7 +205,13 @@ def parse_resources(items: list[dict]) -> ClusterResources:
                     shared=bool(_int(item.get("shared"))),
                 )
             )
-        elif kind == "sdn":
+        elif kind == "network" and item.get("network-type") == "zone" and item.get("zone-type"):
+            # PVE 9 lists SDN zones as "network" resources; the built-in
+            # "localnetwork" pseudo-zone has no zone-type and is skipped.
+            zone = item.get("network")
+            if zone and zone not in zones:
+                zones.append(str(zone))
+        elif kind == "sdn":  # PVE 8's shape
             zone = item.get("sdn")
             if zone and zone not in zones:
                 zones.append(str(zone))

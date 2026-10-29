@@ -10,7 +10,8 @@ visible tab.
 import datetime
 
 import shiboken6
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSortFilterProxyModel, Qt, QTimer
+from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
@@ -22,8 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -88,35 +88,69 @@ def format_cpu(fraction: float, cores: int) -> str:
 STATE_LABELS = {"new": "new (pending)", "changed": "changed (pending)", "deleted": "deleted (pending)"}
 
 
-def _table(headers: list[str]) -> QTableWidget:
-    table = QTableWidget(0, len(headers))
-    table.setHorizontalHeaderLabels(headers)
-    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-    table.setSortingEnabled(True)
-    table.verticalHeader().setVisible(False)
-    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-    table.horizontalHeader().setStretchLastSection(True)
-    return table
+SORT_ROLE = Qt.ItemDataRole.UserRole
+KEY_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
-def _fill(table: QTableWidget, rows: list[list], keys: list | None = None) -> None:
-    """Rows of cell values; an int/float cell sorts numerically. `keys`
-    (one per row) is stored on each row's first cell."""
-    table.setSortingEnabled(False)
-    table.setRowCount(len(rows))
-    for r, row in enumerate(rows):
-        for c, value in enumerate(row):
-            item = QTableWidgetItem()
-            if isinstance(value, tuple):  # (display, sort value)
-                item.setData(Qt.ItemDataRole.DisplayRole, value[0])
-                item.setData(Qt.ItemDataRole.UserRole, value[1])
-            else:
-                item.setData(Qt.ItemDataRole.DisplayRole, value)
-            if keys is not None and c == 0:
-                item.setData(Qt.ItemDataRole.UserRole + 1, keys[r])
-            table.setItem(r, c, item)
-    table.setSortingEnabled(True)
+class _Table(QTableView):
+    """A read-only, sortable table. Cells given as (text, sort value)
+    sort by the value, so "1.5 GiB of 4.0 GiB" sorts by size. A Python
+    QTableWidgetItem subclass would do the same but crashes PySide while
+    sorting, hence a model + proxy."""
+
+    def __init__(self, headers: list[str]) -> None:
+        super().__init__()
+        self._model = QStandardItemModel(0, len(headers))
+        self._model.setHorizontalHeaderLabels(headers)
+        self._proxy = QSortFilterProxyModel(self)
+        self._proxy.setSourceModel(self._model)
+        self._proxy.setSortRole(SORT_ROLE)
+        self.setModel(self._proxy)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setSortingEnabled(True)
+        self.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.verticalHeader().setVisible(False)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setStretchLastSection(True)
+
+    def rowCount(self) -> int:
+        return self._proxy.rowCount()
+
+    def item(self, row: int, column: int) -> QStandardItem:
+        """The cell at a row as currently sorted."""
+        return self._model.itemFromIndex(self._proxy.mapToSource(self._proxy.index(row, column)))
+
+    def key(self, row: int):
+        return self.item(row, 0).data(KEY_ROLE)
+
+    def selected_key(self):
+        rows = self.selectionModel().selectedRows()
+        return self.key(rows[0].row()) if rows else None
+
+    def fill(self, rows: list[list], keys: list | None = None) -> None:
+        """Rows of cell values; a cell is a value or (text, sort value).
+        `keys` (one per row) can be read back with key()/selected_key()."""
+        self._model.setRowCount(0)
+        for r, row in enumerate(rows):
+            items = []
+            for c, value in enumerate(row):
+                text, sort = value if isinstance(value, tuple) else (value, value)
+                item = QStandardItem("" if text is None else str(text))
+                item.setData(sort, SORT_ROLE)
+                if keys is not None and c == 0:
+                    item.setData(keys[r], KEY_ROLE)
+                items.append(item)
+            self._model.appendRow(items)
+
+
+def _table(headers: list[str]) -> _Table:
+    return _Table(headers)
+
+
+def _fill(table: _Table, rows: list[list], keys: list | None = None) -> None:
+    table.fill(rows, keys)
 
 
 class _LoadingMixin:
@@ -140,7 +174,7 @@ class ProxmoxDashboardWidget(QWidget, _LoadingMixin):
         self._status.setWordWrap(True)
         self._status.setVisible(False)
         refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.reload)
+        refresh.clicked.connect(lambda: self.reload())
         header = QHBoxLayout()
         self._title = QLabel(f"<b>{host.name}</b> — {host.url}")
         header.addWidget(self._title, 1)
@@ -173,7 +207,9 @@ class ProxmoxDashboardWidget(QWidget, _LoadingMixin):
         self._closed = True
         self._timer.stop()
 
-    def reload(self) -> None:
+    def reload(self, automatic: bool = False) -> None:
+        """`automatic` (the refresh timer) skips SDN, whose VNet-users
+        column costs one config read per guest."""
         if self._loading or self._closed:
             return
         self._loading = True
@@ -188,7 +224,8 @@ class ProxmoxDashboardWidget(QWidget, _LoadingMixin):
             return resources, statuses
 
         async_utils.run_in_background(work, on_result=self._on_loaded, on_error=self._on_error)
-        self._reload_current_extra()
+        if not (automatic and self._tabs.currentWidget() is self._sdn_tab):
+            self._reload_current_extra()
 
     # -- Loading ---------------------------------------------------------------
 
@@ -197,7 +234,7 @@ class ProxmoxDashboardWidget(QWidget, _LoadingMixin):
 
     def _on_timer(self) -> None:
         if self.isVisible():
-            self.reload()
+            self.reload(automatic=True)
 
     def _on_loaded(self, result) -> None:
         self._loading = False
@@ -320,7 +357,7 @@ class ProxmoxDashboardWidget(QWidget, _LoadingMixin):
     def _build_tasks_tab(self) -> QWidget:
         self._tasks_tab = QWidget()
         self._task_table = _table(["Started", "Ended", "Node", "Type", "ID", "User", "Status"])
-        self._task_table.itemSelectionChanged.connect(self._on_task_selected)
+        self._task_table.selectionModel().selectionChanged.connect(lambda *_: self._on_task_selected())
         self._task_log = QPlainTextEdit()
         self._task_log.setReadOnly(True)
         self._task_log.setPlaceholderText("Select a task to see its log.")
@@ -353,13 +390,10 @@ class ProxmoxDashboardWidget(QWidget, _LoadingMixin):
             for t in tasks
         ]
         _fill(self._task_table, rows, keys=tasks)
-        self._task_table.sortItems(0, Qt.SortOrder.DescendingOrder)
+        self._task_table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
 
     def _on_task_selected(self) -> None:
-        rows = self._task_table.selectionModel().selectedRows()
-        if not rows:
-            return
-        task = self._task_table.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole + 1)
+        task = self._task_table.selected_key()
         if task is None:
             return
         host, secret = self._host, self._secret
@@ -433,7 +467,7 @@ class ProxmoxDashboardWidget(QWidget, _LoadingMixin):
         )
         _fill(
             self._vnet_table,
-            [[v.vnet, v.zone, "" if v.tag is None else v.tag, v.alias, ", ".join(users.get(v.vnet, [])),
+            [[v.vnet, v.zone, ("", -1) if v.tag is None else v.tag, v.alias, ", ".join(users.get(v.vnet, [])),
               STATE_LABELS.get(v.state, v.state)] for v in sdn.vnets],
         )
         _fill(
@@ -463,7 +497,7 @@ class ProxmoxGuestWidget(QWidget, _LoadingMixin):
         self._status.setWordWrap(True)
         self._status.setVisible(False)
         refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.reload)
+        refresh.clicked.connect(lambda: self.reload())
         header = QHBoxLayout()
         header.addWidget(QLabel(f"<b>{guest.label}</b> on {guest.node}"), 1)
         header.addWidget(refresh)
@@ -517,7 +551,12 @@ class ProxmoxGuestWidget(QWidget, _LoadingMixin):
             self._form.addRow("Display:", QLabel(str(details.config.get("vga", "default (VGA)"))))
             serial = details.config.get("serial0")
             self._form.addRow("Serial console:", QLabel(f"serial0: {serial}" if serial else "none"))
-        ips = ", ".join(details.ipv4_addresses) or (details.interfaces_error or "—")
+        if details.ipv4_addresses:
+            ips = ", ".join(details.ipv4_addresses)
+        elif not g.is_container and details.agent_running is not True:
+            ips = "— (shown when the QEMU guest agent is running in the VM)"
+        else:
+            ips = details.interfaces_error or "—"
         self._form.addRow("IPv4:", QLabel(ips))
         _fill(self._interfaces, [[i.name, i.mac, ", ".join(i.addresses)] for i in details.interfaces])
         lines = [f"{k}: {v}" for k, v in sorted(details.config.items()) if k != "digest"]

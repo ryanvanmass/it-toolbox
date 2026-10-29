@@ -246,3 +246,21 @@ def test_format_uptime(seconds, expected):
 
 def test_status_dots_cover_paused():
     assert proxmox.STATUS_DOTS["paused"] == "◐"
+
+
+def test_tables_sort_by_value_not_text(qtbot):
+    table = dw._Table(["Usage"])
+    qtbot.addWidget(table)
+    table.fill([[("10.0 GiB of 20 GiB", 0.5)], [("2.0 GiB of 20 GiB", 0.1)], [("9.0 GiB of 10 GiB", 0.9)]],
+               keys=["half", "tenth", "most"])
+    table.sortByColumn(0, dw.Qt.SortOrder.DescendingOrder)
+    assert [table.key(r) for r in range(3)] == ["most", "half", "tenth"]
+    table.selectRow(1)
+    assert table.selected_key() == "half"
+
+
+def test_guest_status_current_reports_cpus(monkeypatch):
+    from it_toolbox.core import proxmox_client
+
+    guest = proxmox_client._parse_guest({"vmid": 1, "cpus": 4, "status": "running"})
+    assert guest.maxcpu == 4
