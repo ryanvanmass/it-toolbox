@@ -3,7 +3,7 @@ from truenas_fake import API_KEY, FakeTrueNas
 
 from it_toolbox.core import settings
 from it_toolbox.modules.infrastructure import products, truenas
-from it_toolbox.modules.infrastructure.hosts import InfrastructureHost
+from it_toolbox.core.infrastructure_hosts import InfrastructureHost
 from it_toolbox.modules.infrastructure.truenas import TrueNasProduct
 from it_toolbox.modules.infrastructure.ui import main_view
 from it_toolbox.modules.infrastructure.ui.main_view import NODE_ROLE, InfrastructureView

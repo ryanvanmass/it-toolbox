@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QTreeWidgetItem, QWidget
 
 from it_toolbox.core import async_utils, truenas_api, truenas_client
-from it_toolbox.modules.infrastructure.hosts import InfrastructureHost
+from it_toolbox.core.infrastructure_hosts import InfrastructureHost
 from it_toolbox.modules.infrastructure.product import InfrastructureProduct
 from it_toolbox.widgets.truenas_dashboard_widget import AREAS, TrueNasDashboardWidget
 
