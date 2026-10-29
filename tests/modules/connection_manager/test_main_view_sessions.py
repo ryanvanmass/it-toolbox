@@ -64,7 +64,13 @@ def _make_view(
     glinet_available=True,
     instance_ssh_username_overrides=None,
     instance_rdp_credentials=None,
+    group_manual_by_type=False,
 ):
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "load_group_manual_connections_by_type",
+        lambda: group_manual_by_type,
+    )
     monkeypatch.setattr(
         "it_toolbox.modules.connection_manager.ui.main_view.gcp_auth.is_available",
         lambda: False,
@@ -2192,6 +2198,76 @@ def test_populate_manual_connections_creates_items(qtbot, monkeypatch):
     item = manual_root.child(0)
     assert item.text(0) == "my-box"
     assert item.data(0, MANUAL_CONNECTION_ROLE) == connection
+
+
+def test_manual_connections_grouped_by_type_when_enabled(qtbot, monkeypatch):
+    from it_toolbox.modules.connection_manager.ui.main_view import (
+        MANUAL_CONNECTION_ROLE,
+        MANUAL_KIND_GROUP_ROLE,
+    )
+
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        manual_connections=[
+            {"name": "web", "host": "10.0.0.1", "port": 22, "kind": "ssh"},
+            {"name": "desk", "host": "10.0.0.2", "port": 3389, "kind": "rdp"},
+            {"name": "db", "host": "10.0.0.3", "port": 22, "kind": "ssh"},
+        ],
+        group_manual_by_type=True,
+    )
+
+    root = view._manual_root_item
+    assert [root.child(i).text(0) for i in range(root.childCount())] == ["RDP", "SSH"]
+    ssh_group = root.child(1)
+    assert ssh_group.data(0, MANUAL_KIND_GROUP_ROLE) == "ssh"
+    assert ssh_group.isExpanded()
+    assert [ssh_group.child(i).text(0) for i in range(ssh_group.childCount())] == ["web", "db"]
+    assert ssh_group.child(0).data(0, MANUAL_CONNECTION_ROLE).host == "10.0.0.1"
+
+
+def test_manual_connections_regroup_when_setting_changes(qtbot, monkeypatch):
+    from it_toolbox.core.connection_list_events import connection_list_events
+
+    grouped = {"value": False}
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        manual_connections=[{"name": "web", "host": "10.0.0.1", "port": 22, "kind": "ssh"}],
+    )
+    monkeypatch.setattr(
+        "it_toolbox.modules.connection_manager.ui.main_view.settings."
+        "load_group_manual_connections_by_type",
+        lambda: grouped["value"],
+    )
+    assert view._manual_root_item.child(0).text(0) == "web"
+
+    grouped["value"] = True
+    connection_list_events.layout_changed.emit()
+
+    group = view._manual_root_item.child(0)
+    assert group.text(0) == "SSH"
+    assert group.child(0).text(0) == "web"
+
+
+def test_search_surfaces_type_group_of_matching_manual_connection(qtbot, monkeypatch):
+    view = _make_view(
+        qtbot,
+        monkeypatch,
+        manual_connections=[
+            {"name": "web", "host": "10.0.0.1", "port": 22, "kind": "ssh"},
+            {"name": "desk", "host": "10.0.0.2", "port": 3389, "kind": "rdp"},
+        ],
+        group_manual_by_type=True,
+    )
+
+    view._search_box.setText("web")
+
+    root = view._manual_root_item
+    rdp_group, ssh_group = root.child(0), root.child(1)
+    assert rdp_group.isHidden()
+    assert not ssh_group.isHidden()
+    assert not ssh_group.child(0).isHidden()
 
 
 def test_manual_ssh_connect_embeds_terminal_without_tunnel(qtbot, monkeypatch):

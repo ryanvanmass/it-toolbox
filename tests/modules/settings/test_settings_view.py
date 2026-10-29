@@ -192,6 +192,31 @@ def test_toggling_include_prerelease_checkbox_saves_it(qtbot, monkeypatch):
     assert saved == [True]
 
 
+def test_group_manual_by_type_checkbox_preselects_saved_value(qtbot, monkeypatch):
+    monkeypatch.setattr(settings, "load_group_manual_connections_by_type", lambda: True)
+    view = _make_view(qtbot, monkeypatch)
+
+    assert view._group_manual_by_type_checkbox.isChecked()
+
+
+def test_toggling_group_manual_by_type_saves_and_notifies(qtbot, monkeypatch):
+    from it_toolbox.core.connection_list_events import connection_list_events
+
+    monkeypatch.setattr(settings, "load_group_manual_connections_by_type", lambda: False)
+    saved = []
+    monkeypatch.setattr(
+        settings, "save_group_manual_connections_by_type", lambda v: saved.append(v)
+    )
+    view = _make_view(qtbot, monkeypatch)
+    changed = []
+    connection_list_events.layout_changed.connect(lambda: changed.append(1))
+
+    view._group_manual_by_type_checkbox.setChecked(True)
+
+    assert saved == [True]
+    assert changed
+
+
 def test_modules_section_lists_every_module_but_settings_checked_by_default(qtbot, monkeypatch):
     view = _make_view(qtbot, monkeypatch)
 

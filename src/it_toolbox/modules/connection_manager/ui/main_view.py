@@ -25,6 +25,7 @@ from it_toolbox.core import async_utils, ftp_client, linux_backend, settings, ws
 from it_toolbox.core.auth import gcp_auth
 from it_toolbox.core.auth.auth_events import auth_events
 from it_toolbox.core.iap_tunnel import IapTunnelTarget
+from it_toolbox.core.connection_list_events import connection_list_events
 from it_toolbox.core.linux_tools_events import linux_tools_events
 from it_toolbox.core.qemu_tunnel import QemuTunnel, is_local_uri
 from it_toolbox.core.spice.remote_spice_worker import RemoteSpiceWorker
@@ -131,6 +132,9 @@ IS_LOADING_ROLE = Qt.ItemDataRole.UserRole + 11
 INTRINSIC_HIDE_ROLE = Qt.ItemDataRole.UserRole + 14
 IS_GLINET_ROOT_ROLE = Qt.ItemDataRole.UserRole + 12
 GLINET_HOST_ROLE = Qt.ItemDataRole.UserRole + 13
+# A per-type folder ("RDP", "SSH", ...) under the Manual root, only
+# present when Settings groups manual connections by type.
+MANUAL_KIND_GROUP_ROLE = Qt.ItemDataRole.UserRole + 15
 
 CATEGORY_VMS = "vms"
 CATEGORY_BUCKETS = "buckets"
@@ -310,6 +314,7 @@ class ConnectionManagerView(QWidget):
         # Same for the Windows-only Linux tools distro (Settings > Linux
         # tools (WSL)): installing/removing it shows/hides the QEMU tree.
         linux_tools_events.changed.connect(self._on_linux_tools_changed)
+        connection_list_events.layout_changed.connect(self._populate_manual_connections)
         self._prepare_wsl_backend()
 
         if not gcp_auth.is_available():
@@ -876,12 +881,31 @@ class ConnectionManagerView(QWidget):
             self._manual_root_item.setData(0, IS_MANUAL_ROOT_ROLE, True)
             self._tree.addTopLevelItem(self._manual_root_item)
         self._manual_root_item.takeChildren()
-        for connection in self._load_manual_connections():
-            item = QTreeWidgetItem([connection.name])
-            item.setData(0, MANUAL_CONNECTION_ROLE, connection)
-            item.setToolTip(0, f"{connection.kind.upper()} {connection.host}:{connection.port}")
-            self._manual_root_item.addChild(item)
+        connections = self._load_manual_connections()
+        if settings.load_group_manual_connections_by_type():
+            # Same shape as Cloud Storage's Remotes tree: one folder per
+            # type, sorted, each keeping the saved order of its children.
+            by_kind: dict[str, list[ManualConnection]] = {}
+            for connection in connections:
+                by_kind.setdefault(connection.kind, []).append(connection)
+            for kind in sorted(by_kind):
+                group_item = QTreeWidgetItem([kind.upper()])
+                group_item.setData(0, MANUAL_KIND_GROUP_ROLE, kind)
+                self._manual_root_item.addChild(group_item)
+                group_item.setExpanded(True)
+                for connection in by_kind[kind]:
+                    group_item.addChild(self._manual_connection_item(connection))
+        else:
+            for connection in connections:
+                self._manual_root_item.addChild(self._manual_connection_item(connection))
         self._apply_tree_filter()
+
+    @staticmethod
+    def _manual_connection_item(connection: ManualConnection) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([connection.name])
+        item.setData(0, MANUAL_CONNECTION_ROLE, connection)
+        item.setToolTip(0, f"{connection.kind.upper()} {connection.host}:{connection.port}")
+        return item
 
     def _on_manage_manual_connections_clicked(self) -> None:
         dialog = ManageManualConnectionsDialog(self._load_manual_connections(), parent=self)
@@ -1045,7 +1069,7 @@ class ConnectionManagerView(QWidget):
             self._show_qemu_host_context_menu(pos, item, host)
             return
 
-        if item.data(0, IS_MANUAL_ROOT_ROLE):
+        if item.data(0, IS_MANUAL_ROOT_ROLE) or item.data(0, MANUAL_KIND_GROUP_ROLE):
             self._show_manual_root_context_menu(pos)
             return
 

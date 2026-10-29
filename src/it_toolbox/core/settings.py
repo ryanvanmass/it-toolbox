@@ -819,6 +819,26 @@ def save_glinet_hosts(hosts: list[dict]) -> None:
     glinet_hosts_path().write_text(json.dumps(hosts))
 
 
+def group_manual_connections_by_type_path() -> Path:
+    return data_dir() / "group_manual_connections_by_type.txt"
+
+
+def load_group_manual_connections_by_type() -> bool:
+    """Whether Connection Manager's Manual list nests connections under
+    one folder per type (RDP, SSH, SFTP, FTP) -- the same shape Cloud
+    Storage's Remotes tree uses for rclone endpoint types -- instead of
+    one flat list. Off by default."""
+    return group_manual_connections_by_type_path().is_file()
+
+
+def save_group_manual_connections_by_type(enabled: bool) -> None:
+    path = group_manual_connections_by_type_path()
+    if enabled:
+        path.write_text("1")
+    else:
+        path.unlink(missing_ok=True)
+
+
 def include_prerelease_updates_path() -> Path:
     return data_dir() / "include_prerelease_updates.txt"
 
