@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from it_toolbox.core import async_utils
 from it_toolbox.core import hosting_manager as hm
+from it_toolbox.ui import theme
 from it_toolbox.widgets import hosting_dialogs as dialogs
 from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.hosting_apps import ForgejoCard, RepoCard, ZabbixCard
@@ -153,7 +154,7 @@ class SiteDetail(QWidget):
             "container, cron jobs and Nextcloud Office are stopped. Its files, databases, SFTP login and backups "
             "are kept.")
         self.disabled_note.setWordWrap(True)
-        self.disabled_note.setStyleSheet("color: #b35c00;")
+        theme.set_tone(self.disabled_note, "warning")
         self.storage_note = QLabel()
         self.storage_note.setWordWrap(True)
         self.storage_dismiss = _button("Dismiss", self._dismiss_storage)
@@ -311,17 +312,17 @@ class SiteDetail(QWidget):
             step = job.get("step") or "Starting"
             progress = f" ({job['progress']}%)" if job.get("progress") is not None else ""
             self.storage_note.setText(f"Moving the files to {job.get('to')}: {step}{progress}")
-            self.storage_note.setStyleSheet("")
+            theme.set_tone(self.storage_note, None)
         elif job.get("state") == "failed":
             self.storage_note.setText(f"The files could not be moved: {job.get('failure')}")
-            self.storage_note.setStyleSheet("color: #c9190b;")
+            theme.set_tone(self.storage_note, "danger")
         else:
             result = job.get("result") or {}
             lines = [f"The files were moved to {job.get('to')}.", *(result.get("problems") or [])]
             if result.get("old_copy"):
                 lines.append(f"The old copy is still in {result['old_copy']}.")
             self.storage_note.setText("\n".join(lines))
-            self.storage_note.setStyleSheet("color: #b35c00;" if result.get("problems") else "")
+            theme.set_tone(self.storage_note, "warning" if result.get("problems") else None)
         if job:
             self.storage_row.show()
             self.storage_dismiss.setVisible(not running)
@@ -1038,7 +1039,7 @@ class SiteDetail(QWidget):
             "in. Compare with the generated vhost and carry the change over, or reset to the generated one."
         )
         self.vhost_outdated.setWordWrap(True)
-        self.vhost_outdated.setStyleSheet("color: #b35c00;")
+        theme.set_tone(self.vhost_outdated, "warning")
         self.vhost_generated_button = _button("Show Generated Vhost…", self._show_generated_vhost)
         self.vhost_outdated_row = QWidget()
         outdated_layout = QVBoxLayout(self.vhost_outdated_row)

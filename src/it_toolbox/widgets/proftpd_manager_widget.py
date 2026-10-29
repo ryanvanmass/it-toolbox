@@ -11,7 +11,7 @@ import datetime
 import time
 
 from PySide6.QtCore import QDate, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtGui import QBrush, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 from it_toolbox.core import async_utils
 from it_toolbox.core import proftpd_manager as pm
 from it_toolbox.core.ftp_client import UnknownHostKeyError
+from it_toolbox.ui import theme
 from it_toolbox.widgets import status_bar
 from it_toolbox.widgets.remote_helper_widget import offer_key_install
 
@@ -660,9 +661,9 @@ class LiveTrafficView(QWidget):
         ]
         color = None
         if event.is_session_event:
-            color = QColor("gray")
+            color = theme.color("muted")
         elif event.code and event.code[:1] in ("4", "5"):
-            color = QColor("#c62828")
+            color = theme.color("danger")
         for column, value in enumerate(values):
             item = _item(value)
             if color is not None:
