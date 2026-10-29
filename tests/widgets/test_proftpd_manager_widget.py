@@ -175,10 +175,16 @@ def test_prompts_for_sudo_password_and_reconnects(qtbot, monkeypatch):
 def test_login_password_is_reused_for_sudo(qtbot, monkeypatch):
     FakeConnection.connect_errors = [pm.LoginPasswordRequired("denied")]
     monkeypatch.setattr(w.QInputDialog, "getText", lambda *a, **k: ("pw", True))
+    offers = []
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: offers.append(a[1]) or QMessageBox.StandardButton.No
+    )
     widget = _make(qtbot)
 
     qtbot.waitUntil(lambda: widget.stack.currentWidget() is widget.tabs)
     assert FakeConnection.instances[-1].credentials == {"password": "pw", "sudo_password": "pw"}
+    # A password login offers to install the user's SSH key instead.
+    assert offers == ["Use an SSH Key Instead?"]
 
 
 def test_cancelled_prompt_leaves_an_error_page(qtbot, monkeypatch):

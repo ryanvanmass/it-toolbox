@@ -1919,6 +1919,8 @@ class ConnectionManagerView(QWidget):
         keyboard_layout = settings.load_rdp_keyboard_layout()
         shared_folder = settings.load_rdp_shared_folder()
         graphics_pipeline = settings.load_rdp_graphics_pipeline()
+        gpu_rendering = settings.load_rdp_gpu_rendering()
+        h264 = settings.load_rdp_h264()
         rdp = RdpWidget(
             host,
             port,
@@ -1928,6 +1930,8 @@ class ConnectionManagerView(QWidget):
             keyboard_layout=keyboard_layout,
             shared_folder=shared_folder,
             graphics_pipeline=graphics_pipeline,
+            h264=h264,
+            gpu_rendering=gpu_rendering,
             failure_detail=failure_detail,
         )
         rdp.finished.connect(lambda: self._on_disconnect_requested(session_id))

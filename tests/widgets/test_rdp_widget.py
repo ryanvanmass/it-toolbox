@@ -1,9 +1,16 @@
 import pytest
-from PySide6.QtCore import QPointF, QRect, Qt
+from PySide6.QtCore import QPointF, QRect, Qt, Signal
 from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox, QVBoxLayout, QWidget
 
 from it_toolbox.core.rdp.rdp_session_worker import RdpSessionSignals
 from it_toolbox.widgets.rdp_widget import RdpWidget
+
+
+@pytest.fixture(autouse=True)
+def _no_gpu_view(monkeypatch):
+    # Whether this machine's OpenGL is usable mustn't decide which drawing
+    # path these tests exercise; the GPU-view tests below opt back in.
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.gpu_rendering_usable", lambda: False)
 
 
 class _FakeWorker:
@@ -89,7 +96,7 @@ def test_fixed_desktop_size_is_passed_to_the_worker(qtbot, monkeypatch):
     captured = {}
 
     class _CapturingWorker(_FakeWorker):
-        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None, graphics_pipeline=False):
+        def __init__(self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None, shared_folder=None, graphics_pipeline=False, h264=False):
             super().__init__()
             captured["desktop_size"] = desktop_size
 
@@ -107,7 +114,7 @@ def test_keyboard_layout_is_passed_to_the_worker(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None, graphics_pipeline=False,
+            shared_folder=None, graphics_pipeline=False, h264=False,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -126,7 +133,7 @@ def test_keyboard_layout_defaults_to_english_us(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None, graphics_pipeline=False,
+            shared_folder=None, graphics_pipeline=False, h264=False,
         ):
             super().__init__()
             captured["keyboard_layout"] = keyboard_layout
@@ -460,7 +467,7 @@ def test_shared_folder_is_passed_to_the_worker(qtbot, monkeypatch):
     class _CapturingWorker(_FakeWorker):
         def __init__(
             self, host, port, username, password, domain="", desktop_size=None, keyboard_layout=None,
-            shared_folder=None, graphics_pipeline=False,
+            shared_folder=None, graphics_pipeline=False, h264=False,
         ):
             super().__init__()
             captured["shared_folder"] = shared_folder
@@ -540,3 +547,104 @@ def test_a_frame_is_reported_consumed_once_painted(qtbot, monkeypatch):
     widget.grab()
     widget.grab()  # a repaint of the same frame doesn't count again
     assert widget._worker.frames_consumed == 1
+
+
+# --- GPU view (widgets/rdp_gpu_view.py) --------------------------------
+
+
+class _FakeGpuView(QWidget):
+    unavailable = Signal(str)
+
+    def __init__(self, target_rect, on_rendered, parent):
+        super().__init__(parent)
+        self.target_rect = target_rect
+        self.on_rendered = on_rendered
+        self.images = []
+
+    def set_image(self, image):
+        self.images.append(image)
+
+
+def _gpu_widget(qtbot, monkeypatch):
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _FakeWorker)
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.gpu_rendering_usable", lambda: True)
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpGpuView", _FakeGpuView)
+    widget = RdpWidget("host", 3389, "user", "pass")
+    qtbot.addWidget(widget)
+    widget.resize(8, 8)
+    return widget
+
+
+def test_frames_go_to_the_gpu_view_when_one_is_usable(qtbot, monkeypatch):
+    widget = _gpu_widget(qtbot, monkeypatch)
+
+    widget._on_frame_ready(bytes(4 * 4 * 4), 4, 4, 16)
+
+    view = widget._gpu_view
+    assert len(view.images) == 1 and not view.isHidden()
+    assert view.target_rect() == widget._scaled_image_rect()
+    view.on_rendered()  # the view drew it
+    assert widget._worker.frames_consumed == 1
+
+
+def test_no_gpu_view_when_gpu_rendering_is_off_or_unusable(qtbot, monkeypatch):
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpSessionWorker", _FakeWorker)
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.RdpGpuView", _FakeGpuView)
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.gpu_rendering_usable", lambda: True)
+    off = RdpWidget("host", 3389, "user", "pass", gpu_rendering=False)
+    qtbot.addWidget(off)
+    monkeypatch.setattr("it_toolbox.widgets.rdp_widget.gpu_rendering_usable", lambda: False)
+    unusable = RdpWidget("host", 3389, "user", "pass")
+    qtbot.addWidget(unusable)
+
+    assert off._gpu_view is None and unusable._gpu_view is None
+
+
+def test_an_unavailable_gpu_view_falls_back_to_painting(qtbot, monkeypatch):
+    widget = _gpu_widget(qtbot, monkeypatch)
+    widget._on_frame_ready(bytes(4 * 4 * 4), 4, 4, 16)
+
+    widget._gpu_view.unavailable.emit("only a software renderer is available")
+    widget.grab()
+
+    assert widget._gpu_view is None
+    # The frame the view never drew still gets reported once painted here.
+    assert widget._worker.frames_consumed == 1
+
+
+def test_gpu_view_vertices_follow_the_letterbox_rect():
+    import struct
+
+    from it_toolbox.widgets import rdp_gpu_view
+
+    class _View:
+        _target_rect = staticmethod(lambda: QRect(0, 25, 100, 50))
+
+        def width(self):
+            return 100
+
+        def height(self):
+            return 100
+
+    class _Rhi:
+        def __init__(self, y_up):
+            self._y_up = y_up
+
+        def isYUpInNDC(self):  # noqa: N802
+            return self._y_up
+
+    for y_up, top in ((True, 0.5), (False, -0.5)):
+        values = struct.unpack("16f", rdp_gpu_view.RdpGpuView._vertices(_View(), _Rhi(y_up)))
+        # top-left vertex: x, y, u, v
+        assert values[0:4] == (-1.0, top, 0.0, 0.0)
+        # bottom-right vertex
+        assert values[12:16] == (1.0, -top, 1.0, 1.0)
+
+
+def test_software_opengl_renderers_are_not_used(monkeypatch):
+    from it_toolbox.widgets import rdp_gpu_view
+
+    for name in ("llvmpipe (LLVM 22.1.8, 256 bits)", "Microsoft Basic Render Driver", "SwiftShader Device"):
+        assert rdp_gpu_view._SOFTWARE_RENDERERS.search(name)
+    for name in ("NVIDIA GeForce RTX 4070/PCIe/SSE2", "Apple M2", "AMD Radeon Graphics (radeonsi, gfx1103)"):
+        assert not rdp_gpu_view._SOFTWARE_RENDERERS.search(name)
