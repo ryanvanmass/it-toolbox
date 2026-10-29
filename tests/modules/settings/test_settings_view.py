@@ -199,6 +199,7 @@ def test_modules_section_lists_every_module_but_settings_checked_by_default(qtbo
         "cloud_storage",
         "general_tools",
         "cockpit",
+        "infrastructure",
         "identity_management",
     ]
     assert all(checkbox.isChecked() for checkbox in view._module_checkboxes.values())

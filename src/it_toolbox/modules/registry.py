@@ -9,6 +9,7 @@ from it_toolbox.modules.cockpit.module import CockpitModule
 from it_toolbox.modules.connection_manager.module import ConnectionManagerModule
 from it_toolbox.modules.general_tools.module import GeneralToolsModule
 from it_toolbox.modules.identity_management.module import IdentityManagementModule
+from it_toolbox.modules.infrastructure.module import InfrastructureModule
 from it_toolbox.modules.settings.module import SettingsModule
 from it_toolbox.modules.shell_launcher.module import ShellLauncherModule
 
@@ -21,6 +22,7 @@ OPTIONAL_MODULES: list[type[ToolModule]] = [
     CloudStorageModule,
     GeneralToolsModule,
     CockpitModule,
+    InfrastructureModule,
     IdentityManagementModule,
 ]
 
@@ -47,6 +49,7 @@ def load_modules(tabs: QTabWidget) -> list[ToolModule]:
         (CloudStorageModule, lambda: CloudStorageModule(tabs)),
         (GeneralToolsModule, lambda: GeneralToolsModule(tabs)),
         (CockpitModule, lambda: CockpitModule(tabs)),
+        (InfrastructureModule, lambda: InfrastructureModule(tabs)),
         (IdentityManagementModule, IdentityManagementModule),
     ]
     modules = [create() for module_class, create in candidates if module_class.id not in disabled]

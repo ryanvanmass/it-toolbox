@@ -760,6 +760,57 @@ def save_glinet_hosts(hosts: list[dict]) -> None:
     glinet_hosts_path().write_text(json.dumps(hosts))
 
 
+def infrastructure_hosts_path(product: str) -> Path:
+    """One file per Infrastructure product, e.g. proxmox_hosts.json."""
+    return data_dir() / f"{product}_hosts.json"
+
+
+def load_infrastructure_hosts(product: str) -> list[dict]:
+    """Registered hosts for one Infrastructure product (Proxmox, TrueNAS,
+    PBS), as raw dicts -- same shape and reasoning as load_glinet_hosts:
+    "secret_encrypted" stays a base64 str, never decrypted here.
+    """
+    path = infrastructure_hosts_path(product)
+    if not path.is_file():
+        return []
+    try:
+        hosts = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    return hosts if isinstance(hosts, list) else []
+
+
+def save_infrastructure_hosts(product: str, hosts: list[dict]) -> None:
+    infrastructure_hosts_path(product).write_text(json.dumps(hosts))
+
+
+def resolve_infrastructure_ssh_key_path() -> Path | None:
+    """Infrastructure API tokens/keys use the same default SSH key
+    resolution as GL.iNet -- a separate wrapper only as a test seam."""
+    return default_ssh_key_path()
+
+
+def encrypt_infrastructure_secret(secret: str) -> bytes:
+    """Raises SecretDecryptionError if no SSH key (or matching .pub) is found."""
+    key_path = resolve_infrastructure_ssh_key_path()
+    if key_path is None:
+        raise SecretDecryptionError(
+            "No SSH key found to encrypt the API token with "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _encrypt_secret(secret, key_path)
+
+
+def decrypt_infrastructure_secret(encrypted: bytes, passphrase: str | None = None) -> str:
+    key_path = resolve_infrastructure_ssh_key_path()
+    if key_path is None or not key_path.is_file():
+        raise SecretDecryptionError(
+            "No SSH private key found to decrypt the stored API token "
+            "(checked ~/.ssh/id_ed25519, ~/.ssh/id_rsa)."
+        )
+    return _decrypt_secret(encrypted, key_path, passphrase)
+
+
 def include_prerelease_updates_path() -> Path:
     return data_dir() / "include_prerelease_updates.txt"
 
