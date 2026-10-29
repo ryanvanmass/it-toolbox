@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -1286,6 +1287,17 @@ class HostingManagerWidget(RemoteHelperTab):
         self.site_table.itemSelectionChanged.connect(self._on_site_selected)
         self.site_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.site_table.customContextMenuRequested.connect(self._sites_menu)
+        # The list only needs to pick a site: Site user and App are on the
+        # site's own page (still matched by the filter), and the SSL column
+        # takes what's left, eliding with the full text as a tooltip,
+        # rather than every column running off the pane's right edge.
+        header = self.site_table.horizontalHeader()
+        for column in ("Site user", "App"):
+            self.site_table.setColumnHidden(self.SITE_COLUMNS.index(column), True)
+        for column in ("Domain", "Type"):
+            header.setSectionResizeMode(self.SITE_COLUMNS.index(column), QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(self.SITE_COLUMNS.index("SSL"), QHeaderView.ResizeMode.Stretch)
+        self.site_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -1298,13 +1310,15 @@ class HostingManagerWidget(RemoteHelperTab):
         left_layout.addWidget(self.import_note)
         left_layout.addWidget(self.filter)
         left_layout.addWidget(self.site_table, 1)
+        # Never narrower than the button row above the list.
+        left.setMinimumWidth(left_layout.itemAt(0).sizeHint().width())
         self.detail = SiteDetail(self)
         self.detail.clear()
         splitter = QSplitter()
         splitter.addWidget(left)
         splitter.addWidget(self.detail)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([420, 880])
+        splitter.setSizes([460, 840])
         layout = QVBoxLayout(page)
         layout.addWidget(splitter)
         return page
@@ -1322,6 +1336,7 @@ class HostingManagerWidget(RemoteHelperTab):
         self.sites = sites
         self.site_table.blockSignals(True)
         fill_table(self.site_table, [self._site_row(site) for site in sites], [site["name"] for site in sites])
+        self._set_site_tooltips()
         self.site_table.blockSignals(False)
         self._filter_sites()
         names = [site["name"] for site in sites]
@@ -1335,7 +1350,14 @@ class HostingManagerWidget(RemoteHelperTab):
             if self.site_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == site["name"]:
                 for column, value in enumerate(self._site_row(site)):
                     self.site_table.item(row, column).setText(str(value))
+        self._set_site_tooltips()
         self.sites = [site if s["name"] == site["name"] else s for s in self.sites]
+
+    def _set_site_tooltips(self) -> None:
+        for row in range(self.site_table.rowCount()):
+            for column in range(self.site_table.columnCount()):
+                item = self.site_table.item(row, column)
+                item.setToolTip(item.text())
 
     def _filter_sites(self) -> None:
         needle = self.filter.text().strip().lower()
