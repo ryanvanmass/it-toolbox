@@ -18,9 +18,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QObject, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPalette, QPixmap
-from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtCore import QBuffer, QByteArray, QObject, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QImageReader, QPalette, QPixmap
 from PySide6.QtWidgets import QApplication
 
 _ICON_DIR = Path(__file__).resolve().parent.parent / "resources" / "icons" / "ui"
@@ -123,13 +122,14 @@ def icon(name: str, color_name: str = "text", size: int = 64) -> QIcon:
         (QIcon.Mode.Disabled, _current.muted),
     ):
         # Rendered straight at `size` (not rasterized at the SVG's own
-        # 24px and scaled up), so it stays crisp on HiDPI screens.
-        renderer = QSvgRenderer(QByteArray(svg.replace("currentColor", tint).encode()))
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        renderer.render(painter)
-        painter.end()
+        # 24px and scaled up), so it stays crisp on HiDPI screens. Goes
+        # through the qsvg image plugin rather than the QtSvg module, which
+        # the macOS build prunes.
+        data = QBuffer()
+        data.setData(QByteArray(svg.replace("currentColor", tint).encode()))
+        reader = QImageReader(data, QByteArray(b"svg"))
+        reader.setScaledSize(QSize(size, size))
+        pixmap = QPixmap.fromImage(reader.read())
         result.addPixmap(pixmap, mode)
     return result
 
