@@ -83,6 +83,7 @@ class RdpWidget(QWidget):
         keyboard_layout: int = KEYBOARD_LAYOUT_ENGLISH_US,
         shared_folder: str | None = None,
         graphics_pipeline: bool = False,
+        h264: bool = False,
         gpu_rendering: bool = True,
         failure_detail: Callable[[], str | None] | None = None,
         parent: QWidget | None = None,
@@ -148,6 +149,7 @@ class RdpWidget(QWidget):
             keyboard_layout,
             shared_folder,
             graphics_pipeline,
+            h264,
         )
         self._worker.signals.frame_ready.connect(self._on_frame_ready)
         self._worker.signals.connected.connect(self._on_connected)

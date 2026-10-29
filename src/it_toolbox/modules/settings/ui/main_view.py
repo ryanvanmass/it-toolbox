@@ -1271,6 +1271,21 @@ class SettingsView(QWidget):
         )
         layout.addWidget(self._rdp_graphics_pipeline_checkbox)
 
+        # Indented under the graphics pipeline, which it needs.
+        self._rdp_h264_checkbox = QCheckBox("Also use H.264 video when this computer can decode it")
+        self._rdp_h264_checkbox.setToolTip(
+            "Lets the server send the desktop as H.264 video: far less bandwidth for video "
+            "and scrolling, and decoded on the graphics card where the installed FreeRDP "
+            "supports it. Only offered after a quick check that decoding actually works here."
+        )
+        self._rdp_h264_checkbox.setChecked(settings.load_rdp_h264())
+        self._rdp_h264_checkbox.setEnabled(self._rdp_graphics_pipeline_checkbox.isChecked())
+        self._rdp_h264_checkbox.checkStateChanged.connect(self._on_rdp_h264_changed)
+        h264_row = QHBoxLayout()
+        h264_row.addSpacing(20)
+        h264_row.addWidget(self._rdp_h264_checkbox)
+        layout.addLayout(h264_row)
+
         self._rdp_gpu_rendering_checkbox = QCheckBox(
             "Draw sessions with the GPU (applies to new sessions)"
         )
@@ -1286,6 +1301,10 @@ class SettingsView(QWidget):
 
     def _on_rdp_graphics_pipeline_changed(self) -> None:
         settings.save_rdp_graphics_pipeline(self._rdp_graphics_pipeline_checkbox.isChecked())
+        self._rdp_h264_checkbox.setEnabled(self._rdp_graphics_pipeline_checkbox.isChecked())
+
+    def _on_rdp_h264_changed(self) -> None:
+        settings.save_rdp_h264(self._rdp_h264_checkbox.isChecked())
 
     def _on_rdp_gpu_rendering_changed(self) -> None:
         settings.save_rdp_gpu_rendering(self._rdp_gpu_rendering_checkbox.isChecked())
