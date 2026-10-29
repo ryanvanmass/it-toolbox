@@ -1,9 +1,20 @@
 # GL.iNet router dashboard — status and setup
 
-Connection Manager's third connection family (alongside GCP and QEMU/
-libvirt): manually-registered GL.iNet travel routers, each opening a
+A product in the Infrastructure module (`modules/infrastructure/glinet.py`;
+it was a Connection Manager root until the Infrastructure module
+arrived): manually-registered GL.iNet travel routers, each opening a
 management dashboard tab (Overview/Clients/WiFi/VPN status/Reboot)
 instead of a terminal or pixel-streamed session.
+
+Hosts are added with the module's shared host dialog (URL, username,
+password, certificate fingerprint) and kept in `glinet_hosts.json` --
+the same file Connection Manager used. The first start after the move
+rewrites Connection Manager-era entries into the shared host shape
+(`username` -> `token_id`, `password_encrypted` -> `secret_encrypted`,
+the `/rpc` suffix dropped from the URL); the encrypted password itself
+is unchanged. python-glinet does its own HTTPS, so the dashboard's calls
+use its `verify_ssl` setting rather than the module's pinned
+fingerprint, as before the move.
 
 ## Why `python-glinet` isn't bundled
 

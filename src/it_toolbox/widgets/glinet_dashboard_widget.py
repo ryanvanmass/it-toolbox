@@ -105,6 +105,10 @@ class GlinetDashboardWidget(QWidget):
         self._reload_wifi()
         self._reload_vpn()
 
+    def close_session(self) -> None:
+        """Infrastructure tab hook. Nothing to close: every call opens and
+        closes its own GlInet session."""
+
     # -- Overview -----------------------------------------------------------
 
     def _build_overview_tab(self) -> QWidget:
