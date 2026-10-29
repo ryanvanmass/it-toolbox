@@ -451,6 +451,23 @@ def test_default_double_click_action_ignores_a_malformed_file(monkeypatch, tmp_p
     assert settings.load_default_double_click_action() == "ask"
 
 
+def test_appearance_defaults_to_system(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    assert settings.load_appearance() == "system"
+
+
+def test_save_and_load_appearance(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.save_appearance("dark")
+    assert settings.load_appearance() == "dark"
+
+
+def test_appearance_ignores_a_malformed_file(monkeypatch, tmp_path):
+    _use_tmp_data_dir(monkeypatch, tmp_path)
+    settings.appearance_path().write_text("purple")
+    assert settings.load_appearance() == "system"
+
+
 def test_include_prerelease_updates_defaults_to_false(monkeypatch, tmp_path):
     _use_tmp_data_dir(monkeypatch, tmp_path)
     assert settings.load_include_prerelease_updates() is False

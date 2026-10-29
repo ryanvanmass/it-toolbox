@@ -7,6 +7,8 @@ from it_toolbox.modules.shell_launcher.ui.main_view import ShellLauncherView
 class ShellLauncherModule(ToolModule):
     id = "shell_launcher"
     display_name = "Shell Launcher"
+    icon_name = "square-terminal"
+    empty_hint = "Double-click a shell in the sidebar to open a terminal."
 
     def __init__(self, tabs: QTabWidget) -> None:
         self._tabs = tabs

@@ -68,6 +68,7 @@ from it_toolbox.modules.connection_manager import (
     qemu_provisioning,
 )
 from it_toolbox.modules.identity_management.ui.api_key_dialog import ApiKeyDialog
+from it_toolbox.ui import theme
 from it_toolbox.widgets.manage_automations_dialog import Automation, ManageAutomationsDialog
 from it_toolbox.widgets.rclone_location_picker import (
     clear_rclone_path,
@@ -139,6 +140,12 @@ RDP_RESOLUTION_PRESETS: list[tuple[str, tuple[int, int] | None]] = [
 # (dropdown label, stored value) — see
 # settings.load_default_double_click_action()'s docstring for exactly
 # when this is consulted.
+APPEARANCE_PRESETS: list[tuple[str, str]] = [
+    ("Match system", "system"),
+    ("Light", "light"),
+    ("Dark", "dark"),
+]
+
 DOUBLE_CLICK_ACTION_PRESETS: list[tuple[str, str]] = [
     ("Ask each time", "ask"),
     ("RDP", "rdp"),
@@ -197,6 +204,7 @@ class SettingsView(QWidget):
                 "General",
                 [
                     self._build_updates_section(),
+                    self._build_appearance_section(),
                     self._build_modules_section(),
                     self._build_double_click_action_section(),
                     self._build_backup_section(),
@@ -1546,6 +1554,36 @@ class SettingsView(QWidget):
     def _on_double_click_action_changed(self, index: int) -> None:
         _, action = DOUBLE_CLICK_ACTION_PRESETS[index]
         settings.save_default_double_click_action(action)
+
+    def _build_appearance_section(self) -> QGroupBox:
+        box = QGroupBox("Appearance")
+        layout = QVBoxLayout(box)
+
+        description = QLabel(
+            "Light or dark theme. Match system follows your OS setting, "
+            "including when it changes while the app is open."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self._appearance_combo = QComboBox()
+        for label, _ in APPEARANCE_PRESETS:
+            self._appearance_combo.addItem(label)
+        current = settings.load_appearance()
+        for index, (_, value) in enumerate(APPEARANCE_PRESETS):
+            if value == current:
+                self._appearance_combo.setCurrentIndex(index)
+                break
+        self._appearance_combo.currentIndexChanged.connect(self._on_appearance_changed)
+        layout.addWidget(self._appearance_combo)
+        return box
+
+    def _on_appearance_changed(self, index: int) -> None:
+        _, mode = APPEARANCE_PRESETS[index]
+        settings.save_appearance(mode)
+        # Applies immediately -- unlike module toggles, nothing has to be
+        # rebuilt, only restyled.
+        theme.apply(QApplication.instance(), mode)
 
     # -- FreeRDP (Windows) ------------------------------------------------
 

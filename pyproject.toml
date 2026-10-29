@@ -53,4 +53,5 @@ where = ["src"]
 # here, so it must ship in the wheel too (the Windows installer has no
 # repo checkout to fall back on).
 # shaders/*.qsb: the RDP GPU view's precompiled shaders (widgets/rdp_gpu_view.py).
-"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "icons/*.icns", "scripts/*.ps1", "proftpd/*", "shaders/*.qsb"]
+"it_toolbox.resources" = ["icons/*.ico", "icons/*.svg", "icons/*.icns", "icons/ui/*.svg", "scripts/*.ps1", "proftpd/*",
+                          "shaders/*.qsb"]

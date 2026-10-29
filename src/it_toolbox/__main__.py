@@ -5,6 +5,8 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from it_toolbox.app import MainWindow
+from it_toolbox.core import settings
+from it_toolbox.ui import theme
 
 
 def main() -> int:
@@ -32,6 +34,8 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("IT Toolbox")
     app.setOrganizationName("IT Toolbox")
+    # Before any window exists, so everything is built already styled.
+    theme.apply(app, settings.load_appearance())
 
     window = MainWindow()
     window.show()

@@ -28,6 +28,9 @@ class _FakeWindow:
 def _patch_qt(monkeypatch):
     monkeypatch.setattr(main_module, "QApplication", _FakeApp)
     monkeypatch.setattr(main_module, "MainWindow", lambda: _FakeWindow())
+    # Theming needs a real QApplication; it has its own tests.
+    monkeypatch.setattr(main_module.theme, "apply", lambda app, mode: None)
+    monkeypatch.setattr(main_module.settings, "load_appearance", lambda: "system")
 
 
 def test_main_does_not_configure_logging_by_default(monkeypatch):

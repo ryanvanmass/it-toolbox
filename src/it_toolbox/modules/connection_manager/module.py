@@ -7,6 +7,8 @@ from it_toolbox.modules.connection_manager.ui.main_view import ConnectionManager
 class ConnectionManagerModule(ToolModule):
     id = "connection_manager"
     display_name = "Connection Manager"
+    icon_name = "monitor-smartphone"
+    empty_hint = "Double-click a connection or VM in the sidebar to open a session."
 
     def __init__(self, tabs: QTabWidget) -> None:
         self._tabs = tabs

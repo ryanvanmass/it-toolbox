@@ -46,6 +46,7 @@ def _make_view(
     rdp_shared_folder="/home/alice/Downloads",
     terminal_font_size=None,
     default_double_click_action="ask",
+    appearance="system",
     jumpcloud_key_configured=False,
     gcp_ssh_key_override=None,
     gcp_ssh_public_key=None,
@@ -71,6 +72,7 @@ def _make_view(
     monkeypatch.setattr(
         settings, "load_default_double_click_action", lambda: default_double_click_action
     )
+    monkeypatch.setattr(settings, "load_appearance", lambda: appearance)
     monkeypatch.setattr(
         settings, "jumpcloud_api_key_path", lambda: _FakePath(jumpcloud_key_configured)
     )
@@ -1406,3 +1408,22 @@ def test_rdp_shared_folder_choosing_a_folder_saves_and_enables_it(qtbot, monkeyp
     assert saved == ["/srv/transfer"]
     assert view._rdp_share_checkbox.isChecked() is True
     assert view._rdp_shared_folder_label.text() == "/srv/transfer"
+
+
+def test_appearance_section_preselects_the_saved_mode(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch, appearance="dark")
+
+    assert view._appearance_combo.currentText() == "Dark"
+
+
+def test_changing_appearance_saves_and_applies_it(qtbot, monkeypatch):
+    view = _make_view(qtbot, monkeypatch)
+    saved = []
+    applied = []
+    monkeypatch.setattr(settings, "save_appearance", lambda value: saved.append(value))
+    monkeypatch.setattr(settings_main_view.theme, "apply", lambda app, mode: applied.append(mode))
+
+    view._appearance_combo.setCurrentText("Light")
+
+    assert saved == ["light"]
+    assert applied == ["light"]

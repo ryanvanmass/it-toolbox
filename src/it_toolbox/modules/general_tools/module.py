@@ -7,6 +7,8 @@ from it_toolbox.modules.general_tools.ui.main_view import GeneralToolsView
 class GeneralToolsModule(ToolModule):
     id = "general_tools"
     display_name = "General Tools"
+    icon_name = "wrench"
+    empty_hint = "Pick a tool in the sidebar to get started."
 
     def __init__(self, tabs: QTabWidget) -> None:
         self._tabs = tabs
